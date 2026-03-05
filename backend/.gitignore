@@ -1,0 +1,57 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+.Python
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+venv/
+.venv/
+env/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage/
+coverage.xml
+*.manifest
+
+# Type checking / linting
+.mypy_cache/
+.ruff_cache/
+pyrightconfig.json
+
+# Logs and output
+logs/
+output/
+snaps/
+uploads/
+test.png
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs
+*.md

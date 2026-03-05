@@ -1,0 +1,10 @@
+flask
+flask-cors
+python-dotenv
+opencv-contrib-python-headless
+pillow
+numpy
+ultralytics
+insightface
+onnxruntime
+twelvelabs

@@ -1,0 +1,2 @@
+backend/yolov8x.pt filter=lfs diff=lfs merge=lfs -text
+backend/yolov8n.pt filter=lfs diff=lfs merge=lfs -text
