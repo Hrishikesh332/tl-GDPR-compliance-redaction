@@ -1,0 +1,159 @@
+import { useState, useEffect, useRef } from 'react'
+import { BrowserRouter, Routes, Route, NavLink, Link, useLocation } from 'react-router-dom'
+import Dashboard from './pages/Dashboard'
+import OverviewPage from './pages/OverviewPage'
+import EditorPage from './pages/EditorPage'
+import VideoEditorPage from './pages/VideoEditorPage'
+import UploadVideosModal from './components/UploadVideosModal'
+import { VideoCacheProvider } from './contexts/VideoCache'
+import logoMarkUrl from '../strand/assets/logo-mark.svg?url'
+
+const navItems = [
+  { to: '/dashboard', label: 'Dashboard' },
+  { to: '/overview', label: 'Overview' },
+  { to: '/editor', label: 'Editor' },
+]
+
+function NavLinks({ mobile = false, onNavigate }: { mobile?: boolean; onNavigate?: () => void }) {
+  const base = 'font-brand-xbold px-3 py-2 rounded-lg text-sm font-medium transition-colors border'
+  const active = 'text-text-primary bg-card border-border'
+  const inactive = 'border-transparent text-text-secondary hover:bg-card hover:text-text-primary'
+  const linkClass = ({ isActive }: { isActive: boolean }) =>
+    `${base} ${isActive ? active : inactive} ${mobile ? 'block w-full text-left' : ''}`
+
+  return (
+    <>
+      {navItems.map((item) => (
+        <NavLink
+          key={item.to}
+          to={item.to}
+          end
+          className={linkClass}
+          onClick={onNavigate}
+        >
+          {item.label}
+        </NavLink>
+      ))}
+    </>
+  )
+}
+
+function Shell() {
+  const [uploadModalOpen, setUploadModalOpen] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const location = useLocation()
+
+  useEffect(() => {
+    setMobileMenuOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMobileMenuOpen(false)
+      }
+    }
+    if (mobileMenuOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+      document.body.style.overflow = 'hidden'
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.body.style.overflow = ''
+    }
+  }, [mobileMenuOpen])
+
+  return (
+    <div className="min-h-screen bg-background text-text-primary flex flex-col">
+      <div className="relative" ref={menuRef}>
+        <header className="bg-background px-4 py-3 flex items-center justify-between shrink-0 border-b border-border">
+          <div className="flex items-center gap-3 min-w-0 flex-1 md:flex-initial">
+            <div className="flex items-center gap-2 mr-2 md:mr-6 min-w-0">
+              <Link
+                to="/dashboard"
+                className="font-brand text-text-primary hover:opacity-80 transition-opacity cursor-pointer shrink-0 text-left bg-transparent border-0 p-0 no-underline block"
+                aria-label="Go to Dashboard"
+              >
+                <h1 className="text-base md:text-h5 font-medium truncate">GDPR Compliance [Video REDACTION]</h1>
+              </Link>
+              <span className="hidden sm:inline-flex items-center px-2 py-1 rounded-sm border border-border bg-transparent text-text-secondary text-xs font-medium shrink-0 uppercase tracking-wide pointer-events-none select-none">
+                SAMPLE APP
+              </span>
+            </div>
+
+            <nav className="hidden md:flex items-center gap-0.5">
+              <NavLinks />
+            </nav>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setMobileMenuOpen((o) => !o)}
+            className={`md:hidden p-2 rounded-lg text-text-primary hover:bg-card border transition-colors ${
+              mobileMenuOpen ? 'border-border bg-card' : 'border-transparent'
+            }`}
+            aria-expanded={mobileMenuOpen}
+            aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
+          >
+            {mobileMenuOpen ? (
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            ) : (
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            )}
+          </button>
+
+          <div className={`flex items-center gap-2 shrink-0 ${mobileMenuOpen ? 'max-md:hidden' : ''}`}>
+            <img src={logoMarkUrl} alt="" className="h-7 w-auto" />
+          </div>
+        </header>
+
+        <div
+          className={`md:hidden absolute left-0 right-0 top-full z-50 bg-background border-b border-border shadow-lg transition-all duration-200 ease-out ${
+            mobileMenuOpen ? 'opacity-100 visible' : 'opacity-0 invisible pointer-events-none'
+          }`}
+        >
+          <nav className="flex flex-col p-3 gap-1">
+            <NavLinks mobile onNavigate={() => setMobileMenuOpen(false)} />
+          </nav>
+        </div>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+        <main className="flex-1 overflow-auto min-w-0" key={location.pathname}>
+          <Routes location={location}>
+            <Route path="/" element={<OverviewPage />} />
+            <Route
+              path="/dashboard"
+              element={
+                <div className="w-full min-w-0 px-3 sm:px-4 py-4 sm:py-6">
+                  <Dashboard onOpenUpload={() => setUploadModalOpen(true)} />
+                </div>
+              }
+            />
+            <Route path="/overview" element={<OverviewPage />} />
+            <Route path="/editor" element={<EditorPage />} />
+            <Route path="/video/:videoId" element={<VideoEditorPage />} />
+          </Routes>
+        </main>
+      </div>
+      <UploadVideosModal open={uploadModalOpen} onClose={() => setUploadModalOpen(false)} />
+    </div>
+  )
+}
+
+function App() {
+  return (
+    <BrowserRouter>
+      <VideoCacheProvider>
+        <Shell />
+      </VideoCacheProvider>
+    </BrowserRouter>
+  )
+}
+
+export default App
