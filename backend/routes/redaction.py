@@ -3,11 +3,24 @@ import logging
 
 from flask import Blueprint, request, jsonify
 
-from services.pipeline import run_redaction, get_job
+from services.detection import ObjectDetectionUnavailable
+from services.pipeline import run_redaction, preview_redaction_tracks, get_job
 
 logger = logging.getLogger("video_redaction.routes.redaction")
 
 redaction_bp = Blueprint("redaction", __name__)
+
+
+def _parse_custom_regions(data):
+    custom_regions = data.get("custom_regions")
+    if custom_regions is None and request.form.get("custom_regions"):
+        try:
+            custom_regions = json.loads(request.form.get("custom_regions"))
+        except (TypeError, json.JSONDecodeError):
+            custom_regions = []
+    if not isinstance(custom_regions, list):
+        custom_regions = []
+    return custom_regions
 
 
 @redaction_bp.route("/redact", methods=["POST"])
@@ -96,37 +109,34 @@ def redact():
             except json.JSONDecodeError:
                 entity_ids = [s.strip() for s in raw_entities.split(",") if s.strip()]
 
-    custom_regions = data.get("custom_regions")
-    if custom_regions is None and request.form.get("custom_regions"):
-        try:
-            custom_regions = json.loads(request.form.get("custom_regions"))
-        except (TypeError, json.JSONDecodeError):
-            custom_regions = []
-    if not isinstance(custom_regions, list):
-        custom_regions = []
+    custom_regions = _parse_custom_regions(data)
 
     total_targets = (len(face_encodings) if face_encodings else 0) + (len(object_classes) if object_classes else 0) + len(custom_regions)
     if total_targets == 0 and not entity_ids:
         return jsonify({"error": "No targets selected. Provide person_ids, face_encodings, object_classes, entity_ids, or custom_regions (drawn regions with motion tracking)."}), 400
 
-    logger.info("Redacting job %s: %d face encodings (person_ids=%s), %s object classes, %s entity_ids",
+    logger.info("Redacting job %s: %d face encodings (person_ids=%s), %s object classes, %s entity_ids, %d custom_regions",
                 job_id,
                 len(face_encodings) if face_encodings else 0,
                 person_ids or "none",
                 object_classes or "none",
-                len(entity_ids) if entity_ids else 0)
+                len(entity_ids) if entity_ids else 0,
+                len(custom_regions))
 
-    result = run_redaction(
-        job_id=job_id,
-        face_encodings=face_encodings,
-        object_classes=object_classes,
-        entity_ids=entity_ids,
-        custom_regions=custom_regions,
-        blur_strength=blur_strength,
-        detect_every_n=detect_every_n,
-        detect_every_seconds=detect_every_seconds,
-        use_temporal_optimization=use_temporal,
-    )
+    try:
+        result = run_redaction(
+            job_id=job_id,
+            face_encodings=face_encodings,
+            object_classes=object_classes,
+            entity_ids=entity_ids,
+            custom_regions=custom_regions,
+            blur_strength=blur_strength,
+            detect_every_n=detect_every_n,
+            detect_every_seconds=detect_every_seconds,
+            use_temporal_optimization=use_temporal,
+        )
+    except ObjectDetectionUnavailable as e:
+        return jsonify({"error": str(e)}), 503
 
     return jsonify({
         "output_path": result["output_path"],
@@ -139,3 +149,39 @@ def redact():
         "temporal_ranges_from_entity_search": result.get("temporal_ranges_from_entity_search", 0),
         "person_ids_used": person_ids or [],
     })
+
+
+@redaction_bp.route("/redact/preview-track", methods=["POST"])
+def preview_track():
+    data = request.get_json(silent=True) or {}
+
+    job_id = data.get("job_id") or request.form.get("job_id")
+    if not job_id:
+        return jsonify({"error": "job_id is required"}), 400
+
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "job not found"}), 404
+
+    if job["status"] != "ready":
+        return jsonify({
+            "error": "job is not ready for preview tracking",
+            "status": job["status"],
+        }), 409
+
+    custom_regions = _parse_custom_regions(data)
+    if not custom_regions:
+        return jsonify({"error": "Provide at least one custom region for preview tracking."}), 400
+
+    try:
+        preview_fps = float(data.get("preview_fps", request.form.get("preview_fps", 8)))
+    except (TypeError, ValueError):
+        preview_fps = 8.0
+
+    logger.info("Preview tracking job %s: %d custom_regions at %.2f fps", job_id, len(custom_regions), preview_fps)
+    try:
+        result = preview_redaction_tracks(job_id=job_id, custom_regions=custom_regions, preview_fps=preview_fps)
+        return jsonify(result)
+    except Exception as e:
+        logger.error("Preview tracking failed for job %s: %s", job_id, str(e), exc_info=True)
+        return jsonify({"error": str(e)}), 500

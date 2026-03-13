@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useRef, useEffect, useCallback, useMemo, useLayoutEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import Hls from 'hls.js'
@@ -69,6 +69,13 @@ function withTimestampLinks(children: React.ReactNode, onSeek: (seconds: number)
 
 type ToolId = 'tracker' | 'search-list' | 'captions'
 
+type VideoViewport = {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
 /** Tracking region in normalized coords (0–1) relative to video viewport */
 export type TrackingRegion = {
   id: string
@@ -78,35 +85,205 @@ export type TrackingRegion = {
   width: number
   height: number
   effect: 'blur' | 'pixelate' | 'solid'
+  anchorTime?: number
   reason?: string
   locked?: boolean
 }
 
+type TrackingPreviewSample = {
+  t: number
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+type TrackingPreviewRegion = {
+  id: string
+  samples: TrackingPreviewSample[]
+}
+
 const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
-  { id: 'tracker', label: 'Tracker', iconUrl: visionIconUrl },
+  { id: 'tracker', label: 'Live Blur', iconUrl: visionIconUrl },
   { id: 'search-list', label: 'Detection', iconUrl: searchV2IconUrl },
   { id: 'captions', label: 'Analyze/Transcript', iconUrl: analyzeIconUrl },
 ]
 
 const DEFAULT_DETECTION_JOB_ID = '0456d15f-f83'
+const LIVE_DETECTION_POLL_MS = 200
+const LIVE_DETECTION_HOLD_MS = 220
+const LIVE_FACE_PADDING = 0.28
+const LIVE_OBJECT_PADDING = 0.08
+const LIVE_DETECTION_SMOOTHING = 0.72
+const LIVE_REDACTION_OBJECT_CLASSES = [
+  'backpack',
+  'bicycle',
+  'bus',
+  'car',
+  'cell phone',
+  'gun',
+  'handbag',
+  'knife',
+  'laptop',
+  'motorcycle',
+  'scissors',
+  'suitcase',
+  'truck',
+]
 
 type DetectionItem = {
   id: string
+  kind: 'face' | 'object'
   label: string
   tags: string[]
   color: string
   snapBase64?: string
+  personId?: string
+  objectClass?: string
+}
+
+type LiveRedactionDetection = {
+  id: string
+  kind: 'face' | 'object'
+  label: string
+  confidence: number
+  personId?: string | null
+  objectClass?: string | null
+  x: number
+  y: number
+  width: number
+  height: number
+  sourceTime?: number
+  lastSeenAtMs?: number
+}
+
+function clampUnit(value: number): number {
+  return Math.max(0, Math.min(1, value))
+}
+
+function expandLiveDetection(detection: LiveRedactionDetection): LiveRedactionDetection {
+  const padding = detection.kind === 'face' ? LIVE_FACE_PADDING : LIVE_OBJECT_PADDING
+  const cx = detection.x + detection.width / 2
+  const cy = detection.y + detection.height / 2
+  const width = clampUnit(detection.width * (1 + padding * 2))
+  const height = clampUnit(detection.height * (1 + padding * 2))
+  return {
+    ...detection,
+    x: clampUnit(cx - width / 2),
+    y: clampUnit(cy - height / 2),
+    width: Math.min(width, 1),
+    height: Math.min(height, 1),
+  }
+}
+
+function liveDetectionIou(a: LiveRedactionDetection, b: LiveRedactionDetection): number {
+  const ax2 = a.x + a.width
+  const ay2 = a.y + a.height
+  const bx2 = b.x + b.width
+  const by2 = b.y + b.height
+  const ix1 = Math.max(a.x, b.x)
+  const iy1 = Math.max(a.y, b.y)
+  const ix2 = Math.min(ax2, bx2)
+  const iy2 = Math.min(ay2, by2)
+  const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1)
+  const union = a.width * a.height + b.width * b.height - inter
+  return union > 0 ? inter / union : 0
+}
+
+function liveDetectionCenterDistance(a: LiveRedactionDetection, b: LiveRedactionDetection): number {
+  const ax = a.x + a.width / 2
+  const ay = a.y + a.height / 2
+  const bx = b.x + b.width / 2
+  const by = b.y + b.height / 2
+  return Math.hypot(ax - bx, ay - by)
+}
+
+function smoothLiveDetection(previous: LiveRedactionDetection, next: LiveRedactionDetection): LiveRedactionDetection {
+  const alpha = LIVE_DETECTION_SMOOTHING
+  return {
+    ...next,
+    x: previous.x * (1 - alpha) + next.x * alpha,
+    y: previous.y * (1 - alpha) + next.y * alpha,
+    width: previous.width * (1 - alpha) + next.width * alpha,
+    height: previous.height * (1 - alpha) + next.height * alpha,
+  }
+}
+
+function stabilizeLiveDetections(
+  previous: LiveRedactionDetection[],
+  incoming: LiveRedactionDetection[],
+  sourceTime: number,
+): LiveRedactionDetection[] {
+  const now = Date.now()
+  const prepared = incoming.map((detection) => expandLiveDetection({
+    ...detection,
+    sourceTime,
+    lastSeenAtMs: now,
+  }))
+  const next: LiveRedactionDetection[] = []
+  const used = new Set<number>()
+
+  for (const previousDetection of previous) {
+    let bestIdx = -1
+    let bestScore = -1e9
+
+    for (let idx = 0; idx < prepared.length; idx += 1) {
+      if (used.has(idx) || prepared[idx].kind !== previousDetection.kind) continue
+      if (prepared[idx].kind === 'object' && prepared[idx].label !== previousDetection.label) continue
+      if (
+        prepared[idx].kind === 'face' &&
+        previousDetection.label !== 'Face' &&
+        prepared[idx].label !== 'Face' &&
+        prepared[idx].label !== previousDetection.label
+      ) {
+        continue
+      }
+      const iou = liveDetectionIou(previousDetection, prepared[idx])
+      const distance = liveDetectionCenterDistance(previousDetection, prepared[idx])
+      const maxDistance = prepared[idx].kind === 'face' ? 0.16 : 0.22
+      if (iou < 0.05 && distance > maxDistance) continue
+      const score = iou * 4 - distance
+      if (score > bestScore) {
+        bestScore = score
+        bestIdx = idx
+      }
+    }
+
+    if (bestIdx >= 0) {
+      used.add(bestIdx)
+      next.push(smoothLiveDetection(previousDetection, prepared[bestIdx]))
+      continue
+    }
+
+    if (now - (previousDetection.lastSeenAtMs ?? now) <= LIVE_DETECTION_HOLD_MS) {
+      next.push(previousDetection)
+    }
+  }
+
+  for (let idx = 0; idx < prepared.length; idx += 1) {
+    if (!used.has(idx)) {
+      next.push(prepared[idx])
+    }
+  }
+
+  return next
+}
+
+function getSelectionIdForLiveDetection(detection: LiveRedactionDetection): string | null {
+  if (detection.kind === 'face' && detection.personId) {
+    return `face-${detection.personId}`
+  }
+  if (detection.kind === 'object' && detection.objectClass) {
+    return `object-${detection.objectClass}`
+  }
+  return null
 }
 
 const DUMMY_DETECTIONS: DetectionItem[] = [
-  { id: '1', label: 'Screen 1', tags: ['screen', 'display'], color: '#3B82F6' },
-  { id: '2', label: 'Plate 13', tags: ['license plate', 'object'], color: '#EF4444' },
-  { id: '3', label: 'Head 16', tags: ['person', 'face'], color: '#F59E0B' },
-  { id: '4', label: 'Head 17', tags: ['person', 'face'], color: '#F59E0B' },
-  { id: '5', label: 'Head 22', tags: ['person', 'face'], color: '#F59E0B' },
-  { id: '6', label: 'Head 27', tags: ['person', 'face'], color: '#F59E0B' },
-  { id: '7', label: 'Head 28', tags: ['person', 'face'], color: '#F59E0B' },
-  { id: '8', label: 'Screen 31', tags: ['screen', 'display'], color: '#3B82F6' },
+  { id: 'object-screen', kind: 'object', label: 'Screen', tags: ['screen', 'display'], color: '#3B82F6', objectClass: 'screen' },
+  { id: 'object-plate', kind: 'object', label: 'License Plate', tags: ['license plate', 'object'], color: '#EF4444', objectClass: 'license plate' },
+  { id: 'face-person-1', kind: 'face', label: 'Person 1', tags: ['person', 'face'], color: '#F59E0B', personId: 'person_1' },
+  { id: 'face-person-2', kind: 'face', label: 'Person 2', tags: ['person', 'face'], color: '#F59E0B', personId: 'person_2' },
 ]
 
 /* ------------------------------------------------------------------ */
@@ -190,6 +367,44 @@ function fmtShort(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
+function drawCanvasBlurRegion(
+  ctx: CanvasRenderingContext2D,
+  video: HTMLVideoElement,
+  detection: LiveRedactionDetection,
+  destWidth: number,
+  destHeight: number,
+) {
+  const sx = detection.x * video.videoWidth
+  const sy = detection.y * video.videoHeight
+  const sw = detection.width * video.videoWidth
+  const sh = detection.height * video.videoHeight
+  const dx = detection.x * destWidth
+  const dy = detection.y * destHeight
+  const dw = detection.width * destWidth
+  const dh = detection.height * destHeight
+
+  if (sw <= 1 || sh <= 1 || dw <= 1 || dh <= 1) return
+
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(dx, dy, dw, dh)
+  ctx.clip()
+  ctx.filter = `blur(${Math.max(18, Math.round(Math.min(dw, dh) * 0.22))}px)`
+  ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
+  ctx.filter = 'none'
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.16)'
+  ctx.fillRect(dx, dy, dw, dh)
+  ctx.restore()
+
+  ctx.save()
+  ctx.fillStyle = detection.kind === 'face' ? 'rgba(0, 0, 0, 0.18)' : 'rgba(0, 220, 130, 0.12)'
+  ctx.fillRect(dx, dy, dw, dh)
+  ctx.lineWidth = Math.max(2, Math.round(Math.min(dw, dh) * 0.03))
+  ctx.strokeStyle = detection.kind === 'face' ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 220, 130, 0.9)'
+  ctx.strokeRect(dx, dy, dw, dh)
+  ctx.restore()
+}
+
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
@@ -200,6 +415,7 @@ export default function VideoEditorPage() {
   const cached = videoId ? getVideo(videoId) : undefined
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const liveBlurCanvasRef = useRef<HTMLCanvasElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const videoContainerRef = useRef<HTMLDivElement>(null)
   const editorCenterRef = useRef<HTMLDivElement>(null)
@@ -221,6 +437,10 @@ export default function VideoEditorPage() {
   const [detectionLoading, setDetectionLoading] = useState(false)
   const [detectionError, setDetectionError] = useState<string | null>(null)
   const [detectionJobId, setDetectionJobId] = useState<string | null>(null)
+  const [liveRedactionEnabled, setLiveRedactionEnabled] = useState(true)
+  const [liveRedactionDetections, setLiveRedactionDetections] = useState<LiveRedactionDetection[]>([])
+  const [liveRedactionLoading, setLiveRedactionLoading] = useState(false)
+  const [liveRedactionError, setLiveRedactionError] = useState<string | null>(null)
   const [excludedFromRedactionIds, setExcludedFromRedactionIds] = useState<string[]>([])
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true)
@@ -229,6 +449,9 @@ export default function VideoEditorPage() {
   const [exportRedactLoading, setExportRedactLoading] = useState(false)
   const [exportRedactError, setExportRedactError] = useState<string | null>(null)
   const [exportRedactDownloadUrl, setExportRedactDownloadUrl] = useState<string | null>(null)
+  const [trackingPreviewByRegion, setTrackingPreviewByRegion] = useState<Record<string, TrackingPreviewSample[]>>({})
+  const [trackingPreviewLoading, setTrackingPreviewLoading] = useState(false)
+  const [trackingPreviewError, setTrackingPreviewError] = useState<string | null>(null)
   const [isScrubbing, setIsScrubbing] = useState(false)
   const [hoverTime, setHoverTime] = useState<number | null>(null)
   const [trackMuted, setTrackMuted] = useState<{ video: boolean; audio: boolean }>({ video: false, audio: false })
@@ -250,6 +473,47 @@ export default function VideoEditorPage() {
   const hlsPreviewRef = useRef<InstanceType<typeof Hls> | null>(null)
   const hlsPreviewLoadedUrlRef = useRef<string | null>(null)
   const [previewVideoReady, setPreviewVideoReady] = useState(false)
+  const [videoViewport, setVideoViewport] = useState<VideoViewport>({ left: 0, top: 0, width: 0, height: 0 })
+  const liveRedactionInFlightRef = useRef(false)
+  const liveRedactionPendingTimeRef = useRef<number | null>(null)
+  const liveRedactionRequestIdRef = useRef(0)
+  const liveRedactionLastResolvedTimeRef = useRef<number | null>(null)
+  const liveBlurAnimationFrameRef = useRef<number | null>(null)
+  const autoDetectTriggeredRef = useRef(false)
+
+  const getPlaybackAnchorTime = useCallback(() => videoRef.current?.currentTime ?? currentTime, [currentTime])
+  const updateVideoViewport = useCallback(() => {
+    const container = videoContainerRef.current
+    const video = videoRef.current
+    if (!container) return
+
+    const rect = container.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) {
+      setVideoViewport({ left: 0, top: 0, width: 0, height: 0 })
+      return
+    }
+
+    const intrinsicWidth = video?.videoWidth ?? 0
+    const intrinsicHeight = video?.videoHeight ?? 0
+    if (intrinsicWidth <= 0 || intrinsicHeight <= 0) {
+      setVideoViewport({ left: 0, top: 0, width: rect.width, height: rect.height })
+      return
+    }
+
+    const containerAspect = rect.width / rect.height
+    const videoAspect = intrinsicWidth / intrinsicHeight
+
+    if (videoAspect > containerAspect) {
+      const width = rect.width
+      const height = width / videoAspect
+      setVideoViewport({ left: 0, top: (rect.height - height) / 2, width, height })
+      return
+    }
+
+    const height = rect.height
+    const width = height * videoAspect
+    setVideoViewport({ left: (rect.width - width) / 2, top: 0, width, height })
+  }, [])
 
   /* Tracker: regions and placement */
   const [trackingRegions, setTrackingRegions] = useState<TrackingRegion[]>([])
@@ -270,15 +534,28 @@ export default function VideoEditorPage() {
   const title = cached?.metadata?.filename || videoId || 'Untitled'
 
   /* ---- HLS: play m3u8 streams in Chrome/Firefox (TwelveLabs returns HLS) ---- */
-  const useHls = streamUrl && isHlsUrl(streamUrl) && Hls.isSupported()
+  const effectiveStreamUrl = exportRedactDownloadUrl || streamUrl
+  const useHls = effectiveStreamUrl && isHlsUrl(effectiveStreamUrl) && Hls.isSupported()
+  const liveRedactionActive = liveRedactionEnabled && !!streamUrl && !exportRedactDownloadUrl
 
   useEffect(() => {
-    if (!streamUrl || !videoRef.current) return
-    if (!isHlsUrl(streamUrl)) return
+    setDetectionJobId(null)
+    setLiveRedactionDetections([])
+    setLiveRedactionLoading(false)
+    setLiveRedactionError(null)
+    liveRedactionPendingTimeRef.current = null
+    liveRedactionRequestIdRef.current = 0
+    liveRedactionLastResolvedTimeRef.current = null
+    autoDetectTriggeredRef.current = false
+  }, [videoId, effectiveStreamUrl])
+
+  useEffect(() => {
+    if (!effectiveStreamUrl || !videoRef.current) return
+    if (!isHlsUrl(effectiveStreamUrl)) return
     if (!Hls.isSupported()) return
 
     // Avoid reloading the same URL (e.g. effect re-run from parent re-render) which would restart playback
-    if (hlsRef.current && hlsLoadedUrlRef.current === streamUrl) return
+    if (hlsRef.current && hlsLoadedUrlRef.current === effectiveStreamUrl) return
 
     const video = videoRef.current
     if (hlsRef.current) {
@@ -289,8 +566,8 @@ export default function VideoEditorPage() {
 
     const hls = new Hls()
     hlsRef.current = hls
-    hlsLoadedUrlRef.current = streamUrl
-    hls.loadSource(streamUrl)
+    hlsLoadedUrlRef.current = effectiveStreamUrl
+    hls.loadSource(effectiveStreamUrl)
     hls.attachMedia(video)
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (data.fatal) {
@@ -304,7 +581,7 @@ export default function VideoEditorPage() {
       hlsRef.current = null
       hlsLoadedUrlRef.current = null
     }
-  }, [streamUrl])
+  }, [effectiveStreamUrl])
 
   /* Reset timeline thumbnails and waveform when video source changes */
   useEffect(() => {
@@ -313,12 +590,12 @@ export default function VideoEditorPage() {
     setPreviewVideoReady(false)
     thumbnailsGeneratedRef.current = false
     waveformGeneratedRef.current = false
-  }, [streamUrl])
+  }, [effectiveStreamUrl])
 
   /* Hidden preview video: same stream as main, used only for timeline thumbnails/waveform so main video is never sought on pause */
   useEffect(() => {
-    if (!streamUrl || !timelinePreviewVideoRef.current || !isHlsUrl(streamUrl) || !Hls.isSupported()) return
-    if (hlsPreviewRef.current && hlsPreviewLoadedUrlRef.current === streamUrl) return
+    if (!effectiveStreamUrl || !timelinePreviewVideoRef.current || !isHlsUrl(effectiveStreamUrl) || !Hls.isSupported()) return
+    if (hlsPreviewRef.current && hlsPreviewLoadedUrlRef.current === effectiveStreamUrl) return
 
     const video = timelinePreviewVideoRef.current
     if (hlsPreviewRef.current) {
@@ -329,8 +606,8 @@ export default function VideoEditorPage() {
 
     const hls = new Hls()
     hlsPreviewRef.current = hls
-    hlsPreviewLoadedUrlRef.current = streamUrl
-    hls.loadSource(streamUrl)
+    hlsPreviewLoadedUrlRef.current = effectiveStreamUrl
+    hls.loadSource(effectiveStreamUrl)
     hls.attachMedia(video)
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (data.fatal) {
@@ -344,7 +621,25 @@ export default function VideoEditorPage() {
       hlsPreviewRef.current = null
       hlsPreviewLoadedUrlRef.current = null
     }
-  }, [streamUrl])
+  }, [effectiveStreamUrl])
+
+  useLayoutEffect(() => {
+    updateVideoViewport()
+    const container = videoContainerRef.current
+    if (!container) return
+
+    let observer: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(() => updateVideoViewport())
+      observer.observe(container)
+    }
+
+    window.addEventListener('resize', updateVideoViewport)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', updateVideoViewport)
+    }
+  }, [effectiveStreamUrl, updateVideoViewport])
 
   /* Preload timeline thumbnails + waveform on a hidden video so pausing the main video does nothing (no traverse) */
   useEffect(() => {
@@ -448,7 +743,7 @@ export default function VideoEditorPage() {
       }
     })()
     return () => { cancelled = true }
-  }, [streamUrl, duration, previewVideoReady])
+  }, [effectiveStreamUrl, duration, previewVideoReady])
 
   /* ---- Video event handlers ---- */
 
@@ -461,9 +756,10 @@ export default function VideoEditorPage() {
     v.volume = volume
     v.muted = isMuted
     v.playbackRate = playbackRate
+    updateVideoViewport()
     // Start playback so the video is playing in the editor viewport (muted autoplay is allowed)
     v.play().catch(() => {})
-  }, [volume, isMuted, playbackRate])
+  }, [volume, isMuted, playbackRate, updateVideoViewport])
 
   const onTimeUpdate = useCallback(() => {
     const v = videoRef.current
@@ -577,6 +873,10 @@ export default function VideoEditorPage() {
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
   }, [])
 
+  useEffect(() => {
+    updateVideoViewport()
+  }, [isFullscreen, updateVideoViewport])
+
   const runAnalyze = useCallback(async () => {
     const prompt = analyzeQuery.trim()
     if (!videoId || !prompt) {
@@ -674,25 +974,33 @@ export default function VideoEditorPage() {
       const objectColors = ['#3B82F6', '#EF4444', '#10B981', '#8B5CF6']
       if (facesRes.ok && Array.isArray(facesJson.unique_faces)) {
         facesJson.unique_faces.forEach((f: { person_id?: string; description?: string; snap_base64?: string }, i: number) => {
-          const name = (f.description || f.person_id || `Person ${i}`).toString().trim()
+          const personId = (f.person_id || `person_${i}`).toString().trim()
+          const name = (f.description || personId || `Person ${i}`).toString().trim()
           items.push({
-            id: `face-${f.person_id ?? i}`,
+            id: `face-${personId}`,
+            kind: 'face',
             label: name.slice(0, 60),
             tags: [],
             color: faceColor,
             snapBase64: f.snap_base64,
+            personId,
           })
         })
       }
       if (objectsRes.ok && Array.isArray(objectsJson.unique_objects)) {
+        const seenClasses = new Set<string>()
         objectsJson.unique_objects.forEach((o: { object_id?: string; identification?: string; snap_base64?: string }, i: number) => {
-          const name = (o.identification || o.object_id || `Object ${i}`).toString().trim()
+          const objectClass = (o.identification || o.object_id || `Object ${i}`).toString().trim()
+          if (seenClasses.has(objectClass)) return
+          seenClasses.add(objectClass)
           items.push({
-            id: `object-${o.object_id ?? i}`,
-            label: name.slice(0, 60),
+            id: `object-${objectClass}`,
+            kind: 'object',
+            label: objectClass.slice(0, 60),
             tags: [],
             color: objectColors[i % objectColors.length],
             snapBase64: o.snap_base64,
+            objectClass,
           })
         })
       }
@@ -714,34 +1022,169 @@ export default function VideoEditorPage() {
     }
   }, [videoId])
 
+  const selectedFacePersonIds = useMemo(
+    () =>
+      apiDetections
+        .filter((item) => item.kind === 'face' && item.personId && !excludedFromRedactionIds.includes(item.id))
+        .map((item) => item.personId as string),
+    [apiDetections, excludedFromRedactionIds]
+  )
+  const selectedObjectClasses = useMemo(
+    () =>
+      apiDetections
+        .filter((item) => item.kind === 'object' && item.objectClass && !excludedFromRedactionIds.includes(item.id))
+        .map((item) => item.objectClass as string),
+    [apiDetections, excludedFromRedactionIds]
+  )
+
+  useEffect(() => {
+    if (!liveRedactionActive || hasRunDetection || detectionLoading || autoDetectTriggeredRef.current) return
+    autoDetectTriggeredRef.current = true
+    runDetect()
+  }, [detectionLoading, hasRunDetection, liveRedactionActive, runDetect])
+
+  const resolveRedactionJobId = useCallback(async () => {
+    if (detectionJobId) return detectionJobId
+    if (!videoId) {
+      setDetectionJobId(DEFAULT_DETECTION_JOB_ID)
+      return DEFAULT_DETECTION_JOB_ID
+    }
+
+    const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}`)
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}))
+      throw new Error((err as { error?: string }).error || 'No local processing job found for this video.')
+    }
+    const data = await r.json().catch(() => ({}))
+    if (!data.job_id) {
+      throw new Error('No local processing job found for this video.')
+    }
+    setDetectionJobId(data.job_id as string)
+    return data.job_id as string
+  }, [detectionJobId, videoId])
+
+  const requestLiveRedaction = useCallback(async (requestedTime: number) => {
+    if (!liveRedactionActive || !effectiveStreamUrl) return
+    if (!Number.isFinite(requestedTime) || requestedTime < 0) return
+
+    const lastResolvedTime = liveRedactionLastResolvedTimeRef.current
+    if (!isPlaying && lastResolvedTime !== null && Math.abs(lastResolvedTime - requestedTime) < 0.08) {
+      return
+    }
+
+    if (liveRedactionInFlightRef.current) {
+      liveRedactionPendingTimeRef.current = requestedTime
+      return
+    }
+
+    liveRedactionInFlightRef.current = true
+    setLiveRedactionLoading(true)
+    const requestId = ++liveRedactionRequestIdRef.current
+
+    try {
+      const jobId = await resolveRedactionJobId()
+      const res = await fetch(`${API_BASE}/api/live-redaction/detect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          job_id: jobId,
+          time_sec: requestedTime,
+          include_faces: !hasRunDetection || selectedFacePersonIds.length > 0,
+          include_objects: !hasRunDetection || selectedObjectClasses.length > 0,
+          person_ids: hasRunDetection ? selectedFacePersonIds : undefined,
+          object_classes: hasRunDetection ? selectedObjectClasses : undefined,
+          forensic_only: true,
+          object_confidence: 0.25,
+        }),
+      })
+
+      const data = await res.json().catch(() => ({})) as {
+        detections?: LiveRedactionDetection[]
+        error?: string
+        time_sec?: number
+        object_detection_error?: string | null
+      }
+
+      if (requestId !== liveRedactionRequestIdRef.current) return
+      if (!res.ok) {
+        throw new Error(data.error || `Live redaction failed (${res.status})`)
+      }
+
+      const resolvedTime = typeof data.time_sec === 'number' ? data.time_sec : requestedTime
+      setLiveRedactionDetections((previous) =>
+        stabilizeLiveDetections(
+          previous,
+          Array.isArray(data.detections) ? data.detections : [],
+          resolvedTime,
+        )
+      )
+      setLiveRedactionError(data.object_detection_error || null)
+      liveRedactionLastResolvedTimeRef.current = resolvedTime
+    } catch (e) {
+      if (requestId !== liveRedactionRequestIdRef.current) return
+      setLiveRedactionError(e instanceof Error ? e.message : 'Live redaction failed')
+      liveRedactionLastResolvedTimeRef.current = null
+    } finally {
+      if (requestId === liveRedactionRequestIdRef.current) {
+        setLiveRedactionLoading(false)
+      }
+      liveRedactionInFlightRef.current = false
+      const pendingTime = liveRedactionPendingTimeRef.current
+      liveRedactionPendingTimeRef.current = null
+      if (
+        pendingTime !== null &&
+        Number.isFinite(pendingTime) &&
+        Math.abs(pendingTime - requestedTime) >= 0.05
+      ) {
+        window.setTimeout(() => {
+          requestLiveRedaction(pendingTime)
+        }, 0)
+      }
+    }
+  }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionActive, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
+
+  const buildCustomRegionPayload = useCallback((regions: TrackingRegion[]) => (
+    regions.map((r) => ({
+      id: r.id,
+      x: r.x,
+      y: r.y,
+      width: r.width,
+      height: r.height,
+      effect: r.effect,
+      shape: r.shape,
+      anchor_sec: r.anchorTime ?? 0,
+      reason: r.reason,
+      tracking_mode: r.effect === 'blur' ? 'face' : 'generic',
+    }))
+  ), [])
+
   const exportRedacted = useCallback(async () => {
     setExportRedactError(null)
     setExportRedactDownloadUrl(null)
-    if (!trackingRegions.length) {
-      setExportRedactError('Add at least one redaction region by drawing on the video.')
-      return
-    }
     setExportRedactLoading(true)
     try {
-      let jobId = DEFAULT_DETECTION_JOB_ID
-      if (videoId) {
-        const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}`)
-        if (r.ok) {
-          const data = await r.json().catch(() => ({}))
-          if (data.job_id) jobId = data.job_id
-        }
+      const jobId = await resolveRedactionJobId()
+      const body: any = {
+        job_id: jobId,
+        detect_every_n: 1,
+        use_temporal_optimization: false,
       }
-      const custom_regions = trackingRegions.map((r) => ({
-        x: r.x,
-        y: r.y,
-        width: r.width,
-        height: r.height,
-        effect: r.effect,
-      }))
+      if (hasRunDetection) {
+        if (selectedFacePersonIds.length > 0) {
+          body.person_ids = selectedFacePersonIds
+        }
+        if (selectedObjectClasses.length > 0) {
+          body.object_classes = selectedObjectClasses
+        }
+      } else {
+        body.face_encodings = ['__ALL__']
+        body.object_classes = LIVE_REDACTION_OBJECT_CLASSES
+      }
+
       const res = await fetch(`${API_BASE}/api/redact`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: jobId, custom_regions }),
+        body: JSON.stringify(body),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
@@ -757,7 +1200,88 @@ export default function VideoEditorPage() {
     } finally {
       setExportRedactLoading(false)
     }
-  }, [videoId, trackingRegions])
+  }, [hasRunDetection, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
+
+  useEffect(() => {
+    if (!liveRedactionActive || !effectiveStreamUrl) {
+      setLiveRedactionDetections([])
+      setLiveRedactionLoading(false)
+      setLiveRedactionError(null)
+      liveRedactionPendingTimeRef.current = null
+      liveRedactionLastResolvedTimeRef.current = null
+      return
+    }
+
+    if (isPlaying) return
+    requestLiveRedaction(videoRef.current?.currentTime ?? currentTime)
+  }, [currentTime, effectiveStreamUrl, isPlaying, liveRedactionActive, requestLiveRedaction])
+
+  useEffect(() => {
+    if (!liveRedactionActive || !effectiveStreamUrl || !isPlaying) return
+
+    requestLiveRedaction(videoRef.current?.currentTime ?? 0)
+    const intervalId = window.setInterval(() => {
+      requestLiveRedaction(videoRef.current?.currentTime ?? 0)
+    }, LIVE_DETECTION_POLL_MS)
+
+    return () => window.clearInterval(intervalId)
+  }, [effectiveStreamUrl, isPlaying, liveRedactionActive, requestLiveRedaction])
+
+  useEffect(() => {
+    if (!trackingRegions.length) {
+      setTrackingPreviewByRegion({})
+      setTrackingPreviewLoading(false)
+      setTrackingPreviewError(null)
+      return
+    }
+    if (drawStart || dragState) {
+      return
+    }
+
+    let cancelled = false
+    const controller = new AbortController()
+    const timer = window.setTimeout(async () => {
+      setTrackingPreviewLoading(true)
+      setTrackingPreviewError(null)
+      try {
+        const jobId = await resolveRedactionJobId()
+        if (cancelled) return
+        const res = await fetch(`${API_BASE}/api/redact/preview-track`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            job_id: jobId,
+            preview_fps: 8,
+            custom_regions: buildCustomRegionPayload(trackingRegions),
+          }),
+          signal: controller.signal,
+        })
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}))
+          throw new Error((err as { error?: string }).error || res.statusText)
+        }
+        const data = await res.json().catch(() => ({})) as { custom_tracks?: TrackingPreviewRegion[] }
+        if (cancelled) return
+        const next: Record<string, TrackingPreviewSample[]> = {}
+        for (const region of data.custom_tracks || []) {
+          if (region?.id) next[region.id] = Array.isArray(region.samples) ? region.samples : []
+        }
+        setTrackingPreviewByRegion(next)
+      } catch (e) {
+        if (controller.signal.aborted || cancelled) return
+        setTrackingPreviewByRegion({})
+        setTrackingPreviewError(e instanceof Error ? e.message : 'Tracking preview failed')
+      } finally {
+        if (!cancelled) setTrackingPreviewLoading(false)
+      }
+    }, 250)
+
+    return () => {
+      cancelled = true
+      controller.abort()
+      window.clearTimeout(timer)
+    }
+  }, [buildCustomRegionPayload, dragState, drawStart, resolveRedactionJobId, trackingRegions])
 
   useEffect(() => {
     analyzeChatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -823,12 +1347,18 @@ export default function VideoEditorPage() {
   /* ---- Tracker: viewport coords (0–1) ---- */
   const getNormFromEvent = useCallback((e: React.MouseEvent | MouseEvent) => {
     const el = videoContainerRef.current
-    if (!el) return { x: 0, y: 0 }
+    if (!el) return { x: 0, y: 0, inside: false }
     const rect = el.getBoundingClientRect()
-    const x = (e.clientX - rect.left) / rect.width
-    const y = (e.clientY - rect.top) / rect.height
-    return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) }
-  }, [])
+    const viewport = videoViewport.width > 0 && videoViewport.height > 0
+      ? videoViewport
+      : { left: 0, top: 0, width: rect.width, height: rect.height }
+    const relX = e.clientX - rect.left - viewport.left
+    const relY = e.clientY - rect.top - viewport.top
+    const inside = relX >= 0 && relY >= 0 && relX <= viewport.width && relY <= viewport.height
+    const x = viewport.width > 0 ? relX / viewport.width : 0
+    const y = viewport.height > 0 ? relY / viewport.height : 0
+    return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)), inside }
+  }, [videoViewport])
 
   const addTrackingRegion = useCallback((region: Omit<TrackingRegion, 'id'>) => {
     const id = `region-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -854,7 +1384,8 @@ export default function VideoEditorPage() {
       if (activeTool !== 'tracker' || !drawMode || e.button !== 0) return
       e.preventDefault()
       e.stopPropagation()
-      const { x, y } = getNormFromEvent(e)
+      const { x, y, inside } = getNormFromEvent(e)
+      if (!inside) return
       setDrawStart({ x, y })
       setDrawCurrent({ x, y })
     },
@@ -867,11 +1398,14 @@ export default function VideoEditorPage() {
       const el = videoContainerRef.current
       if (!el) return
       const rect = el.getBoundingClientRect()
-      const x = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width))
-      const y = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height))
+      const viewport = videoViewport.width > 0 && videoViewport.height > 0
+        ? videoViewport
+        : { left: 0, top: 0, width: rect.width, height: rect.height }
+      const x = Math.max(0, Math.min(1, (e.clientX - rect.left - viewport.left) / viewport.width))
+      const y = Math.max(0, Math.min(1, (e.clientY - rect.top - viewport.top) / viewport.height))
       setDrawCurrent({ x, y })
     },
-    [drawStart]
+    [drawStart, videoViewport]
   )
 
   const endDraw = useCallback((e?: React.MouseEvent) => {
@@ -902,13 +1436,14 @@ export default function VideoEditorPage() {
         width,
         height,
         effect: settings.trackerEffect,
+        anchorTime: getPlaybackAnchorTime(),
         reason: settings.trackerReason || undefined,
         locked: false,
       })
     }
     setDrawStart(null)
     setDrawCurrent(null)
-  }, [])
+  }, [getPlaybackAnchorTime])
 
   const startDrag = useCallback(
     (e: React.MouseEvent, regionId: string) => {
@@ -931,9 +1466,9 @@ export default function VideoEditorPage() {
       const { x, y } = getNormFromEvent(e)
       const newX = Math.max(0, Math.min(1 - region.width, x - dragState.offsetX))
       const newY = Math.max(0, Math.min(1 - region.height, y - dragState.offsetY))
-      updateTrackingRegion(dragState.regionId, { x: newX, y: newY })
+      updateTrackingRegion(dragState.regionId, { x: newX, y: newY, anchorTime: getPlaybackAnchorTime() })
     },
-    [dragState, trackingRegions, getNormFromEvent, updateTrackingRegion]
+    [dragState, trackingRegions, getNormFromEvent, getPlaybackAnchorTime, updateTrackingRegion]
   )
 
   const endDrag = useCallback(() => setDragState(null), [])
@@ -1020,9 +1555,159 @@ export default function VideoEditorPage() {
         d.label.toLowerCase().includes(q) || d.tags.some((t: string) => t.toLowerCase().includes(q))
     )
   }, [detectionFilter, detectionList])
+  const visibleLiveRedactionDetections = useMemo(() => {
+    const now = Date.now()
+    return liveRedactionDetections.filter((detection) => {
+      if (detection.width <= 0 || detection.height <= 0) return false
+      if (detection.lastSeenAtMs && now - detection.lastSeenAtMs > LIVE_DETECTION_HOLD_MS) return false
+      return true
+    })
+  }, [liveRedactionDetections])
+  const clickableLiveDetections = useMemo(
+    () => visibleLiveRedactionDetections.filter((detection) => getSelectionIdForLiveDetection(detection)),
+    [visibleLiveRedactionDetections]
+  )
 
   /* Strand shared classes */
   const btnBase = 'inline-flex items-center justify-center rounded-md border border-border bg-surface text-text-primary hover:bg-card transition-colors'
+  const overlayViewport = videoViewport.width > 0 && videoViewport.height > 0
+    ? videoViewport
+    : { left: 0, top: 0, width: 0, height: 0 }
+  useLayoutEffect(() => {
+    const canvas = liveBlurCanvasRef.current
+    if (!canvas || overlayViewport.width <= 0 || overlayViewport.height <= 0) return
+    const dpr = window.devicePixelRatio || 1
+    const width = Math.max(1, Math.round(overlayViewport.width))
+    const height = Math.max(1, Math.round(overlayViewport.height))
+    canvas.width = Math.round(width * dpr)
+    canvas.height = Math.round(height * dpr)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, width, height)
+  }, [overlayViewport.height, overlayViewport.width])
+
+  useEffect(() => {
+    const canvas = liveBlurCanvasRef.current
+    const video = videoRef.current
+    if (!canvas || !video) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    let cancelled = false
+    const render = () => {
+      if (cancelled) return
+      const width = Math.max(0, overlayViewport.width)
+      const height = Math.max(0, overlayViewport.height)
+      ctx.clearRect(0, 0, width, height)
+      if (
+        liveRedactionActive &&
+        width > 0 &&
+        height > 0 &&
+        video.readyState >= 2 &&
+        visibleLiveRedactionDetections.length > 0
+      ) {
+        for (const detection of visibleLiveRedactionDetections) {
+          drawCanvasBlurRegion(ctx, video, detection, width, height)
+        }
+      }
+      liveBlurAnimationFrameRef.current = window.requestAnimationFrame(render)
+    }
+
+    render()
+    return () => {
+      cancelled = true
+      if (liveBlurAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(liveBlurAnimationFrameRef.current)
+        liveBlurAnimationFrameRef.current = null
+      }
+      ctx.clearRect(0, 0, Math.max(0, overlayViewport.width), Math.max(0, overlayViewport.height))
+    }
+  }, [liveRedactionActive, overlayViewport.height, overlayViewport.width, visibleLiveRedactionDetections])
+
+  useEffect(() => {
+    if (!liveRedactionActive || !hasRunDetection) return
+
+    setLiveRedactionDetections((previous) =>
+      previous.filter((detection) => {
+        const selectionId = getSelectionIdForLiveDetection(detection)
+        return selectionId ? !excludedFromRedactionIds.includes(selectionId) : true
+      })
+    )
+
+    const timer = window.setTimeout(() => {
+      requestLiveRedaction(videoRef.current?.currentTime ?? currentTime)
+    }, 0)
+
+    return () => window.clearTimeout(timer)
+  }, [excludedFromRedactionIds, hasRunDetection, liveRedactionActive, requestLiveRedaction])
+
+  const toggleLiveDetectionSelection = useCallback((detection: LiveRedactionDetection) => {
+    const selectionId = getSelectionIdForLiveDetection(detection)
+    if (!selectionId) return
+    setExcludedFromRedactionIds((previous) =>
+      previous.includes(selectionId)
+        ? previous.filter((id) => id !== selectionId)
+        : [...previous, selectionId]
+    )
+  }, [])
+
+  const previewResolvedRegions = useMemo(() => {
+    const resolveSampleAtTime = (samples: TrackingPreviewSample[], t: number): TrackingPreviewSample | null => {
+      if (!samples.length) return null
+      let lo = 0
+      let hi = samples.length - 1
+      let best = -1
+      while (lo <= hi) {
+        const mid = Math.floor((lo + hi) / 2)
+        if (samples[mid].t <= t + 1e-4) {
+          best = mid
+          lo = mid + 1
+        } else {
+          hi = mid - 1
+        }
+      }
+      if (best < 0) return samples[0] ?? null
+      return samples[best] ?? null
+    }
+
+    return trackingRegions.map((region) => {
+      const samples = trackingPreviewByRegion[region.id] || []
+      const sample = resolveSampleAtTime(samples, currentTime)
+      if (!sample) return region
+      return {
+        ...region,
+        x: sample.x,
+        y: sample.y,
+        width: sample.width,
+        height: sample.height,
+      }
+    })
+  }, [currentTime, trackingPreviewByRegion, trackingRegions])
+  const regionToOverlayStyle = (region: TrackingRegion): React.CSSProperties => {
+    const widthNorm = region.shape === 'circle' ? Math.min(region.width, region.height) : region.width
+    const heightNorm = region.shape === 'circle' ? Math.min(region.width, region.height) : region.height
+    return {
+      left: overlayViewport.left + region.x * overlayViewport.width,
+      top: overlayViewport.top + region.y * overlayViewport.height,
+      width: widthNorm * overlayViewport.width,
+      height: heightNorm * overlayViewport.height,
+      borderRadius: region.shape === 'ellipse' || region.shape === 'circle' ? '50%' : '0',
+    }
+  }
+  const drawPreviewStyle: React.CSSProperties | undefined = drawStart && drawCurrent
+    ? {
+        left: overlayViewport.left + Math.min(drawStart.x, drawCurrent.x) * overlayViewport.width,
+        top: overlayViewport.top + Math.min(drawStart.y, drawCurrent.y) * overlayViewport.height,
+        width: (trackerShape === 'circle'
+          ? Math.min(Math.abs(drawCurrent.x - drawStart.x), Math.abs(drawCurrent.y - drawStart.y))
+          : Math.abs(drawCurrent.x - drawStart.x)) * overlayViewport.width,
+        height: (trackerShape === 'circle'
+          ? Math.min(Math.abs(drawCurrent.x - drawStart.x), Math.abs(drawCurrent.y - drawStart.y))
+          : Math.abs(drawCurrent.y - drawStart.y)) * overlayViewport.height,
+        borderRadius: trackerShape === 'ellipse' || trackerShape === 'circle' ? '50%' : '0',
+      }
+    : undefined
 
   return (
     <div className="flex flex-col h-[calc(100vh-theme(spacing.header))] bg-background text-text-primary overflow-hidden">
@@ -1060,177 +1745,78 @@ export default function VideoEditorPage() {
             ))}
           </nav>
 
-          {/* Tracker panel: motion tracking utilities */}
+          {/* Live blur panel */}
           {activeTool === 'tracker' && (
             <div className="border-t border-border p-3 space-y-3 shrink-0 overflow-y-auto max-h-[50vh]">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Motion Tracker</span>
-              </div>
-
-              <div>
-                <label className="block text-xs text-text-tertiary mb-1">Region shape</label>
-                <select
-                  className="w-full h-8 rounded-md bg-surface border border-border px-2 text-sm text-text-primary"
-                  value={trackerShape}
-                  onChange={(e) => setTrackerShape(e.target.value as 'rectangle' | 'ellipse' | 'circle')}
-                >
-                  <option value="rectangle">Rectangle</option>
-                  <option value="ellipse">Ellipse</option>
-                  <option value="circle">Circle</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs text-text-tertiary mb-1">Redaction effect</label>
-                <select
-                  className="w-full h-8 rounded-md bg-surface border border-border px-2 text-sm text-text-primary"
-                  value={trackerEffect}
-                  onChange={(e) => setTrackerEffect(e.target.value as 'blur' | 'pixelate' | 'solid')}
-                >
-                  <option value="blur">Blur</option>
-                  <option value="pixelate">Pixelate</option>
-                  <option value="solid">Solid mask</option>
-                </select>
-                <p className="text-[10px] text-text-tertiary mt-0.5">Applied live on the video overlay.</p>
-              </div>
-
-              <div>
-                <label className="block text-xs text-text-tertiary mb-1">Reason (optional)</label>
-                <input
-                  type="text"
-                  className="w-full h-8 rounded-md bg-surface border border-border px-2 text-sm text-text-primary placeholder:text-text-tertiary"
-                  placeholder="e.g. PII, face"
-                  value={trackerReason}
-                  onChange={(e) => setTrackerReason(e.target.value)}
-                />
-              </div>
-
-              <p className="text-[11px] text-text-tertiary leading-snug">
-                Draw on the video to add redaction regions. Blur is applied live. Each drawn region is motion-tracked on export (KCF tracker) so the blur follows the content.
-              </p>
-
-              <button
-                type="button"
-                className={`w-full h-9 text-sm ${btnBase} flex items-center justify-center gap-2 ${drawMode ? 'ring-2 ring-accent ring-offset-2 ring-offset-surface' : ''}`}
-                onClick={() => setDrawMode((prev) => !prev)}
-              >
-                <IconPlus className="w-4 h-4" />
-                {drawMode ? 'Click on video to draw region' : 'Add tracking region'}
-              </button>
-
-              {trackingRegions.length > 0 && (
-                <>
-                  <div className="pt-2 border-t border-border">
-                    <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider block mb-2">Regions ({trackingRegions.length})</span>
-                    <ul className="space-y-1.5 max-h-32 overflow-y-auto">
-                      {trackingRegions.map((r) => (
-                        <li
-                          key={r.id}
-                          className={`flex items-center justify-between gap-2 px-2 py-1.5 rounded-md border text-xs cursor-pointer ${selectedRegionId === r.id ? 'bg-card border-accent' : 'bg-surface border-border hover:bg-card'}`}
-                          onClick={() => setSelectedRegionId(r.id)}
-                        >
-                          <span className="truncate text-text-primary capitalize">{r.shape} · {r.effect}</span>
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button
-                              type="button"
-                              className="p-1 rounded hover:bg-error/20 text-text-tertiary hover:text-error"
-                              onClick={(e) => { e.stopPropagation(); removeTrackingRegion(r.id) }}
-                              aria-label="Remove region"
-                            >
-                              <IconMinus className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-
-                  {selectedRegionId && (() => {
-                    const r = trackingRegions.find((x) => x.id === selectedRegionId)
-                    if (!r) return null
-                    return (
-                      <div className="pt-2 border-t border-border space-y-2">
-                        <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Selected region</span>
-                        <div className="grid grid-cols-2 gap-2 text-xs">
-                          <div>
-                            <label className="text-text-tertiary block mb-0.5">X %</label>
-                            <input
-                              type="number"
-                              min={0}
-                              max={100}
-                              step={1}
-                              className="w-full h-7 rounded-md bg-surface border border-border px-2 text-text-primary"
-                              value={Math.round(r.x * 100)}
-                              onChange={(e) => updateTrackingRegion(r.id, { x: Number(e.target.value) / 100 })}
-                            />
-                          </div>
-                          <div>
-                            <label className="text-text-tertiary block mb-0.5">Y %</label>
-                            <input
-                              type="number"
-                              min={0}
-                              max={100}
-                              step={1}
-                              className="w-full h-7 rounded-md bg-surface border border-border px-2 text-text-primary"
-                              value={Math.round(r.y * 100)}
-                              onChange={(e) => updateTrackingRegion(r.id, { y: Number(e.target.value) / 100 })}
-                            />
-                          </div>
-                          <div>
-                            <label className="text-text-tertiary block mb-0.5">Width %</label>
-                            <input
-                              type="number"
-                              min={1}
-                              max={100}
-                              step={1}
-                              className="w-full h-7 rounded-md bg-surface border border-border px-2 text-text-primary"
-                              value={Math.round(r.width * 100)}
-                              onChange={(e) => updateTrackingRegion(r.id, { width: Number(e.target.value) / 100 })}
-                            />
-                          </div>
-                          <div>
-                            <label className="text-text-tertiary block mb-0.5">Height %</label>
-                            <input
-                              type="number"
-                              min={1}
-                              max={100}
-                              step={1}
-                              className="w-full h-7 rounded-md bg-surface border border-border px-2 text-text-primary"
-                              value={Math.round(r.height * 100)}
-                              onChange={(e) => updateTrackingRegion(r.id, { height: Number(e.target.value) / 100 })}
-                            />
-                          </div>
-                        </div>
-                        <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            className="rounded border-border text-accent w-3.5 h-3.5"
-                            checked={r.locked ?? false}
-                            onChange={(e) => updateTrackingRegion(r.id, { locked: e.target.checked })}
-                          />
-                          Lock position
-                        </label>
-                      </div>
-                    )
-                  })()}
-                </>
-              )}
-
-              <div className="pt-2 border-t border-border">
+                <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Live Blur</span>
                 <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none">
                   <input
                     type="checkbox"
                     className="rounded border-border text-accent w-3.5 h-3.5"
-                    checked={smoothEdges}
-                    onChange={(e) => setSmoothEdges(e.target.checked)}
+                    checked={liveRedactionEnabled}
+                    onChange={(e) => setLiveRedactionEnabled(e.target.checked)}
                   />
-                  Smooth edges
+                  Enabled
                 </label>
-                <p className="text-xs text-text-tertiary mt-1 leading-relaxed">
-                  Softer mask borders when effect is applied by backend.
-                </p>
               </div>
 
+              <p className="text-[11px] text-text-tertiary leading-snug">
+                Motion tracking is off. The player now keeps asking the backend for detections at the current playhead time and blurs them live.
+                Objects come from the local YOLO model, and faces still use the local face detector.
+              </p>
+
+              <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-text-tertiary">Status</span>
+                  <span className={`text-xs font-medium ${liveRedactionActive ? 'text-accent' : 'text-text-tertiary'}`}>
+                    {liveRedactionActive ? 'Running' : 'Paused'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-text-tertiary">Current frame</span>
+                  <span className="text-xs text-text-primary tabular-nums">
+                    {liveRedactionLoading && visibleLiveRedactionDetections.length === 0
+                      ? 'Scanning...'
+                      : `${visibleLiveRedactionDetections.length} blur region${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-text-tertiary">Export mode</span>
+                  <span className="text-xs text-text-primary">Per-frame detection</span>
+                </div>
+                {hasRunDetection && (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs text-text-tertiary">People blurred</span>
+                    <span className="text-xs text-text-primary">
+                      {selectedFacePersonIds.length > 0 ? selectedFacePersonIds.length : 'None selected'}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {liveRedactionError && (
+                <div className="rounded-lg border border-error/30 bg-error/5 px-3 py-2 text-xs text-error">
+                  {liveRedactionError}
+                </div>
+              )}
+
+              <button
+                type="button"
+                className={`w-full h-9 text-sm ${btnBase} flex items-center justify-center gap-2`}
+                onClick={() => requestLiveRedaction(videoRef.current?.currentTime ?? currentTime)}
+                disabled={!liveRedactionActive}
+              >
+                <IconPlay className="w-4 h-4" />
+                Refresh current frame
+              </button>
+
+              <div className="pt-2 border-t border-border">
+                <p className="text-xs text-text-tertiary leading-relaxed">
+                  Export now uses the same no-tracking approach: detect every frame, then blur the returned faces and YOLO objects.
+                  You can also click a blurred face or object in the player to toggle that detected item without showing an eye button over the video.
+                </p>
+              </div>
             </div>
           )}
         </aside>
@@ -1320,22 +1906,13 @@ export default function VideoEditorPage() {
               ref={videoContainerRef}
               className="relative w-full max-w-4xl mx-auto aspect-video rounded-xl overflow-hidden bg-brand-charcoal border border-border shadow-lg"
             >
-              {/* App name watermark: top-left corner */}
-              <div
-                className="absolute top-3 left-3 z-20 pointer-events-none select-none px-2.5 py-1.5 rounded bg-black/60 backdrop-blur-sm border border-white/10"
-                aria-hidden
-              >
-                <span className="text-xs font-semibold tracking-wide text-white/95">
-                  GDPR Compliance [Video REDACTION]
-                </span>
-              </div>
-
-              {streamUrl ? (
+              {effectiveStreamUrl ? (
                 <>
                   <video
                     ref={videoRef}
-                    src={useHls ? undefined : streamUrl}
+                    src={useHls ? undefined : effectiveStreamUrl}
                     className="absolute inset-0 w-full h-full object-contain z-0"
+                    crossOrigin="anonymous"
                     playsInline
                     muted={isMuted}
                     loop={false}
@@ -1344,13 +1921,14 @@ export default function VideoEditorPage() {
                     onPlay={() => setIsPlaying(true)}
                     onPause={() => setIsPlaying(false)}
                     onEnded={() => setIsPlaying(false)}
-                    onClick={(e) => { if (activeTool !== 'tracker' || !drawMode) togglePlay(); else e.stopPropagation() }}
+                    onClick={() => togglePlay()}
                   />
                   {/* Hidden video for timeline preload only; main video is never sought on pause */}
                   <video
                     ref={timelinePreviewVideoRef}
-                    src={useHls ? undefined : streamUrl}
+                    src={useHls ? undefined : effectiveStreamUrl}
                     className="absolute opacity-0 pointer-events-none w-0 h-0"
+                    crossOrigin="anonymous"
                     muted
                     playsInline
                     onLoadedMetadata={() => setPreviewVideoReady(true)}
@@ -1367,105 +1945,51 @@ export default function VideoEditorPage() {
                 </div>
               )}
 
-              {/* Tracker overlay: draw + region boxes (only when Tracker tool active); z-10 so video (z-0) stays visible behind */}
-              {activeTool === 'tracker' && streamUrl && (
-                <div
-                  className={`absolute inset-0 z-10 pointer-events-auto ${drawMode ? 'cursor-crosshair' : 'cursor-default'}`}
-                  onMouseDown={(e) => {
-                    if (drawMode) startDraw(e)
-                    else if (e.target === e.currentTarget) {
-                      setSelectedRegionId(null)
-                      togglePlay()
-                    }
-                  }}
-                  onMouseUp={(e) => { if (drawStart) endDraw(e) }}
-                >
-                  {/* Floating tracker toolbar */}
-                  <div className="absolute top-3 right-3 z-30 pointer-events-auto flex items-center gap-1 bg-brand-charcoal/90 backdrop-blur-sm rounded-lg px-2 py-1.5 shadow-lg border border-white/10">
-                    <select
-                      className="h-7 rounded-md bg-white/10 border-0 px-2 text-xs text-brand-white cursor-pointer focus:ring-1 focus:ring-accent"
-                      value={trackerShape}
-                      onChange={(e) => setTrackerShape(e.target.value as 'rectangle' | 'ellipse' | 'circle')}
-                    >
-                      <option value="rectangle">Rect</option>
-                      <option value="ellipse">Ellipse</option>
-                      <option value="circle">Circle</option>
-                    </select>
-                    <select
-                      className="h-7 rounded-md bg-white/10 border-0 px-2 text-xs text-brand-white cursor-pointer focus:ring-1 focus:ring-accent"
-                      value={trackerEffect}
-                      onChange={(e) => setTrackerEffect(e.target.value as 'blur' | 'pixelate' | 'solid')}
-                    >
-                      <option value="blur">Blur</option>
-                      <option value="pixelate">Pixelate</option>
-                      <option value="solid">Solid</option>
-                    </select>
-                    <div className="w-px h-5 bg-white/20 mx-0.5" />
-                    <button
-                      type="button"
-                      className={`h-7 px-3 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5 ${
-                        drawMode
-                          ? 'bg-accent text-brand-charcoal'
-                          : 'bg-white/10 text-brand-white hover:bg-white/20'
-                      }`}
-                      onClick={() => setDrawMode((prev) => !prev)}
-                    >
-                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
-                      {drawMode ? 'Drawing...' : 'Draw'}
-                    </button>
-                    {selectedRegionId && (
-                      <button
-                        type="button"
-                        className="h-7 px-2 rounded-md text-xs font-medium bg-white/10 text-brand-white hover:bg-error/80 transition-colors"
-                        onClick={() => removeTrackingRegion(selectedRegionId)}
-                      >
-                        Delete
-                      </button>
-                    )}
-                    {trackingRegions.length > 0 && (
-                      <span className="text-xs text-white/50 ml-1">{trackingRegions.length} region{trackingRegions.length !== 1 ? 's' : ''}</span>
-                    )}
-                  </div>
-                  {/* Existing regions: draggable boxes with effect (blur / pixelate / solid) */}
-                  {trackingRegions.map((r) => {
-                    const isBlur = r.effect === 'blur'
-                    const isPixelate = r.effect === 'pixelate'
-                    const isSolid = r.effect === 'solid'
-                    const effectStyle: React.CSSProperties = isSolid
-                      ? { background: 'var(--strand-brand-charcoal)' }
-                      : isBlur
-                        ? { backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', background: 'rgba(0,0,0,0.05)' }
-                        : { backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)', background: 'rgba(0,0,0,0.25)' }
+              {/* Live blur overlay from backend detections */}
+              {effectiveStreamUrl && liveRedactionActive && (
+                <div className="absolute inset-0 z-10 pointer-events-none">
+                  <canvas
+                    ref={liveBlurCanvasRef}
+                    className="absolute pointer-events-none"
+                    style={{
+                      left: overlayViewport.left,
+                      top: overlayViewport.top,
+                      width: overlayViewport.width,
+                      height: overlayViewport.height,
+                    }}
+                  />
+                  {hasRunDetection && clickableLiveDetections.map((detection) => {
+                    const selectionId = getSelectionIdForLiveDetection(detection)
+                    if (!selectionId) return null
                     return (
-                      <div
-                        key={r.id}
-                        className={`absolute border-2 pointer-events-auto cursor-move transition-colors overflow-hidden ${selectedRegionId === r.id ? 'border-accent z-10 ring-2 ring-accent/50' : 'border-brand-white/70 hover:border-brand-white'}`}
+                      <button
+                        key={`live-hit-${selectionId}-${detection.id}`}
+                        type="button"
+                        className="absolute pointer-events-auto bg-transparent border-0 p-0 cursor-pointer"
                         style={{
-                          left: `${r.x * 100}%`,
-                          top: `${r.y * 100}%`,
-                          width: `${(r.shape === 'circle' ? Math.min(r.width, r.height) : r.width) * 100}%`,
-                          height: `${(r.shape === 'circle' ? Math.min(r.width, r.height) : r.height) * 100}%`,
-                          borderRadius: r.shape === 'ellipse' || r.shape === 'circle' ? '50%' : '0',
-                          pointerEvents: r.locked ? 'none' : 'auto',
-                          ...effectStyle,
+                          left: overlayViewport.left + detection.x * overlayViewport.width,
+                          top: overlayViewport.top + detection.y * overlayViewport.height,
+                          width: detection.width * overlayViewport.width,
+                          height: detection.height * overlayViewport.height,
                         }}
-                        onMouseDown={(e) => { e.stopPropagation(); setSelectedRegionId(r.id); if (!r.locked) startDrag(e, r.id) }}
-                        title={`${r.effect}${r.reason ? ` — ${r.reason}` : ''}`}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          toggleLiveDetectionSelection(detection)
+                        }}
+                        aria-label={`Toggle blur for ${detection.label}`}
+                        title={`Toggle blur for ${detection.label}`}
                       />
                     )
                   })}
-                  {/* Draw preview */}
-                  {drawStart && drawCurrent && (
-                    <div
-                      className="absolute border-2 border-dashed border-accent bg-accent/10 pointer-events-none"
-                      style={{
-                        left: `${Math.min(drawStart.x, drawCurrent.x) * 100}%`,
-                        top: `${Math.min(drawStart.y, drawCurrent.y) * 100}%`,
-                        width: `${(trackerShape === 'circle' ? Math.min(Math.abs(drawCurrent.x - drawStart.x), Math.abs(drawCurrent.y - drawStart.y)) : Math.abs(drawCurrent.x - drawStart.x)) * 100}%`,
-                        height: `${(trackerShape === 'circle' ? Math.min(Math.abs(drawCurrent.x - drawStart.x), Math.abs(drawCurrent.y - drawStart.y)) : Math.abs(drawCurrent.y - drawStart.y)) * 100}%`,
-                        borderRadius: trackerShape === 'ellipse' || trackerShape === 'circle' ? '50%' : '0',
-                      }}
-                    />
+                  <div className="absolute top-3 right-3 rounded-lg bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-white shadow-lg border border-white/10 backdrop-blur-sm">
+                    {liveRedactionLoading && visibleLiveRedactionDetections.length === 0
+                      ? 'Scanning current frame...'
+                      : `Live blur: ${visibleLiveRedactionDetections.length} detection${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
+                  </div>
+                  {liveRedactionError && (
+                    <div className="absolute top-12 right-3 max-w-xs rounded-md border border-error/40 bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-red-200 shadow-lg">
+                      {liveRedactionError}
+                    </div>
                   )}
                 </div>
               )}
@@ -1904,6 +2428,9 @@ export default function VideoEditorPage() {
                       onChange={(e) => setDetectionFilter(e.target.value)}
                       className="w-full h-8 rounded-md bg-surface border border-border px-3 text-xs text-text-primary placeholder:text-text-tertiary"
                     />
+                    <p className="mt-2 text-[10px] leading-relaxed text-text-tertiary">
+                      Use the eye toggle to choose which people or object classes get blurred in live preview and export.
+                    </p>
                   </div>
                   <div className="flex-1 overflow-y-auto">
                     {filteredDetections.map((d) => {
@@ -1947,8 +2474,8 @@ export default function VideoEditorPage() {
                               )
                             }}
                             className={`shrink-0 p-1.5 rounded-md transition-colors ${excluded ? 'text-text-tertiary hover:bg-card hover:text-accent' : 'text-accent hover:bg-accent-light'}`}
-                            title={excluded ? 'Include in redaction (blur this)' : 'Exclude from redaction (do not blur)'}
-                            aria-label={excluded ? 'Include in redaction' : 'Exclude from redaction'}
+                            title={excluded ? 'Blur this again' : 'Do not blur this'}
+                            aria-label={excluded ? 'Blur this again' : 'Do not blur this'}
                           >
                             {excluded ? <IconEyeOff className="w-4 h-4" /> : <IconEye className="w-4 h-4" />}
                           </button>

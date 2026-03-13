@@ -3,8 +3,9 @@ flask-cors
 python-dotenv
 opencv-contrib-python-headless
 pillow
-numpy
-ultralytics
+numpy<2
+matplotlib<4
+ultralytics>=8,<9
 insightface
 onnxruntime
 twelvelabs

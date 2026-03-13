@@ -1,8 +1,11 @@
 import base64
+import json
 import os
 import re
 
 from config import SNAPS_DIR, OUTPUT_DIR
+
+JOB_MANIFEST_FILENAME = "job_manifest.json"
 
 
 def ensure_dirs():
@@ -19,6 +22,34 @@ def get_run_dir(run_id):
     run_dir = os.path.join(SNAPS_DIR, run_id)
     os.makedirs(run_dir, exist_ok=True)
     return run_dir
+
+
+def list_run_ids():
+    if not os.path.isdir(SNAPS_DIR):
+        return []
+    return [
+        name for name in sorted(os.listdir(SNAPS_DIR))
+        if os.path.isdir(os.path.join(SNAPS_DIR, name))
+    ]
+
+
+def save_job_manifest(run_dir, manifest):
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, JOB_MANIFEST_FILENAME)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=True)
+    return path
+
+
+def load_job_manifest(job_id):
+    path = os.path.join(SNAPS_DIR, job_id, JOB_MANIFEST_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def save_snap(directory, filename, b64_data):

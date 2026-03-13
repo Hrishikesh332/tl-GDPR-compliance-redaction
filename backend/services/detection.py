@@ -15,10 +15,36 @@ logger = logging.getLogger("video_redaction.detection")
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PROTOTXT = os.path.join(_BACKEND_DIR, "models", "deploy.prototxt")
 _CAFFEMODEL = os.path.join(_BACKEND_DIR, "models", "res10_300x300_ssd_iter_140000.caffemodel")
+_YOLO_MODEL_NAME = (os.environ.get("YOLO_OBJECT_MODEL") or "yolov8n.pt").strip() or "yolov8n.pt"
+_YOLO_MODEL_PATH = _YOLO_MODEL_NAME if os.path.isabs(_YOLO_MODEL_NAME) else os.path.join(_BACKEND_DIR, _YOLO_MODEL_NAME)
+
+
+def _is_git_lfs_pointer(path: str) -> bool:
+    """Return True if the file looks like a Git LFS pointer stub (not real weights)."""
+    try:
+        if not os.path.isfile(path):
+            return False
+        # LFS pointer files are tiny and start with: "version https://git-lfs.github.com/spec/v1"
+        if os.path.getsize(path) < 1024:  # real YOLO weights are many MB
+            with open(path, "rb") as f:
+                head = f.read(64)
+            return head.startswith(b"version https://git-lfs.github.com/")
+        return False
+    except Exception:
+        return False
+
+
+# If the repo contains only Git LFS stubs (tiny files), fall back to letting Ultralytics
+# download the correct weights by name (e.g. "yolov8n.pt") into its cache directory.
+if not os.path.isfile(_YOLO_MODEL_PATH) or _is_git_lfs_pointer(_YOLO_MODEL_PATH):
+    _YOLO_MODEL_PATH = _YOLO_MODEL_NAME
 
 _face_net = None
 _face_app = None
+_face_app_load_failed = False
 _obj_model = None
+_obj_model_load_failed = False
+_obj_model_error = None
 
 MIN_FACE_SIZE = 30
 MIN_FACE_SHARPNESS = 10.0
@@ -38,6 +64,14 @@ FORENSIC_CLASSES = {
 }
 
 
+class ObjectDetectionUnavailable(RuntimeError):
+    """Raised when the YOLO object detector cannot be loaded in this environment."""
+
+
+def get_object_detection_error():
+    return _obj_model_error
+
+
 def _get_face_net():
     """Load the res10_300x300_ssd face detector (~10.7 MB Caffe model)."""
     global _face_net
@@ -49,24 +83,50 @@ def _get_face_net():
 
 def _get_face_app():
     """Load InsightFace buffalo_l — used only for ArcFace 512-d embeddings, not detection."""
-    global _face_app
+    global _face_app, _face_app_load_failed
+    if _face_app_load_failed:
+        return None
     if _face_app is None:
-        from insightface.app import FaceAnalysis
-        _face_app = FaceAnalysis(
-            name="buffalo_l",
-            providers=_ONNX_PROVIDERS,
-        )
-        _face_app.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.5)
-        logger.info("Loaded InsightFace buffalo_l (ArcFace embeddings only)")
+        try:
+            from insightface.app import FaceAnalysis
+            _face_app = FaceAnalysis(
+                name="buffalo_l",
+                providers=_ONNX_PROVIDERS,
+            )
+            _face_app.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.5)
+            logger.info("Loaded InsightFace buffalo_l (ArcFace embeddings only)")
+        except Exception as e:
+            _face_app = None
+            _face_app_load_failed = True
+            logger.warning(
+                "InsightFace unavailable; falling back to res10-only face detection. "
+                "Manual blur tracking will still run, but face embeddings/supplemental detections are disabled: %s",
+                e,
+            )
     return _face_app
 
 
 def _get_obj_model():
-    global _obj_model
+    global _obj_model, _obj_model_load_failed, _obj_model_error
+    if _obj_model_load_failed:
+        raise ObjectDetectionUnavailable(_obj_model_error or "YOLO object detection is unavailable.")
     if _obj_model is None:
-        from ultralytics import YOLO
-        _obj_model = YOLO("yolov8x.pt")
-        logger.info("Loaded YOLOv8x for object detection")
+        try:
+            from ultralytics import YOLO
+
+            _obj_model = YOLO(_YOLO_MODEL_PATH)
+            logger.info("Loaded YOLO model for object detection: %s", os.path.basename(_YOLO_MODEL_PATH))
+        except Exception as e:
+            _obj_model = None
+            _obj_model_load_failed = True
+            _obj_model_error = (
+                "YOLO object detection could not start. This usually happens if the YOLO weights file is missing "
+                "or is a Git LFS pointer stub (tiny file), or if the Python environment has incompatible compiled "
+                "dependencies. Ensure you're running inside the project venv and that Ultralytics can download "
+                "weights (internet access), then restart the backend."
+            )
+            logger.warning("%s Underlying error: %s", _obj_model_error, e)
+            raise ObjectDetectionUnavailable(_obj_model_error) from e
     return _obj_model
 
 
@@ -126,6 +186,8 @@ def _get_embeddings_for_boxes(img_bgr, res10_boxes):
     to assign 512-d ArcFace embeddings to each res10 detection.
     Also returns unmatched InsightFace detections (faces res10 missed)."""
     app = _get_face_app()
+    if app is None:
+        return [None] * len(res10_boxes), []
     insight_faces = app.get(img_bgr)
 
     embeddings = [None] * len(res10_boxes)
@@ -167,6 +229,41 @@ def _get_embeddings_for_boxes(img_bgr, res10_boxes):
         })
 
     return embeddings, unmatched
+
+
+def detect_face_boxes(img_bgr, confidence_threshold=RES10_CONFIDENCE, include_supplemental=False):
+    """Return face boxes with confidence metadata, without encoding snapshots."""
+    res10_boxes = _detect_faces_res10(img_bgr, confidence_threshold=confidence_threshold)
+
+    results = []
+    for (x1, y1, x2, y2, conf) in res10_boxes:
+        sharpness = _face_sharpness(img_bgr, (x1, y1, x2, y2))
+        if sharpness < MIN_FACE_SHARPNESS:
+            continue
+        results.append({
+            "bbox": [x1, y1, x2, y2],
+            "det_score": round(conf, 4),
+            "sharpness": round(sharpness, 1),
+            "source": "res10",
+        })
+
+    if not include_supplemental:
+        return results
+
+    _, unmatched_insight = _get_embeddings_for_boxes(img_bgr, res10_boxes)
+    for extra in unmatched_insight:
+        x1, y1, x2, y2 = extra["bbox"]
+        sharpness = _face_sharpness(img_bgr, (x1, y1, x2, y2))
+        if sharpness < MIN_FACE_SHARPNESS:
+            continue
+        results.append({
+            "bbox": [x1, y1, x2, y2],
+            "det_score": extra["det_score"],
+            "sharpness": round(sharpness, 1),
+            "source": "insightface",
+        })
+
+    return results
 
 
 def detect_faces(img_bgr, with_encodings=False):
@@ -235,8 +332,13 @@ def detect_faces(img_bgr, with_encodings=False):
     return results
 
 
-def detect_objects(img_bgr, conf_threshold=0.25, forensic_only=True):
-    model = _get_obj_model()
+def detect_objects(img_bgr, conf_threshold=0.25, forensic_only=True, strict=True):
+    try:
+        model = _get_obj_model()
+    except ObjectDetectionUnavailable:
+        if strict:
+            raise
+        return []
     results = model.predict(img_bgr, conf=conf_threshold, verbose=False)
     out = []
     for r in results:
@@ -303,10 +405,15 @@ def match_faces_in_frame(frame_bgr, target_encodings, tolerance=0.35):
     return matched
 
 
-def match_objects_in_frame(frame_bgr, target_classes, conf_threshold=0.25):
+def match_objects_in_frame(frame_bgr, target_classes, conf_threshold=0.25, strict=True):
     if not target_classes:
         return []
-    model = _get_obj_model()
+    try:
+        model = _get_obj_model()
+    except ObjectDetectionUnavailable:
+        if strict:
+            raise
+        return []
     results = model.predict(frame_bgr, conf=conf_threshold, verbose=False, imgsz=640)
     matched = []
     for r in results:
@@ -318,3 +425,50 @@ def match_objects_in_frame(frame_bgr, target_classes, conf_threshold=0.25):
             if name in target_classes:
                 matched.append(tuple(box.xyxy[0].tolist()))
     return matched
+
+
+def identify_faces_in_frame(frame_bgr, known_faces, tolerance=0.35):
+    """Identify faces in a frame against known face encodings.
+
+    known_faces: iterable of {"person_id": str, "encoding": [...]}
+    Returns [{"bbox": [...], "person_id": str, "match_score": float, "det_score": float}, ...]
+    """
+    if not known_faces:
+        return []
+
+    prepared_known = []
+    for face in known_faces:
+        person_id = str(face.get("person_id") or "").strip()
+        encoding = face.get("encoding")
+        if not person_id or encoding is None:
+            continue
+        vec = np.array(encoding, dtype=np.float32)
+        norm = np.linalg.norm(vec)
+        prepared_known.append((person_id, vec / norm if norm > 0 else vec))
+
+    if not prepared_known:
+        return []
+
+    detections = detect_faces(frame_bgr, with_encodings=True)
+    identified = []
+    for det in detections:
+        enc = det.get("encoding")
+        if enc is None:
+            continue
+        enc_arr = np.array(enc, dtype=np.float32)
+        best_person_id = None
+        best_sim = -1.0
+        for person_id, known_vec in prepared_known:
+            sim = float(np.dot(enc_arr, known_vec))
+            if sim > best_sim:
+                best_sim = sim
+                best_person_id = person_id
+        if best_person_id and best_sim >= (1.0 - tolerance):
+            identified.append({
+                "bbox": det.get("bbox"),
+                "person_id": best_person_id,
+                "match_score": round(best_sim, 4),
+                "det_score": round(float(det.get("det_score", 0.0)), 4),
+            })
+
+    return identified

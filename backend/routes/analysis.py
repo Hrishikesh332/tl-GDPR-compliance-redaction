@@ -1,4 +1,5 @@
 import base64
+import json
 import logging
 import os
 import tempfile
@@ -10,10 +11,110 @@ from flask import Blueprint, request, jsonify
 from config import OUTPUT_DIR
 from services.pipeline import get_job, get_enriched_faces
 from services import twelvelabs_service
+from utils.video import extract_frame_at_time, extract_frames_at_timestamps
 
 logger = logging.getLogger("video_redaction.routes.analysis")
 
 analysis_bp = Blueprint("analysis", __name__)
+
+
+def _normalize_bbox(bbox, frame_w, frame_h):
+    if not bbox or frame_w <= 0 or frame_h <= 0:
+        return None
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    x1 = max(0.0, min(x1, float(frame_w)))
+    y1 = max(0.0, min(y1, float(frame_h)))
+    x2 = max(0.0, min(x2, float(frame_w)))
+    y2 = max(0.0, min(y2, float(frame_h)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return {
+        "x": round(x1 / frame_w, 6),
+        "y": round(y1 / frame_h, 6),
+        "width": round((x2 - x1) / frame_w, 6),
+        "height": round((y2 - y1) / frame_h, 6),
+    }
+
+
+def _detection_iou(box_a, box_b):
+    ax2 = box_a["x"] + box_a["width"]
+    ay2 = box_a["y"] + box_a["height"]
+    bx2 = box_b["x"] + box_b["width"]
+    by2 = box_b["y"] + box_b["height"]
+    ix1 = max(box_a["x"], box_b["x"])
+    iy1 = max(box_a["y"], box_b["y"])
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    union = box_a["width"] * box_a["height"] + box_b["width"] * box_b["height"] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _detection_center_distance(box_a, box_b):
+    ax = box_a["x"] + box_a["width"] / 2.0
+    ay = box_a["y"] + box_a["height"] / 2.0
+    bx = box_b["x"] + box_b["width"] / 2.0
+    by = box_b["y"] + box_b["height"] / 2.0
+    return float(np.hypot(ax - bx, ay - by))
+
+
+def _merge_temporal_detections(detections, requested_time):
+    grouped = []
+    ordered = sorted(
+        detections,
+        key=lambda det: (abs(float(det.get("sample_time", requested_time)) - requested_time), -float(det.get("confidence", 0.0))),
+    )
+
+    for det in ordered:
+        best_idx = -1
+        best_score = -1e9
+        for idx, group in enumerate(grouped):
+            if group["kind"] != det["kind"]:
+                continue
+            if det["kind"] == "object" and group["label"] != det["label"]:
+                continue
+            iou = _detection_iou(group, det)
+            center_distance = _detection_center_distance(group, det)
+            max_distance = 0.18 if det["kind"] == "face" else 0.24
+            if iou < 0.05 and center_distance > max_distance:
+                continue
+            score = iou * 4.0 - center_distance
+            if score > best_score:
+                best_idx = idx
+                best_score = score
+
+        if best_idx < 0:
+            grouped.append({
+                **det,
+                "_x2": det["x"] + det["width"],
+                "_y2": det["y"] + det["height"],
+                "_members": 1,
+            })
+            continue
+
+        group = grouped[best_idx]
+        group["x"] = min(group["x"], det["x"])
+        group["y"] = min(group["y"], det["y"])
+        group["_x2"] = max(group["_x2"], det["x"] + det["width"])
+        group["_y2"] = max(group["_y2"], det["y"] + det["height"])
+        group["width"] = group["_x2"] - group["x"]
+        group["height"] = group["_y2"] - group["y"]
+        group["confidence"] = max(float(group.get("confidence", 0.0)), float(det.get("confidence", 0.0)))
+        group["_members"] += 1
+
+    merged = []
+    for idx, group in enumerate(grouped):
+        merged.append({
+            "id": f"{group['kind']}-{idx}",
+            "kind": group["kind"],
+            "label": group["label"],
+            "confidence": round(float(group.get("confidence", 0.0)), 4),
+            "x": round(float(group["x"]), 6),
+            "y": round(float(group["y"]), 6),
+            "width": round(float(group["width"]), 6),
+            "height": round(float(group["height"]), 6),
+        })
+    return merged
 
 
 @analysis_bp.route("/faces/<job_id>", methods=["GET"])
@@ -111,6 +212,173 @@ def analyze_custom():
 
     result = twelvelabs_service.analyze_video_custom(video_id, prompt)
     return jsonify(result)
+
+
+@analysis_bp.route("/live-redaction/detect", methods=["POST"])
+def live_redaction_detect():
+    data = request.get_json(silent=True) or {}
+
+    job_id = data.get("job_id") or request.form.get("job_id")
+    if not job_id:
+        return jsonify({"error": "job_id is required"}), 400
+
+    job = get_job(job_id)
+    if not job:
+        return jsonify({"error": "job not found"}), 404
+
+    if job["status"] not in ("ready",):
+        return jsonify({
+            "error": "job is not ready for live redaction detection",
+            "status": job["status"],
+        }), 409
+
+    try:
+        time_sec = float(data.get("time_sec", request.form.get("time_sec", 0.0)) or 0.0)
+    except (TypeError, ValueError):
+        time_sec = 0.0
+
+    include_faces = str(data.get("include_faces", request.form.get("include_faces", "true"))).lower() not in ("false", "0", "no")
+    include_objects = str(data.get("include_objects", request.form.get("include_objects", "true"))).lower() not in ("false", "0", "no")
+    forensic_only = str(data.get("forensic_only", request.form.get("forensic_only", "true"))).lower() not in ("false", "0", "no")
+
+    person_ids = data.get("person_ids")
+    if person_ids is None:
+        raw_person_ids = request.form.get("person_ids", "")
+        if raw_person_ids:
+            try:
+                person_ids = json.loads(raw_person_ids)
+            except json.JSONDecodeError:
+                person_ids = [item.strip() for item in raw_person_ids.split(",") if item.strip()]
+    if not isinstance(person_ids, list):
+        person_ids = []
+    person_ids = [str(item).strip() for item in person_ids if str(item).strip()]
+
+    object_classes = data.get("object_classes")
+    if object_classes is None:
+        raw_object_classes = request.form.get("object_classes", "")
+        if raw_object_classes:
+            try:
+                object_classes = json.loads(raw_object_classes)
+            except json.JSONDecodeError:
+                object_classes = [item.strip() for item in raw_object_classes.split(",") if item.strip()]
+    if not isinstance(object_classes, list):
+        object_classes = []
+    object_class_set = {str(item).strip() for item in object_classes if str(item).strip()}
+
+    try:
+        object_confidence = float(data.get("object_confidence", request.form.get("object_confidence", 0.25)) or 0.25)
+    except (TypeError, ValueError):
+        object_confidence = 0.25
+
+    try:
+        face_confidence = float(data.get("face_confidence", request.form.get("face_confidence", 0.28)) or 0.28)
+    except (TypeError, ValueError):
+        face_confidence = 0.28
+
+    sample_offsets = (-0.10, 0.0, 0.10)
+    sample_times = []
+    for offset in sample_offsets:
+        ts = max(0.0, time_sec + offset)
+        if all(abs(ts - prev) > 1e-4 for prev in sample_times):
+            sample_times.append(ts)
+
+    try:
+        frame_info = extract_frame_at_time(job["video_path"], time_sec)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    sampled_frames = extract_frames_at_timestamps(job["video_path"], sample_times)
+    frames_by_time = {round(float(item["timestamp"]), 3): item["frame"] for item in sampled_frames}
+
+    frame = frame_info["frame"]
+    frame_h, frame_w = frame.shape[:2]
+    detections = []
+
+    if include_faces:
+        if person_ids:
+            from services.detection import identify_faces_in_frame
+
+            selected_faces = [
+                face for face in (job.get("unique_faces") or [])
+                if str(face.get("person_id") or "").strip() in person_ids and face.get("encoding") is not None
+            ]
+            for sample_time in sample_times:
+                sample_frame = frames_by_time.get(round(sample_time, 3), frame)
+                for face in identify_faces_in_frame(sample_frame, selected_faces):
+                    normalized = _normalize_bbox(face.get("bbox"), frame_w, frame_h)
+                    if normalized is None:
+                        continue
+                    detections.append({
+                        "kind": "face",
+                        "label": str(face.get("person_id") or "Face"),
+                        "personId": str(face.get("person_id") or "").strip() or None,
+                        "confidence": round(float(face.get("det_score", 0.0)), 4),
+                        "sample_time": sample_time,
+                        **normalized,
+                    })
+        else:
+            from services.detection import detect_face_boxes
+
+            for sample_time in sample_times:
+                sample_frame = frames_by_time.get(round(sample_time, 3), frame)
+                for face in detect_face_boxes(
+                    sample_frame,
+                    confidence_threshold=face_confidence,
+                    include_supplemental=True,
+                ):
+                    normalized = _normalize_bbox(face.get("bbox"), frame_w, frame_h)
+                    if normalized is None:
+                        continue
+                    detections.append({
+                        "kind": "face",
+                        "label": "Face",
+                        "personId": None,
+                        "confidence": round(float(face.get("det_score", 0.0)), 4),
+                        "sample_time": sample_time,
+                        **normalized,
+                    })
+
+    object_detection_error = None
+    if include_objects:
+        from services.detection import detect_objects, get_object_detection_error
+
+        for sample_time in sample_times:
+            sample_frame = frames_by_time.get(round(sample_time, 3), frame)
+            for obj in detect_objects(
+                sample_frame,
+                conf_threshold=object_confidence,
+                forensic_only=forensic_only,
+                strict=False,
+            ):
+                obj_label = str(obj.get("identification") or "Object")
+                if object_class_set and obj_label not in object_class_set:
+                    continue
+                normalized = _normalize_bbox(obj.get("bbox"), frame_w, frame_h)
+                if normalized is None:
+                    continue
+                detections.append({
+                    "kind": "object",
+                    "label": obj_label,
+                    "objectClass": obj_label,
+                    "confidence": round(float(obj.get("confidence", 0.0)), 4),
+                    "sample_time": sample_time,
+                    **normalized,
+                })
+        object_detection_error = get_object_detection_error()
+
+    detections = _merge_temporal_detections(detections, time_sec)
+
+    return jsonify({
+        "status": "ready",
+        "job_id": job_id,
+        "time_sec": frame_info["timestamp"],
+        "detections": detections,
+        "object_detection_error": object_detection_error,
+        "frame": {
+            "width": frame_w,
+            "height": frame_h,
+        },
+    })
 
 
 @analysis_bp.route("/detect-faces", methods=["POST"])

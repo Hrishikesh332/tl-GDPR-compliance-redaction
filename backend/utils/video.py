@@ -80,6 +80,41 @@ def extract_frames_at_timestamps(video_path, timestamps):
     return frames
 
 
+def extract_frame_at_time(video_path, time_sec):
+    """Extract the closest frame for a given timestamp in seconds."""
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video: {video_path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    safe_time = max(0.0, float(time_sec or 0.0))
+    if total_frames > 0:
+        target_frame = max(0, min(total_frames - 1, int(round(safe_time * fps))))
+    else:
+        target_frame = int(round(safe_time * fps))
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+    ret, frame = cap.read()
+    if not ret and target_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, target_frame - 1))
+        ret, frame = cap.read()
+        target_frame = max(0, target_frame - 1)
+
+    cap.release()
+
+    if not ret or frame is None:
+        raise ValueError(f"Could not read frame at {safe_time:.3f}s from {video_path}")
+
+    timestamp = (target_frame / fps) if fps > 0 else safe_time
+    return {
+        "frame": frame,
+        "frame_idx": target_frame,
+        "timestamp": round(timestamp, 4),
+        "fps": fps,
+    }
+
+
 def _merge_overlapping_ranges(ranges):
     """Merge overlapping/adjacent time ranges into non-overlapping intervals."""
     if not ranges:
