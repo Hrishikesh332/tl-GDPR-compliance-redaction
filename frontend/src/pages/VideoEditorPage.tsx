@@ -35,7 +35,7 @@ function TimestampTag({ time, onSeek, label }: { time: string; onSeek: (seconds:
     <button
       type="button"
       onClick={() => onSeek(seconds)}
-      className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-accent/20 text-accent border border-accent/40 hover:bg-accent/30 hover:border-accent/60 transition-colors cursor-pointer align-baseline"
+      className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-[#00DC82] text-black border border-[#00DC82] hover:bg-[#00c872] hover:border-[#00c872] transition-colors cursor-pointer align-baseline"
       title={`Seek to ${time}`}
     >
       {label ?? time}
@@ -931,6 +931,12 @@ export default function VideoEditorPage() {
     setSummaryText(null)
     setSummaryTags(null)
   }, [videoId])
+
+  useEffect(() => {
+    if (analyzeQuery.trim()) {
+      setOverviewTagsExpanded(false)
+    }
+  }, [analyzeQuery])
 
   useEffect(() => {
     try {
@@ -3228,6 +3234,7 @@ export default function VideoEditorPage() {
                           type="text"
                           value={analyzeQuery}
                           onChange={(e) => setAnalyzeQuery(e.target.value)}
+                          onFocus={() => setOverviewTagsExpanded(false)}
                           onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && runAnalyze()}
                           placeholder="Ask about this video..."
                           disabled={!videoId}
@@ -3245,7 +3252,7 @@ export default function VideoEditorPage() {
                             <IconChevronDown className={`w-3 h-3 transition-transform ${analyzeSuggestionsOpen ? 'rotate-180' : ''}`} />
                           </button>
                           {analyzeSuggestionsOpen && (
-                            <div className="absolute right-0 top-full mt-1 py-1 min-w-[14rem] max-w-xs rounded-lg border border-border bg-surface shadow-lg z-50">
+                            <div className="absolute right-0 bottom-full mb-1 py-1 min-w-[14rem] max-w-xs rounded-lg border border-border bg-surface shadow-lg z-50">
                               {ANALYZE_SUGGESTIONS.map((suggestion) => (
                                 <button
                                   key={suggestion}
