@@ -63,6 +63,164 @@ function withTimestampLinks(children: React.ReactNode, onSeek: (seconds: number)
   })
 }
 
+function normalizeWaveform(values: number[]): number[] {
+  if (!values.length) return []
+  const nonZero = values.filter((value) => value > 0)
+  const referenceValues = nonZero.length > 0 ? nonZero : values
+  const sorted = [...referenceValues].sort((a, b) => a - b)
+  const peakIndex = Math.max(0, Math.min(sorted.length - 1, Math.floor(sorted.length * 0.96)))
+  const referencePeak = Math.max(sorted[peakIndex] || 0, 0.001)
+  return values.map((value) => {
+    const normalized = Math.min(1, value / referencePeak)
+    return Math.pow(normalized, 0.72)
+  })
+}
+
+function extractWaveformFromAudioBuffer(audioBuffer: AudioBuffer, sampleCount: number): number[] {
+  if (sampleCount <= 0 || audioBuffer.length <= 0 || audioBuffer.numberOfChannels <= 0) return []
+  const bucketSize = Math.max(1, Math.floor(audioBuffer.length / sampleCount))
+  const peakValues: number[] = []
+
+  for (let bucket = 0; bucket < sampleCount; bucket++) {
+    const start = bucket * bucketSize
+    const end = bucket === sampleCount - 1 ? audioBuffer.length : Math.min(audioBuffer.length, start + bucketSize)
+    if (end <= start) {
+      peakValues.push(0)
+      continue
+    }
+
+    const step = Math.max(1, Math.floor((end - start) / 600))
+    let bucketPeak = 0
+    for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+      const channelData = audioBuffer.getChannelData(channel)
+      for (let index = start; index < end; index += step) {
+        bucketPeak = Math.max(bucketPeak, Math.abs(channelData[index] || 0))
+      }
+    }
+    peakValues.push(bucketPeak)
+  }
+
+  return normalizeWaveform(peakValues)
+}
+
+function generateWaveformPlaceholder(sampleCount: number): number[] {
+  if (sampleCount <= 0) return []
+  return Array.from({ length: sampleCount }, (_, index) => {
+    const progress = sampleCount === 1 ? 0 : index / (sampleCount - 1)
+    const envelope = 0.28 + 0.18 * Math.sin(progress * Math.PI * 1.2)
+    const detail = 0.1 * Math.sin(progress * Math.PI * 8 + 0.4) + 0.08 * Math.cos(progress * Math.PI * 17)
+    return Math.max(0.08, Math.min(0.72, envelope + detail))
+  })
+}
+
+function buildWaveformPath(samples: number[], width: number, height: number, paddingY = 8): string {
+  if (!samples.length || width <= 0 || height <= 0) return ''
+  const centerY = height / 2
+  const usableHeight = Math.max(1, height / 2 - paddingY)
+  const lastIndex = Math.max(1, samples.length - 1)
+  const topPoints = samples.map((sample, index) => {
+    const x = (index / lastIndex) * width
+    const amplitude = Math.max(0.04, Math.min(1, sample))
+    const y = centerY - amplitude * usableHeight
+    return `${x.toFixed(2)},${y.toFixed(2)}`
+  })
+  const bottomPoints = [...samples].reverse().map((sample, reversedIndex) => {
+    const index = samples.length - 1 - reversedIndex
+    const x = (index / lastIndex) * width
+    const amplitude = Math.max(0.04, Math.min(1, sample))
+    const y = centerY + amplitude * usableHeight
+    return `${x.toFixed(2)},${y.toFixed(2)}`
+  })
+  return `M ${topPoints.join(' L ')} L ${bottomPoints.join(' L ')} Z`
+}
+
+async function seekMediaElement(video: HTMLVideoElement, time: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const done = (result: boolean) => {
+      video.removeEventListener('seeked', onSeeked)
+      video.removeEventListener('error', onError)
+      clearTimeout(timeoutId)
+      resolve(result)
+    }
+    const onSeeked = () => done(true)
+    const onError = () => done(false)
+    const timeoutId = window.setTimeout(() => done(false), timeoutMs)
+    video.addEventListener('seeked', onSeeked)
+    video.addEventListener('error', onError)
+    video.currentTime = Math.max(0, time)
+  })
+}
+
+async function sampleWaveformFromMediaElement(
+  video: HTMLVideoElement,
+  duration: number,
+  sampleCount: number,
+  timeoutMs: number,
+): Promise<number[]> {
+  if (duration <= 0 || sampleCount <= 0) return []
+
+  const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+  const audioCtx = new AudioContextCtor()
+  const analyser = audioCtx.createAnalyser()
+  const gain = audioCtx.createGain()
+  analyser.fftSize = 2048
+  analyser.smoothingTimeConstant = 0.45
+  gain.gain.value = 0
+
+  const source = audioCtx.createMediaElementSource(video)
+  source.connect(analyser)
+  analyser.connect(gain)
+  gain.connect(audioCtx.destination)
+
+  const bufferLength = analyser.frequencyBinCount
+  const dataArray = new Uint8Array(bufferLength)
+  const sampledWaveform: number[] = []
+  const originalMuted = video.muted
+  const originalVolume = video.volume
+  const originalPlaybackRate = video.playbackRate
+
+  try {
+    if (audioCtx.state === 'suspended') await audioCtx.resume()
+    video.muted = true
+    video.volume = 0
+    video.playbackRate = 8
+
+    for (let index = 0; index < sampleCount; index += 1) {
+      const t = sampleCount === 1 ? 0 : (index / (sampleCount - 1)) * duration
+      const seeked = await seekMediaElement(video, t, timeoutMs)
+      if (!seeked) {
+        sampledWaveform.push(0)
+        continue
+      }
+
+      try {
+        await video.play()
+      } catch {
+        /* autoplay can fail in some browsers, continue with current decoded frame */
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 90))
+      analyser.getByteTimeDomainData(dataArray)
+      let peak = 0
+      for (let sampleIndex = 0; sampleIndex < bufferLength; sampleIndex += 1) {
+        const value = Math.abs((dataArray[sampleIndex] - 128) / 128)
+        if (value > peak) peak = value
+      }
+      sampledWaveform.push(peak)
+      video.pause()
+    }
+
+    await seekMediaElement(video, 0, timeoutMs).catch(() => false)
+    return normalizeWaveform(sampledWaveform)
+  } finally {
+    video.pause()
+    video.muted = originalMuted
+    video.volume = originalVolume
+    video.playbackRate = originalPlaybackRate
+    audioCtx.close().catch(() => {})
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Toolbar config                                                     */
 /* ------------------------------------------------------------------ */
@@ -111,10 +269,16 @@ const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
 
 const DEFAULT_DETECTION_JOB_ID = '0456d15f-f83'
 const LIVE_DETECTION_POLL_MS = 200
-const LIVE_DETECTION_HOLD_MS = 220
-const LIVE_FACE_PADDING = 0.28
+const LIVE_DETECTION_HOLD_MS = 320
+const LIVE_IDENTIFIED_FACE_HOLD_MS = 900
+const LIVE_FACE_PADDING = 0.36
 const LIVE_OBJECT_PADDING = 0.08
-const LIVE_DETECTION_SMOOTHING = 0.72
+const LIVE_DETECTION_SMOOTHING = 0.42
+const LIVE_FACE_STICKY_ALPHA = 0.18
+const LIVE_FACE_MAJOR_SHIFT_ALPHA = 0.82
+const LIVE_FACE_MINOR_SHIFT_DISTANCE = 0.035
+const LIVE_FACE_MAJOR_SHIFT_DISTANCE = 0.18
+const LIVE_FACE_MAJOR_SHIFT_SIZE_RATIO = 0.45
 const LIVE_REDACTION_OBJECT_CLASSES = [
   'backpack',
   'bicycle',
@@ -198,8 +362,30 @@ function liveDetectionCenterDistance(a: LiveRedactionDetection, b: LiveRedaction
   return Math.hypot(ax - bx, ay - by)
 }
 
-function smoothLiveDetection(previous: LiveRedactionDetection, next: LiveRedactionDetection): LiveRedactionDetection {
-  const alpha = LIVE_DETECTION_SMOOTHING
+function liveDetectionTrackKey(detection: LiveRedactionDetection): string | null {
+  if (detection.kind === 'face' && detection.personId) return `face:${detection.personId}`
+  if (detection.kind === 'object' && detection.objectClass) return `object:${detection.objectClass}`
+  return null
+}
+
+function liveDetectionSizeChangeRatio(a: LiveRedactionDetection, b: LiveRedactionDetection): number {
+  const widthBase = Math.max(a.width, 0.001)
+  const heightBase = Math.max(a.height, 0.001)
+  return Math.max(
+    Math.abs(b.width - a.width) / widthBase,
+    Math.abs(b.height - a.height) / heightBase,
+  )
+}
+
+function getLiveDetectionHoldMs(detection: LiveRedactionDetection): number {
+  return detection.kind === 'face' && detection.personId ? LIVE_IDENTIFIED_FACE_HOLD_MS : LIVE_DETECTION_HOLD_MS
+}
+
+function smoothLiveDetection(
+  previous: LiveRedactionDetection,
+  next: LiveRedactionDetection,
+  alpha = LIVE_DETECTION_SMOOTHING,
+): LiveRedactionDetection {
   return {
     ...next,
     x: previous.x * (1 - alpha) + next.x * alpha,
@@ -226,12 +412,16 @@ function stabilizeLiveDetections(
   for (const previousDetection of previous) {
     let bestIdx = -1
     let bestScore = -1e9
+    const previousTrackKey = liveDetectionTrackKey(previousDetection)
 
     for (let idx = 0; idx < prepared.length; idx += 1) {
       if (used.has(idx) || prepared[idx].kind !== previousDetection.kind) continue
+      const candidateTrackKey = liveDetectionTrackKey(prepared[idx])
+      if (previousTrackKey && candidateTrackKey && previousTrackKey !== candidateTrackKey) continue
       if (prepared[idx].kind === 'object' && prepared[idx].label !== previousDetection.label) continue
       if (
         prepared[idx].kind === 'face' &&
+        previousTrackKey === null &&
         previousDetection.label !== 'Face' &&
         prepared[idx].label !== 'Face' &&
         prepared[idx].label !== previousDetection.label
@@ -240,9 +430,9 @@ function stabilizeLiveDetections(
       }
       const iou = liveDetectionIou(previousDetection, prepared[idx])
       const distance = liveDetectionCenterDistance(previousDetection, prepared[idx])
-      const maxDistance = prepared[idx].kind === 'face' ? 0.16 : 0.22
+      const maxDistance = previousTrackKey ? 0.3 : (prepared[idx].kind === 'face' ? 0.16 : 0.22)
       if (iou < 0.05 && distance > maxDistance) continue
-      const score = iou * 4 - distance
+      const score = (previousTrackKey && previousTrackKey === candidateTrackKey ? 8 : 0) + iou * 4 - distance
       if (score > bestScore) {
         bestScore = score
         bestIdx = idx
@@ -251,11 +441,25 @@ function stabilizeLiveDetections(
 
     if (bestIdx >= 0) {
       used.add(bestIdx)
-      next.push(smoothLiveDetection(previousDetection, prepared[bestIdx]))
+      const matchedDetection = prepared[bestIdx]
+      const distance = liveDetectionCenterDistance(previousDetection, matchedDetection)
+      const sizeChangeRatio = liveDetectionSizeChangeRatio(previousDetection, matchedDetection)
+      const trackKey = liveDetectionTrackKey(previousDetection)
+
+      let alpha = LIVE_DETECTION_SMOOTHING
+      if (previousDetection.kind === 'face' && trackKey) {
+        alpha = distance <= LIVE_FACE_MINOR_SHIFT_DISTANCE && sizeChangeRatio <= 0.18
+          ? LIVE_FACE_STICKY_ALPHA
+          : distance >= LIVE_FACE_MAJOR_SHIFT_DISTANCE || sizeChangeRatio >= LIVE_FACE_MAJOR_SHIFT_SIZE_RATIO
+            ? LIVE_FACE_MAJOR_SHIFT_ALPHA
+            : LIVE_DETECTION_SMOOTHING
+      }
+
+      next.push(smoothLiveDetection(previousDetection, matchedDetection, alpha))
       continue
     }
 
-    if (now - (previousDetection.lastSeenAtMs ?? now) <= LIVE_DETECTION_HOLD_MS) {
+    if (now - (previousDetection.lastSeenAtMs ?? now) <= getLiveDetectionHoldMs(previousDetection)) {
       next.push(previousDetection)
     }
   }
@@ -332,6 +536,15 @@ function IconMinus({ className = 'w-4 h-4' }: { className?: string }) {
 function IconChevronRight({ className = 'w-4 h-4' }: { className?: string }) {
   return (<svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 18l6-6-6-6" /></svg>)
 }
+function IconAbout({ className = 'w-4 h-4' }: { className?: string }) {
+  return (<svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10" /><path d="M12 16v-4M12 8h.01" /></svg>)
+}
+function IconTopics({ className = 'w-4 h-4' }: { className?: string }) {
+  return (<svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" /><path d="M7 7h.01" /></svg>)
+}
+function IconCategories({ className = 'w-4 h-4' }: { className?: string }) {
+  return (<svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z" /></svg>)
+}
 function IconChevronLeft({ className = 'w-4 h-4' }: { className?: string }) {
   return (<svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>)
 }
@@ -396,12 +609,35 @@ function drawCanvasBlurRegion(
   ctx.fillRect(dx, dy, dw, dh)
   ctx.restore()
 
+  const isFace = detection.kind === 'face'
+  const accentColor = isFace ? '#ff5252' : '#00dc82'
+  const outerLineWidth = Math.max(4, Math.round(Math.min(dw, dh) * 0.05))
+  const innerLineWidth = Math.max(2, Math.round(outerLineWidth * 0.45))
+  const label = isFace ? (detection.label === 'Face' ? 'FACE' : detection.label.toUpperCase()) : detection.label.toUpperCase()
+  const labelFontSize = Math.max(11, Math.min(18, Math.round(Math.min(dw, dh) * 0.16)))
+  const labelPaddingX = 8
+  const labelPaddingY = 5
+
   ctx.save()
-  ctx.fillStyle = detection.kind === 'face' ? 'rgba(0, 0, 0, 0.18)' : 'rgba(0, 220, 130, 0.12)'
+  ctx.fillStyle = isFace ? 'rgba(255, 82, 82, 0.10)' : 'rgba(0, 220, 130, 0.10)'
   ctx.fillRect(dx, dy, dw, dh)
-  ctx.lineWidth = Math.max(2, Math.round(Math.min(dw, dh) * 0.03))
-  ctx.strokeStyle = detection.kind === 'face' ? 'rgba(255, 255, 255, 0.85)' : 'rgba(0, 220, 130, 0.9)'
+  ctx.lineWidth = outerLineWidth
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.9)'
   ctx.strokeRect(dx, dy, dw, dh)
+  ctx.lineWidth = innerLineWidth
+  ctx.strokeStyle = accentColor
+  ctx.strokeRect(dx, dy, dw, dh)
+
+  ctx.font = `700 ${labelFontSize}px ui-sans-serif, system-ui, -apple-system, sans-serif`
+  const labelMetrics = ctx.measureText(label)
+  const labelWidth = Math.min(dw, labelMetrics.width + labelPaddingX * 2)
+  const labelHeight = labelFontSize + labelPaddingY * 2
+  const labelX = dx
+  const labelY = Math.max(0, dy - labelHeight)
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.92)'
+  ctx.fillRect(labelX, labelY, labelWidth, labelHeight)
+  ctx.fillStyle = accentColor
+  ctx.fillText(label, labelX + labelPaddingX, labelY + labelHeight - labelPaddingY - 1)
   ctx.restore()
 }
 
@@ -418,6 +654,7 @@ export default function VideoEditorPage() {
   const liveBlurCanvasRef = useRef<HTMLCanvasElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const videoContainerRef = useRef<HTMLDivElement>(null)
+  const videoStageRef = useRef<HTMLDivElement>(null)
   const editorCenterRef = useRef<HTMLDivElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const hlsLoadedUrlRef = useRef<string | null>(null)
@@ -443,6 +680,7 @@ export default function VideoEditorPage() {
   const [liveRedactionError, setLiveRedactionError] = useState<string | null>(null)
   const [excludedFromRedactionIds, setExcludedFromRedactionIds] = useState<string[]>([])
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [leftSidebarOpen, setLeftSidebarOpen] = useState(true)
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true)
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const exportMenuRef = useRef<HTMLDivElement>(null)
@@ -456,24 +694,28 @@ export default function VideoEditorPage() {
   const [hoverTime, setHoverTime] = useState<number | null>(null)
   const [trackMuted, setTrackMuted] = useState<{ video: boolean; audio: boolean }>({ video: false, audio: false })
   const [trackLocked, setTrackLocked] = useState<{ video: boolean; audio: boolean }>({ video: false, audio: false })
-  const [analyzeSummaryExpanded, setAnalyzeSummaryExpanded] = useState(true)
+  const [overviewTagsExpanded, setOverviewTagsExpanded] = useState(true)
   const [analyzeQuery, setAnalyzeQuery] = useState('')
   const [analyzeLoading, setAnalyzeLoading] = useState(false)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
   type AnalyzeMessage = { id: string; role: 'user' | 'assistant'; content: string }
   const [analyzeMessages, setAnalyzeMessages] = useState<AnalyzeMessage[]>([])
   const [summaryText, setSummaryText] = useState<string | null>(null)
+  const [summaryTags, setSummaryTags] = useState<{ about?: string; topics?: string[]; categories?: string[] } | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
   const analyzeChatEndRef = useRef<HTMLDivElement>(null)
   const [timelineThumbnails, setTimelineThumbnails] = useState<string[]>([])
   const thumbnailsGeneratedRef = useRef(false)
   const [audioWaveformData, setAudioWaveformData] = useState<number[]>([])
+  const [audioWaveformStatus, setAudioWaveformStatus] = useState<'idle' | 'loading' | 'ready' | 'unavailable'>('idle')
   const waveformGeneratedRef = useRef(false)
   const timelinePreviewVideoRef = useRef<HTMLVideoElement | null>(null)
   const hlsPreviewRef = useRef<InstanceType<typeof Hls> | null>(null)
   const hlsPreviewLoadedUrlRef = useRef<string | null>(null)
   const [previewVideoReady, setPreviewVideoReady] = useState(false)
   const [videoViewport, setVideoViewport] = useState<VideoViewport>({ left: 0, top: 0, width: 0, height: 0 })
+  const [playerAspectRatio, setPlayerAspectRatio] = useState<number>(16 / 9)
+  const [videoStageSize, setVideoStageSize] = useState({ width: 0, height: 0 })
   const liveRedactionInFlightRef = useRef(false)
   const liveRedactionPendingTimeRef = useRef<number | null>(null)
   const liveRedactionRequestIdRef = useRef(0)
@@ -550,6 +792,31 @@ export default function VideoEditorPage() {
   }, [videoId, effectiveStreamUrl])
 
   useEffect(() => {
+    setSummaryText(null)
+    setSummaryTags(null)
+  }, [videoId])
+
+  /* Load overview from TwelveLabs video user_metadata when opening a video */
+  useEffect(() => {
+    if (!videoId) return
+    let cancelled = false
+    fetch(`${API_BASE}/api/videos/${encodeURIComponent(videoId)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((info: { overview?: { about?: string; topics?: string[]; categories?: string[] } } | null) => {
+        if (cancelled || !info?.overview) return
+        const o = info.overview
+        setSummaryTags({
+          about: o.about,
+          topics: o.topics,
+          categories: o.categories,
+        })
+        if (o.about) setSummaryText(o.about)
+      })
+      .catch(() => { /* ignore */ })
+    return () => { cancelled = true }
+  }, [videoId])
+
+  useEffect(() => {
     if (!effectiveStreamUrl || !videoRef.current) return
     if (!isHlsUrl(effectiveStreamUrl)) return
     if (!Hls.isSupported()) return
@@ -587,7 +854,9 @@ export default function VideoEditorPage() {
   useEffect(() => {
     setTimelineThumbnails([])
     setAudioWaveformData([])
+    setAudioWaveformStatus('idle')
     setPreviewVideoReady(false)
+    setPlayerAspectRatio(16 / 9)
     thumbnailsGeneratedRef.current = false
     waveformGeneratedRef.current = false
   }, [effectiveStreamUrl])
@@ -641,16 +910,46 @@ export default function VideoEditorPage() {
     }
   }, [effectiveStreamUrl, updateVideoViewport])
 
+  useLayoutEffect(() => {
+    const stage = videoStageRef.current
+    if (!stage) return
+
+    const updateStageSize = () => {
+      const rect = stage.getBoundingClientRect()
+      const nextWidth = Math.max(0, rect.width)
+      const nextHeight = Math.max(0, rect.height)
+      setVideoStageSize((current) =>
+        current.width === nextWidth && current.height === nextHeight
+          ? current
+          : { width: nextWidth, height: nextHeight }
+      )
+    }
+
+    updateStageSize()
+
+    let observer: ResizeObserver | null = null
+    if (typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(updateStageSize)
+      observer.observe(stage)
+    }
+
+    window.addEventListener('resize', updateStageSize)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', updateStageSize)
+    }
+  }, [])
+
   /* Preload timeline thumbnails + waveform on a hidden video so pausing the main video does nothing (no traverse) */
   useEffect(() => {
     const video = timelinePreviewVideoRef.current
-    if (!streamUrl || !video || !Number.isFinite(duration) || duration <= 0 || !previewVideoReady) return
+    if (!effectiveStreamUrl || !video || !Number.isFinite(duration) || duration <= 0 || !previewVideoReady) return
     if (thumbnailsGeneratedRef.current && waveformGeneratedRef.current) return
 
     const frameCount = 8
     const thumbW = 80
     const thumbH = 45
-    const waveformSamples = Math.min(24, Math.max(12, Math.floor(duration)))
+    const waveformSamples = Math.min(320, Math.max(96, Math.floor(duration * 5)))
     const SEEK_TIMEOUT_MS = 2500
 
     function captureFrameAt(v: HTMLVideoElement, t: number): Promise<string> {
@@ -700,50 +999,52 @@ export default function VideoEditorPage() {
       }
 
       if (!waveformGeneratedRef.current) {
+        if (!cancelled) setAudioWaveformStatus('loading')
         try {
-          const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)()
-          if (audioCtx.state === 'suspended') await audioCtx.resume()
-          const source = audioCtx.createMediaElementSource(v)
-          const analyser = audioCtx.createAnalyser()
-          analyser.fftSize = 2048
-          analyser.smoothingTimeConstant = 0.6
-          source.connect(analyser)
-          analyser.connect(audioCtx.destination)
-          const bufferLength = analyser.frequencyBinCount
-          const dataArray = new Uint8Array(bufferLength)
-          const waveform: number[] = []
-          for (let i = 0; i < waveformSamples && !cancelled; i++) {
-            const t = (i / (waveformSamples - 1)) * duration
-            await new Promise<void>((resolve) => {
-              const onSeeked = () => {
-                v.removeEventListener('seeked', onSeeked)
-                clearTimeout(tid)
-                analyser.getByteTimeDomainData(dataArray)
-                let sum = 0
-                for (let j = 0; j < bufferLength; j++) {
-                  const n = (dataArray[j] - 128) / 128
-                  sum += n * n
+          let waveform: number[] = []
+
+          if (!isHlsUrl(effectiveStreamUrl)) {
+            try {
+              const response = await fetch(effectiveStreamUrl)
+              if (!response.ok) throw new Error('Waveform fetch failed')
+              const arrayBuffer = await response.arrayBuffer()
+              if (!cancelled && arrayBuffer.byteLength > 0) {
+                const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+                const decodeCtx = new AudioContextCtor()
+                try {
+                  const audioBuffer = await decodeCtx.decodeAudioData(arrayBuffer.slice(0))
+                  waveform = extractWaveformFromAudioBuffer(audioBuffer, waveformSamples)
+                } finally {
+                  decodeCtx.close().catch(() => {})
                 }
-                waveform.push(Math.sqrt(sum / bufferLength))
-                resolve()
               }
-              const tid = setTimeout(() => { v.removeEventListener('seeked', onSeeked); waveform.push(0); resolve() }, SEEK_TIMEOUT_MS)
-              v.addEventListener('seeked', onSeeked)
-              v.currentTime = t
-            })
+            } catch {
+              waveform = []
+            }
           }
+
+          if (!cancelled && waveform.length === 0) {
+            try {
+              waveform = await sampleWaveformFromMediaElement(v, duration, waveformSamples, SEEK_TIMEOUT_MS)
+            } catch {
+              waveform = []
+            }
+          }
+
           if (!cancelled && waveform.length > 0) {
-            const max = Math.max(...waveform, 0.001)
-            setAudioWaveformData(waveform.map((x) => x / max))
+            setAudioWaveformData(waveform)
+            setAudioWaveformStatus('ready')
+          } else if (!cancelled) {
+            setAudioWaveformStatus('unavailable')
           }
         } catch {
-          /* ignore */
+          if (!cancelled) setAudioWaveformStatus('unavailable')
         }
         waveformGeneratedRef.current = true
       }
     })()
     return () => { cancelled = true }
-  }, [effectiveStreamUrl, duration, previewVideoReady])
+  }, [duration, effectiveStreamUrl, previewVideoReady])
 
   /* ---- Video event handlers ---- */
 
@@ -753,6 +1054,9 @@ export default function VideoEditorPage() {
     setDuration(v.duration)
     v.currentTime = 0
     setCurrentTime(0)
+    if (v.videoWidth > 0 && v.videoHeight > 0) {
+      setPlayerAspectRatio(v.videoWidth / v.videoHeight)
+    }
     v.volume = volume
     v.muted = isMuted
     v.playbackRate = playbackRate
@@ -916,25 +1220,63 @@ export default function VideoEditorPage() {
   const runGenerateSummary = useCallback(async () => {
     if (!videoId) return
     setSummaryLoading(true)
-    setAnalyzeSummaryExpanded(true)
+    setSummaryTags(null)
     try {
       const res = await fetch(`${API_BASE}/api/analyze-custom`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           video_id: videoId,
-          prompt: 'Provide a concise summary of this video. Include main topics, key moments, and any important details.',
+          prompt: `Provide a structured overview of this video. Return ONLY valid JSON (no markdown, no extra text) in this exact format:
+{"about": "one sentence summary of the video", "topics": ["topic1", "topic2", "topic3"], "categories": ["category1", "category2", "category3"]}
+- about: brief one-sentence description
+- topics: 3-6 main topics or themes (short phrases)
+- categories: 3-6 content types (e.g. Tutorial, Interview, Documentary, Presentation, Demo)`,
         }),
       })
       const json = await res.json().catch(() => ({}))
       if (!res.ok) {
-        setSummaryText(`Failed to generate summary: ${json?.error || res.status}`)
+        setSummaryText(`Failed to generate overview: ${json?.error || res.status}`)
         return
       }
-      const text = json?.data ?? ''
-      setSummaryText(text || 'No summary generated.')
+      const raw = (json?.data ?? '').trim()
+      if (!raw) {
+        setSummaryText('No overview generated.')
+        return
+      }
+      // Try to parse JSON (may be wrapped in ```json ... ```)
+      let parsed: { about?: string; topics?: string[]; categories?: string[] } | null = null
+      const jsonMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/) || raw.match(/\{[\s\S]*\}/)
+      const jsonStr = jsonMatch ? (jsonMatch[1] ?? jsonMatch[0]).trim() : raw
+      try {
+        parsed = JSON.parse(jsonStr) as { about?: string; topics?: string[]; categories?: string[] }
+      } catch {
+        // Fallback: use full text as about
+        parsed = { about: raw.slice(0, 200), topics: [], categories: [] }
+      }
+      if (parsed && (parsed.about || (parsed.topics && parsed.topics.length) || (parsed.categories && parsed.categories.length))) {
+        const tags = {
+          about: typeof parsed.about === 'string' ? parsed.about : undefined,
+          topics: Array.isArray(parsed.topics) ? parsed.topics : undefined,
+          categories: Array.isArray(parsed.categories) ? parsed.categories : undefined,
+        }
+        setSummaryTags(tags)
+        setSummaryText(parsed.about || raw.slice(0, 300))
+        // Persist overview to TwelveLabs video user_metadata (once per video)
+        fetch(`${API_BASE}/api/videos/${encodeURIComponent(videoId)}/overview`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            about: tags.about,
+            topics: tags.topics ?? [],
+            categories: tags.categories ?? [],
+          }),
+        }).catch(() => { /* ignore save errors */ })
+      } else {
+        setSummaryText(raw)
+      }
     } catch (e) {
-      setSummaryText(e instanceof Error ? e.message : 'Failed to generate summary.')
+      setSummaryText(e instanceof Error ? e.message : 'Failed to generate overview.')
     } finally {
       setSummaryLoading(false)
     }
@@ -1063,12 +1405,12 @@ export default function VideoEditorPage() {
     return data.job_id as string
   }, [detectionJobId, videoId])
 
-  const requestLiveRedaction = useCallback(async (requestedTime: number) => {
+  const requestLiveRedaction = useCallback(async (requestedTime: number, options?: { force?: boolean }) => {
     if (!liveRedactionActive || !effectiveStreamUrl) return
     if (!Number.isFinite(requestedTime) || requestedTime < 0) return
 
     const lastResolvedTime = liveRedactionLastResolvedTimeRef.current
-    if (!isPlaying && lastResolvedTime !== null && Math.abs(lastResolvedTime - requestedTime) < 0.08) {
+    if (!options?.force && !isPlaying && lastResolvedTime !== null && Math.abs(lastResolvedTime - requestedTime) < 0.08) {
       return
     }
 
@@ -1143,6 +1485,12 @@ export default function VideoEditorPage() {
     }
   }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionActive, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
 
+  const syncPausedFrameRedaction = useCallback((force = false) => {
+    const video = videoRef.current
+    if (!video || !video.paused) return
+    requestLiveRedaction(video.currentTime ?? currentTime, force ? { force: true } : undefined)
+  }, [currentTime, requestLiveRedaction])
+
   const buildCustomRegionPayload = useCallback((regions: TrackingRegion[]) => (
     regions.map((r) => ({
       id: r.id,
@@ -1154,7 +1502,7 @@ export default function VideoEditorPage() {
       shape: r.shape,
       anchor_sec: r.anchorTime ?? 0,
       reason: r.reason,
-      tracking_mode: r.effect === 'blur' ? 'face' : 'generic',
+      tracking_mode: /\b(face|person|head)\b/i.test(r.reason || '') ? 'face' : 'generic',
     }))
   ), [])
 
@@ -1169,6 +1517,10 @@ export default function VideoEditorPage() {
         detect_every_n: 1,
         use_temporal_optimization: false,
       }
+      const customRegions = buildCustomRegionPayload(trackingRegions)
+      if (customRegions.length > 0) {
+        body.custom_regions = customRegions
+      }
       if (hasRunDetection) {
         if (selectedFacePersonIds.length > 0) {
           body.person_ids = selectedFacePersonIds
@@ -1176,7 +1528,7 @@ export default function VideoEditorPage() {
         if (selectedObjectClasses.length > 0) {
           body.object_classes = selectedObjectClasses
         }
-      } else {
+      } else if (customRegions.length === 0) {
         body.face_encodings = ['__ALL__']
         body.object_classes = LIVE_REDACTION_OBJECT_CLASSES
       }
@@ -1200,7 +1552,7 @@ export default function VideoEditorPage() {
     } finally {
       setExportRedactLoading(false)
     }
-  }, [hasRunDetection, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
+  }, [buildCustomRegionPayload, hasRunDetection, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses, trackingRegions])
 
   useEffect(() => {
     if (!liveRedactionActive || !effectiveStreamUrl) {
@@ -1360,6 +1712,40 @@ export default function VideoEditorPage() {
     return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)), inside }
   }, [videoViewport])
 
+  const resolveTrackingPreviewSampleAtTime = useCallback((samples: TrackingPreviewSample[], t: number): TrackingPreviewSample | null => {
+    if (!samples.length) return null
+    let lo = 0
+    let hi = samples.length - 1
+    let best = -1
+    while (lo <= hi) {
+      const mid = Math.floor((lo + hi) / 2)
+      if (samples[mid].t <= t + 1e-4) {
+        best = mid
+        lo = mid + 1
+      } else {
+        hi = mid - 1
+      }
+    }
+    if (best < 0) return samples[0] ?? null
+    return samples[best] ?? null
+  }, [])
+
+  const resolveDisplayedTrackingRegion = useCallback((regionId: string, timeSec: number) => {
+    const region = trackingRegions.find((r) => r.id === regionId)
+    if (!region) return null
+    const anchorTime = region.anchorTime ?? 0
+    if (timeSec + 0.05 < anchorTime) return null
+    const sample = resolveTrackingPreviewSampleAtTime(trackingPreviewByRegion[regionId] || [], timeSec)
+    if (!sample) return region
+    return {
+      ...region,
+      x: sample.x,
+      y: sample.y,
+      width: sample.width,
+      height: sample.height,
+    }
+  }, [resolveTrackingPreviewSampleAtTime, trackingPreviewByRegion, trackingRegions])
+
   const addTrackingRegion = useCallback((region: Omit<TrackingRegion, 'id'>) => {
     const id = `region-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     setTrackingRegions((prev) => [...prev, { ...region, id }])
@@ -1450,25 +1836,32 @@ export default function VideoEditorPage() {
       if (e.button !== 0) return
       e.preventDefault()
       e.stopPropagation()
-      const region = trackingRegions.find((r) => r.id === regionId)
+      const region = resolveDisplayedTrackingRegion(regionId, videoRef.current?.currentTime ?? currentTime)
       if (!region) return
+      setSelectedRegionId(regionId)
       const { x, y } = getNormFromEvent(e)
       setDragState({ regionId, offsetX: x - region.x, offsetY: y - region.y })
     },
-    [trackingRegions, getNormFromEvent]
+    [currentTime, getNormFromEvent, resolveDisplayedTrackingRegion]
   )
 
   const updateDrag = useCallback(
     (e: MouseEvent) => {
       if (!dragState) return
-      const region = trackingRegions.find((r) => r.id === dragState.regionId)
+      const region = resolveDisplayedTrackingRegion(dragState.regionId, videoRef.current?.currentTime ?? currentTime)
       if (!region || region.locked) return
       const { x, y } = getNormFromEvent(e)
       const newX = Math.max(0, Math.min(1 - region.width, x - dragState.offsetX))
       const newY = Math.max(0, Math.min(1 - region.height, y - dragState.offsetY))
-      updateTrackingRegion(dragState.regionId, { x: newX, y: newY, anchorTime: getPlaybackAnchorTime() })
+      updateTrackingRegion(dragState.regionId, {
+        x: newX,
+        y: newY,
+        width: region.width,
+        height: region.height,
+        anchorTime: getPlaybackAnchorTime(),
+      })
     },
-    [dragState, trackingRegions, getNormFromEvent, getPlaybackAnchorTime, updateTrackingRegion]
+    [currentTime, dragState, getNormFromEvent, getPlaybackAnchorTime, resolveDisplayedTrackingRegion, updateTrackingRegion]
   )
 
   const endDrag = useCallback(() => setDragState(null), [])
@@ -1518,6 +1911,23 @@ export default function VideoEditorPage() {
   const progress = duration > 0 ? currentTime / duration : 0
   const bufferedPct = duration > 0 ? buffered / duration : 0
   const timelineContentWidthPct = timelineZoom * 100
+  const audioWaveformDisplayData = useMemo(() => {
+    if (audioWaveformData.length > 0) return audioWaveformData
+    if (audioWaveformStatus === 'loading') {
+      return generateWaveformPlaceholder(Math.min(160, Math.max(56, Math.floor(Math.max(duration, 12) * 2.5))))
+    }
+    return []
+  }, [audioWaveformData, audioWaveformStatus, duration])
+  const audioWaveformPath = useMemo(
+    () => buildWaveformPath(audioWaveformDisplayData, 1200, 84, 8),
+    [audioWaveformDisplayData],
+  )
+  const audioWaveformMeta = useMemo(() => {
+    if (audioWaveformStatus === 'ready') return 'Waveform ready'
+    if (audioWaveformStatus === 'loading') return 'Building waveform'
+    if (audioWaveformStatus === 'unavailable') return 'Waveform unavailable'
+    return 'Preparing audio lane'
+  }, [audioWaveformStatus])
 
   const majorStep = useMemo(() => {
     if (duration <= 0) return 30
@@ -1559,20 +1969,62 @@ export default function VideoEditorPage() {
     const now = Date.now()
     return liveRedactionDetections.filter((detection) => {
       if (detection.width <= 0 || detection.height <= 0) return false
-      if (detection.lastSeenAtMs && now - detection.lastSeenAtMs > LIVE_DETECTION_HOLD_MS) return false
+      if (detection.lastSeenAtMs && now - detection.lastSeenAtMs > getLiveDetectionHoldMs(detection)) return false
       return true
     })
   }, [liveRedactionDetections])
-  const clickableLiveDetections = useMemo(
-    () => visibleLiveRedactionDetections.filter((detection) => getSelectionIdForLiveDetection(detection)),
-    [visibleLiveRedactionDetections]
-  )
 
   /* Strand shared classes */
   const btnBase = 'inline-flex items-center justify-center rounded-md border border-border bg-surface text-text-primary hover:bg-card transition-colors'
+  const fallbackViewport = {
+    left: 0,
+    top: 0,
+    width: videoContainerRef.current?.clientWidth ?? 0,
+    height: videoContainerRef.current?.clientHeight ?? 0,
+  }
   const overlayViewport = videoViewport.width > 0 && videoViewport.height > 0
     ? videoViewport
-    : { left: 0, top: 0, width: 0, height: 0 }
+    : fallbackViewport
+  const overlayFrameStyle: React.CSSProperties =
+    overlayViewport.width > 0 && overlayViewport.height > 0
+      ? {
+          left: overlayViewport.left,
+          top: overlayViewport.top,
+          width: overlayViewport.width,
+          height: overlayViewport.height,
+        }
+      : {
+          inset: 0,
+        }
+  const fittedVideoFrameStyle = useMemo<React.CSSProperties>(() => {
+    const availableWidth = videoStageSize.width
+    const availableHeight = videoStageSize.height
+    if (availableWidth <= 0 || availableHeight <= 0 || playerAspectRatio <= 0) {
+      return {
+        aspectRatio: playerAspectRatio > 0 ? playerAspectRatio : 16 / 9,
+        width: '100%',
+        maxWidth: '100%',
+        maxHeight: '100%',
+      }
+    }
+
+    const fullWidthHeight = availableWidth / playerAspectRatio
+    if (fullWidthHeight <= availableHeight) {
+      return {
+        width: availableWidth,
+        height: fullWidthHeight,
+        maxWidth: '100%',
+        maxHeight: '100%',
+      }
+    }
+
+    return {
+      width: availableHeight * playerAspectRatio,
+      height: availableHeight,
+      maxWidth: '100%',
+      maxHeight: '100%',
+    }
+  }, [playerAspectRatio, videoStageSize.height, videoStageSize.width])
   useLayoutEffect(() => {
     const canvas = liveBlurCanvasRef.current
     if (!canvas || overlayViewport.width <= 0 || overlayViewport.height <= 0) return
@@ -1653,37 +2105,11 @@ export default function VideoEditorPage() {
   }, [])
 
   const previewResolvedRegions = useMemo(() => {
-    const resolveSampleAtTime = (samples: TrackingPreviewSample[], t: number): TrackingPreviewSample | null => {
-      if (!samples.length) return null
-      let lo = 0
-      let hi = samples.length - 1
-      let best = -1
-      while (lo <= hi) {
-        const mid = Math.floor((lo + hi) / 2)
-        if (samples[mid].t <= t + 1e-4) {
-          best = mid
-          lo = mid + 1
-        } else {
-          hi = mid - 1
-        }
-      }
-      if (best < 0) return samples[0] ?? null
-      return samples[best] ?? null
-    }
-
-    return trackingRegions.map((region) => {
-      const samples = trackingPreviewByRegion[region.id] || []
-      const sample = resolveSampleAtTime(samples, currentTime)
-      if (!sample) return region
-      return {
-        ...region,
-        x: sample.x,
-        y: sample.y,
-        width: sample.width,
-        height: sample.height,
-      }
+    return trackingRegions.flatMap((region) => {
+      const resolved = resolveDisplayedTrackingRegion(region.id, currentTime)
+      return resolved ? [resolved] : []
     })
-  }, [currentTime, trackingPreviewByRegion, trackingRegions])
+  }, [currentTime, resolveDisplayedTrackingRegion, trackingRegions])
   const regionToOverlayStyle = (region: TrackingRegion): React.CSSProperties => {
     const widthNorm = region.shape === 'circle' ? Math.min(region.width, region.height) : region.width
     const heightNorm = region.shape === 'circle' ? Math.min(region.width, region.height) : region.height
@@ -1693,6 +2119,34 @@ export default function VideoEditorPage() {
       width: widthNorm * overlayViewport.width,
       height: heightNorm * overlayViewport.height,
       borderRadius: region.shape === 'ellipse' || region.shape === 'circle' ? '50%' : '0',
+    }
+  }
+  const regionEffectStyle = (region: TrackingRegion, selected: boolean): React.CSSProperties => {
+    if (region.effect === 'solid') {
+      return {
+        border: selected ? '2px solid rgba(255,255,255,0.98)' : '2px solid rgba(255,255,255,0.65)',
+        backgroundColor: 'rgba(10,10,14,0.88)',
+        boxShadow: '0 0 0 1px rgba(0,0,0,0.35)',
+      }
+    }
+    if (region.effect === 'pixelate') {
+      return {
+        border: selected ? '2px solid rgba(255,255,255,0.98)' : '2px solid rgba(255,255,255,0.65)',
+        backgroundColor: 'rgba(20,20,26,0.22)',
+        backgroundImage: 'linear-gradient(rgba(255,255,255,0.14) 50%, transparent 50%), linear-gradient(90deg, rgba(255,255,255,0.14) 50%, transparent 50%)',
+        backgroundSize: '10px 10px',
+        backdropFilter: 'saturate(0.85) contrast(1.08)',
+        boxShadow: '0 0 0 1px rgba(0,0,0,0.35)',
+      }
+    }
+    return {
+      border: selected ? '2px solid rgba(255,255,255,0.98)' : '2px solid rgba(255,255,255,0.72)',
+      backgroundColor: 'rgba(255,255,255,0.08)',
+      backdropFilter: 'blur(16px) saturate(0.92)',
+      WebkitBackdropFilter: 'blur(16px) saturate(0.92)',
+      boxShadow: selected
+        ? '0 0 0 1px rgba(0,0,0,0.4), inset 0 0 20px rgba(255,255,255,0.08)'
+        : '0 0 0 1px rgba(0,0,0,0.3)',
     }
   }
   const drawPreviewStyle: React.CSSProperties | undefined = drawStart && drawCurrent
@@ -1710,42 +2164,47 @@ export default function VideoEditorPage() {
     : undefined
 
   return (
-    <div className="flex flex-col h-[calc(100vh-theme(spacing.header))] bg-background text-text-primary overflow-hidden">
+    <div className="flex h-full min-h-0 flex-col bg-background text-text-primary overflow-hidden">
       <div className="flex flex-1 min-h-0">
 
-        {/* ============ LEFT SIDEBAR ============ */}
-        <aside className="w-sidebar shrink-0 flex flex-col border-r border-border bg-surface overflow-hidden">
-          <div className="px-4 h-10 flex items-center border-b border-border shrink-0">
-            <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Toolbar</span>
-          </div>
+        {/* ============ LEFT SIDEBAR (collapsible) ============ */}
+        <aside className={`shrink-0 flex flex-col border-r border-border bg-surface overflow-hidden transition-[width] duration-200 ${leftSidebarOpen ? 'w-sidebar' : 'w-10'}`}>
+          {leftSidebarOpen ? (
+            <>
+              <div className="px-4 h-10 flex items-center justify-between border-b border-border shrink-0 gap-1">
+                <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Toolbar</span>
+                <button type="button" onClick={() => setLeftSidebarOpen(false)} className={`h-7 w-7 rounded-md ${btnBase}`} aria-label="Collapse toolbar" title="Collapse toolbar">
+                  <IconChevronLeft className="w-4 h-4" />
+                </button>
+              </div>
 
-          <nav className="flex-1 overflow-y-auto py-1 px-2 space-y-0.5">
-            {TOOLS.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setActiveTool(t.id)}
-                className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left text-sm rounded-lg transition-colors ${
-                  activeTool === t.id
-                    ? 'bg-brand-charcoal text-brand-white'
-                    : 'text-text-secondary hover:bg-card hover:text-text-primary'
-                }`}
-              >
-                <span className={`w-6 h-6 rounded-md flex items-center justify-center shrink-0 ${
-                  activeTool === t.id ? 'bg-white/20' : 'bg-card border border-border'
-                }`}>
-                  <img
-                    src={t.iconUrl}
-                    alt=""
-                    className={`w-4 h-4 block object-contain shrink-0 ${activeTool === t.id ? 'brightness-0 invert opacity-95' : 'opacity-60'}`}
-                  />
-                </span>
-                {t.label}
-              </button>
-            ))}
-          </nav>
+              <nav className="flex-1 overflow-y-auto py-1 px-2 space-y-0.5">
+                {TOOLS.map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    onClick={() => setActiveTool(t.id)}
+                    className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left text-sm rounded-lg transition-colors ${
+                      activeTool === t.id
+                        ? 'bg-brand-charcoal text-brand-white'
+                        : 'text-text-secondary hover:bg-card hover:text-text-primary'
+                    }`}
+                  >
+                    <span className={`w-6 h-6 rounded-md flex items-center justify-center shrink-0 ${
+                      activeTool === t.id ? 'bg-white/20' : 'bg-card border border-border'
+                    }`}>
+                      <img
+                        src={t.iconUrl}
+                        alt=""
+                        className={`w-4 h-4 block object-contain shrink-0 ${activeTool === t.id ? 'brightness-0 invert opacity-95' : 'opacity-60'}`}
+                      />
+                    </span>
+                    {t.label}
+                  </button>
+                ))}
+              </nav>
 
-          {/* Live blur panel */}
+              {/* Live blur panel */}
           {activeTool === 'tracker' && (
             <div className="border-t border-border p-3 space-y-3 shrink-0 overflow-y-auto max-h-[50vh]">
               <div className="flex items-center justify-between">
@@ -1761,10 +2220,11 @@ export default function VideoEditorPage() {
                 </label>
               </div>
 
-              <p className="text-[11px] text-text-tertiary leading-snug">
-                Motion tracking is off. The player now keeps asking the backend for detections at the current playhead time and blurs them live.
-                Objects come from the local YOLO model, and faces still use the local face detector.
-              </p>
+              <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-3">
+                <p className="text-xs text-text-secondary leading-relaxed">
+                  Live blur now uses per-frame detection only. Click a blurred face or object in the player to include or exclude it from redaction.
+                </p>
+              </div>
 
               <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-2">
                 <div className="flex items-center justify-between gap-3">
@@ -1813,16 +2273,29 @@ export default function VideoEditorPage() {
 
               <div className="pt-2 border-t border-border">
                 <p className="text-xs text-text-tertiary leading-relaxed">
-                  Export now uses the same no-tracking approach: detect every frame, then blur the returned faces and YOLO objects.
-                  You can also click a blurred face or object in the player to toggle that detected item without showing an eye button over the video.
+                  Export detects every frame and blurs the returned faces and YOLO objects. Click any blurred face or object in the player to toggle that detected item.
                 </p>
               </div>
+            </div>
+          )}
+            </>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center py-4 min-h-0">
+              <button
+                type="button"
+                onClick={() => setLeftSidebarOpen(true)}
+                className={`h-8 w-8 rounded-md ${btnBase}`}
+                aria-label="Expand toolbar"
+                title="Expand toolbar"
+              >
+                <IconChevronRight className="w-4 h-4" />
+              </button>
             </div>
           )}
         </aside>
 
         {/* ============ CENTER (Editor) ============ */}
-        <div ref={editorCenterRef} className="flex-1 flex flex-col min-w-0 bg-background overflow-hidden">
+        <div ref={editorCenterRef} className="flex-1 flex flex-col min-w-0 min-h-0 bg-background overflow-hidden">
 
           {/* Editor header */}
           <header className="shrink-0 h-14 px-5 flex items-center gap-4 border-b border-border bg-surface">
@@ -1900,99 +2373,122 @@ export default function VideoEditorPage() {
             </div>
           </header>
 
-          {/* Video viewport: fixed aspect 16:9, centered */}
-          <div className="shrink-0 px-4 pt-4">
-            <div
-              ref={videoContainerRef}
-              className="relative w-full max-w-4xl mx-auto aspect-video rounded-xl overflow-hidden bg-brand-charcoal border border-border shadow-lg"
-            >
-              {effectiveStreamUrl ? (
-                <>
+          {/* Video viewport: must get enough space to show the player; timeline can shrink when space is tight */}
+          <div className="flex-1 min-h-[140px] px-4 pt-4 pb-2 flex items-center justify-center">
+            <div ref={videoStageRef} className="size-full max-w-5xl flex items-center justify-center min-w-0 min-h-0">
+              <div
+                ref={videoContainerRef}
+                className="relative flex-none rounded-xl overflow-hidden bg-brand-charcoal border border-border shadow-lg"
+                style={fittedVideoFrameStyle}
+              >
+                {effectiveStreamUrl ? (
+                  <>
                   <video
                     ref={videoRef}
                     src={useHls ? undefined : effectiveStreamUrl}
                     className="absolute inset-0 w-full h-full object-contain z-0"
-                    crossOrigin="anonymous"
-                    playsInline
-                    muted={isMuted}
-                    loop={false}
+                      crossOrigin="anonymous"
+                      playsInline
+                      muted={isMuted}
+                      loop={false}
                     onLoadedMetadata={onLoadedMetadata}
                     onTimeUpdate={onTimeUpdate}
                     onPlay={() => setIsPlaying(true)}
-                    onPause={() => setIsPlaying(false)}
+                    onPause={() => {
+                      setIsPlaying(false)
+                      window.setTimeout(() => syncPausedFrameRedaction(true), 0)
+                    }}
+                    onSeeked={() => {
+                      const video = videoRef.current
+                      if (!video) return
+                      setCurrentTime(video.currentTime)
+                      if (video.paused) {
+                        syncPausedFrameRedaction(true)
+                      }
+                    }}
                     onEnded={() => setIsPlaying(false)}
                     onClick={() => togglePlay()}
                   />
-                  {/* Hidden video for timeline preload only; main video is never sought on pause */}
-                  <video
-                    ref={timelinePreviewVideoRef}
-                    src={useHls ? undefined : effectiveStreamUrl}
-                    className="absolute opacity-0 pointer-events-none w-0 h-0"
-                    crossOrigin="anonymous"
-                    muted
-                    playsInline
-                    onLoadedMetadata={() => setPreviewVideoReady(true)}
-                  />
-                </>
-              ) : (
-                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 select-none bg-card/60 rounded-xl">
-                  <svg className="w-14 h-14 text-text-tertiary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden>
-                    <rect x="2" y="4" width="20" height="16" rx="2" />
-                    <path d="M10 9l5 3-5 3V9z" fill="currentColor" stroke="none" />
-                  </svg>
-                  <p className="text-sm font-medium text-text-primary">No video source</p>
-                  <p className="text-xs text-text-secondary">Upload a video from the dashboard</p>
-                </div>
-              )}
-
-              {/* Live blur overlay from backend detections */}
-              {effectiveStreamUrl && liveRedactionActive && (
-                <div className="absolute inset-0 z-10 pointer-events-none">
-                  <canvas
-                    ref={liveBlurCanvasRef}
-                    className="absolute pointer-events-none"
-                    style={{
-                      left: overlayViewport.left,
-                      top: overlayViewport.top,
-                      width: overlayViewport.width,
-                      height: overlayViewport.height,
-                    }}
-                  />
-                  {hasRunDetection && clickableLiveDetections.map((detection) => {
-                    const selectionId = getSelectionIdForLiveDetection(detection)
-                    if (!selectionId) return null
-                    return (
-                      <button
-                        key={`live-hit-${selectionId}-${detection.id}`}
-                        type="button"
-                        className="absolute pointer-events-auto bg-transparent border-0 p-0 cursor-pointer"
-                        style={{
-                          left: overlayViewport.left + detection.x * overlayViewport.width,
-                          top: overlayViewport.top + detection.y * overlayViewport.height,
-                          width: detection.width * overlayViewport.width,
-                          height: detection.height * overlayViewport.height,
-                        }}
-                        onClick={(event) => {
-                          event.stopPropagation()
-                          toggleLiveDetectionSelection(detection)
-                        }}
-                        aria-label={`Toggle blur for ${detection.label}`}
-                        title={`Toggle blur for ${detection.label}`}
-                      />
-                    )
-                  })}
-                  <div className="absolute top-3 right-3 rounded-lg bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-white shadow-lg border border-white/10 backdrop-blur-sm">
-                    {liveRedactionLoading && visibleLiveRedactionDetections.length === 0
-                      ? 'Scanning current frame...'
-                      : `Live blur: ${visibleLiveRedactionDetections.length} detection${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
+                    {/* Hidden video for timeline preload only; main video is never sought on pause */}
+                    <video
+                      ref={timelinePreviewVideoRef}
+                      src={useHls ? undefined : effectiveStreamUrl}
+                      className="absolute opacity-0 pointer-events-none w-0 h-0"
+                      crossOrigin="anonymous"
+                      muted
+                      playsInline
+                      onLoadedMetadata={() => setPreviewVideoReady(true)}
+                    />
+                  </>
+                ) : (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 select-none bg-card/60 rounded-xl">
+                    <svg className="w-14 h-14 text-text-tertiary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden>
+                      <rect x="2" y="4" width="20" height="16" rx="2" />
+                      <path d="M10 9l5 3-5 3V9z" fill="currentColor" stroke="none" />
+                    </svg>
+                    <p className="text-sm font-medium text-text-primary">No video source</p>
+                    <p className="text-xs text-text-secondary">Upload a video from the dashboard</p>
                   </div>
-                  {liveRedactionError && (
-                    <div className="absolute top-12 right-3 max-w-xs rounded-md border border-error/40 bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-red-200 shadow-lg">
-                      {liveRedactionError}
+                )}
+
+                {/* Live blur overlay from backend detections */}
+                {effectiveStreamUrl && liveRedactionActive && (
+                  <div className="absolute inset-0 z-10 pointer-events-none">
+                    <div className="absolute" style={overlayFrameStyle}>
+                      <canvas
+                        ref={liveBlurCanvasRef}
+                        className="absolute inset-0 w-full h-full pointer-events-none"
+                      />
+                      {visibleLiveRedactionDetections.map((detection) => {
+                        const selectionId = hasRunDetection ? getSelectionIdForLiveDetection(detection) : null
+                        const overlayStyle = {
+                          left: `${detection.x * 100}%`,
+                          top: `${detection.y * 100}%`,
+                          width: `${detection.width * 100}%`,
+                          height: `${detection.height * 100}%`,
+                          borderColor: detection.kind === 'face' ? 'rgba(255,255,255,0.98)' : 'rgba(0,220,130,0.98)',
+                          backgroundColor: detection.kind === 'face' ? 'rgba(255,255,255,0.06)' : 'rgba(0,220,130,0.10)',
+                        } satisfies React.CSSProperties
+
+                        if (selectionId) {
+                          return (
+                            <button
+                              key={`live-hit-${selectionId}-${detection.id}`}
+                              type="button"
+                              className="absolute z-20 pointer-events-auto border-2 p-0 cursor-pointer rounded-sm shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
+                              style={overlayStyle}
+                              onClick={(event) => {
+                                event.stopPropagation()
+                                toggleLiveDetectionSelection(detection)
+                              }}
+                              aria-label={`Toggle blur for ${detection.label}`}
+                              title={`Toggle blur for ${detection.label}`}
+                            />
+                          )
+                        }
+
+                        return (
+                          <div
+                            key={`live-box-${detection.kind}-${detection.id}`}
+                            className="absolute z-20 pointer-events-none border-2 rounded-sm shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
+                            style={overlayStyle}
+                          />
+                        )
+                      })}
                     </div>
-                  )}
-                </div>
-              )}
+                    <div className="absolute top-3 right-3 rounded-lg bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-white shadow-lg border border-white/10 backdrop-blur-sm">
+                      {liveRedactionLoading && visibleLiveRedactionDetections.length === 0
+                        ? 'Scanning current frame...'
+                        : `Live blur: ${visibleLiveRedactionDetections.length} detection${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
+                    </div>
+                    {liveRedactionError && (
+                      <div className="absolute top-12 right-3 max-w-xs rounded-md border border-error/40 bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-red-200 shadow-lg">
+                        {liveRedactionError}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -2083,10 +2579,9 @@ export default function VideoEditorPage() {
           </div>
 
           {/* ============ TIMELINE ============ */}
-          <div className="shrink-0 flex flex-col border-t border-border bg-surface select-none" style={{ minHeight: 170 }}>
-            {/* Timeline header */}
-            <div className="h-8 px-3 flex items-center justify-between border-b border-border shrink-0">
-              <div className="flex items-center gap-3">
+          <div className="flex-1 min-h-0 flex flex-col border-t border-border bg-surface select-none overflow-hidden" style={{ minHeight: 100 }}>
+            <div className="h-10 px-3 flex items-center justify-between border-b border-border shrink-0">
+              <div className="flex items-center gap-3 min-w-0">
                 <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Timeline</span>
                 <span className="text-xs font-mono text-text-tertiary tabular-nums">{fmtShort(currentTime)} / {fmtShort(duration)}</span>
               </div>
@@ -2094,7 +2589,7 @@ export default function VideoEditorPage() {
                 <button type="button" className={`h-6 w-6 ${btnBase} border-0`} onClick={() => setTimelineZoom((z) => Math.max(z / 1.5, 0.5))} aria-label="Zoom out" title="Zoom out">
                   <IconMinus className="w-3 h-3" />
                 </button>
-                <div className="w-16 h-1 rounded-full bg-border mx-1 relative">
+                <div className="w-20 h-1.5 rounded-full bg-border mx-1 relative overflow-hidden">
                   <div className="absolute inset-y-0 left-0 rounded-full bg-accent" style={{ width: `${Math.min(100, ((timelineZoom - 0.5) / 9.5) * 100)}%` }} />
                 </div>
                 <button type="button" className={`h-6 w-6 ${btnBase} border-0`} onClick={() => setTimelineZoom((z) => Math.min(z * 1.5, 10))} aria-label="Zoom in" title="Zoom in">
@@ -2104,36 +2599,8 @@ export default function VideoEditorPage() {
             </div>
 
             <div className="flex flex-1 min-h-0">
-              {/* Track handles */}
-              <div className="w-32 shrink-0 border-r border-border flex flex-col bg-card">
-                <div className="h-7 border-b border-border flex items-center px-2">
-                  <span className="text-[10px] text-text-tertiary uppercase tracking-wider">Tracks</span>
-                </div>
-                {/* Video handle */}
-                <div className="h-11 flex items-center gap-1.5 px-2 border-b border-border group">
-                  <span className="w-1.5 h-6 rounded-full bg-accent shrink-0" />
-                  <span className="text-xs text-text-secondary truncate flex-1 leading-none">Video</span>
-                  <button type="button" onClick={() => setTrackMuted(p => ({ ...p, video: !p.video }))} className={`h-5 w-5 rounded inline-flex items-center justify-center transition-colors ${trackMuted.video ? 'text-text-tertiary bg-card' : 'text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-card'}`} aria-label={trackMuted.video ? 'Unmute' : 'Mute'} title={trackMuted.video ? 'Unmute' : 'Mute'}>
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3z" /></svg>
-                  </button>
-                  <button type="button" onClick={() => setTrackLocked(p => ({ ...p, video: !p.video }))} className={`h-5 w-5 rounded inline-flex items-center justify-center transition-colors ${trackLocked.video ? 'text-text-tertiary bg-card' : 'text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-card'}`} aria-label={trackLocked.video ? 'Unlock' : 'Lock'} title={trackLocked.video ? 'Unlock' : 'Lock'}>
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">{trackLocked.video ? <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z" /> : <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6h2c0-1.66 1.34-3 3-3s3 1.34 3 3v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm0 12H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z" />}</svg>
-                  </button>
-                </div>
-                {/* Audio handle */}
-                <div className="h-9 flex items-center gap-1.5 px-2 border-b border-border group">
-                  <span className="w-1.5 h-5 rounded-full bg-highlight shrink-0" />
-                  <span className="text-xs text-text-tertiary truncate flex-1 leading-none">Audio</span>
-                  <button type="button" onClick={() => setTrackMuted(p => ({ ...p, audio: !p.audio }))} className={`h-5 w-5 rounded inline-flex items-center justify-center transition-colors ${trackMuted.audio ? 'text-text-tertiary bg-card' : 'text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-card'}`} aria-label={trackMuted.audio ? 'Unmute' : 'Mute'} title={trackMuted.audio ? 'Unmute' : 'Mute'}>
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3z" /></svg>
-                  </button>
-                  <button type="button" onClick={() => setTrackLocked(p => ({ ...p, audio: !p.audio }))} className={`h-5 w-5 rounded inline-flex items-center justify-center transition-colors ${trackLocked.audio ? 'text-text-tertiary bg-card' : 'text-text-tertiary opacity-0 group-hover:opacity-100 hover:text-text-primary hover:bg-card'}`} aria-label={trackLocked.audio ? 'Unlock' : 'Lock'} title={trackLocked.audio ? 'Unlock' : 'Lock'}>
-                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="currentColor">{trackLocked.audio ? <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z" /> : <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6h2c0-1.66 1.34-3 3-3s3 1.34 3 3v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm0 12H6V10h12v10zm-6-3c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2z" />}</svg>
-                  </button>
-                </div>
-              </div>
+              <div className="w-16 shrink-0 border-r border-border bg-card/30" aria-hidden />
 
-              {/* Scrollable timeline content */}
               <div
                 ref={timelineRef}
                 className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden bg-background"
@@ -2142,122 +2609,113 @@ export default function VideoEditorPage() {
                 onMouseLeave={() => setHoverTime(null)}
               >
                 <div className="min-w-full flex flex-col relative" style={{ width: `${timelineContentWidthPct}%`, minHeight: '100%' }}>
-
-                  {/* Ruler */}
-                  <div className="h-7 shrink-0 relative border-b border-border bg-card cursor-col-resize">
+                  <div className="h-9 shrink-0 relative border-b border-border bg-card/90 cursor-col-resize overflow-hidden">
+                    <div className="absolute inset-0 bg-gradient-to-b from-white/[0.03] via-transparent to-transparent pointer-events-none" />
                     {minorTicks.map((sec) => (
-                      <div key={`m-${sec}`} className="absolute bottom-0 w-px bg-border" style={{ left: `${(sec / Math.max(duration, 1)) * 100}%`, height: 5 }} />
+                      <div key={`m-${sec}`} className="absolute bottom-0 w-px bg-border/80" style={{ left: `${(sec / Math.max(duration, 1)) * 100}%`, height: 8 }} />
                     ))}
                     {majorTicks.map((sec) => (
                       <div key={`M-${sec}`} className="absolute top-0 bottom-0" style={{ left: `${duration > 0 ? (sec / duration) * 100 : 0}%` }}>
-                        <div className="absolute bottom-0 w-px bg-text-tertiary" style={{ height: 10 }} />
-                        <span className="absolute left-1.5 top-1 text-[10px] font-mono text-text-tertiary tabular-nums whitespace-nowrap leading-none">{fmtShort(sec)}</span>
+                        <div className="absolute bottom-0 w-px bg-text-tertiary" style={{ height: 14 }} />
+                        <span className="absolute left-1.5 top-1.5 text-[10px] font-mono text-text-tertiary tabular-nums whitespace-nowrap leading-none">{fmtShort(sec)}</span>
                       </div>
                     ))}
                     {hoverTime !== null && !isScrubbing && (
                       <div className="absolute top-0 bottom-0 pointer-events-none z-10" style={{ left: `${(hoverTime / Math.max(duration, 1)) * 100}%` }}>
                         <div className="absolute bottom-0 w-px h-full bg-border" />
-                        <span className="absolute -top-0.5 left-1/2 -translate-x-1/2 px-1 py-px rounded text-[9px] font-mono bg-surface text-text-primary border border-border tabular-nums whitespace-nowrap shadow-sm">{fmtShort(hoverTime)}</span>
+                        <span className="absolute top-1 left-1/2 -translate-x-1/2 px-1.5 py-0.5 rounded text-[9px] font-mono bg-surface text-text-primary border border-border tabular-nums whitespace-nowrap shadow-sm">{fmtShort(hoverTime)}</span>
                       </div>
                     )}
                   </div>
 
-                  {/* Video track */}
-                  <div className={`h-11 shrink-0 relative border-b border-border ${trackMuted.video ? 'opacity-40' : ''}`}>
-                    <div className="absolute inset-y-[3px] left-0 right-0 rounded-lg overflow-hidden border border-accent/30 bg-accent-light flex">
-                      {/* Filmstrip: actual video frames or placeholder dividers */}
-                      {timelineThumbnails.length > 0 ? (
-                        timelineThumbnails.map((src, i) => (
-                          <div key={i} className="flex-1 min-w-0 h-full relative" style={{ flexBasis: 0 }}>
-                            <img src={src} alt="" className="w-full h-full object-cover block" />
-                          </div>
-                        ))
-                      ) : (
-                        duration > 0 && (() => {
-                          const frameCount = Math.min(24, Math.max(8, Math.floor(duration / 1.5)))
-                          return (
-                            <>
-                              {Array.from({ length: frameCount - 1 }, (_, i) => (
-                                <div
-                                  key={i}
-                                  className="absolute top-0 bottom-0 w-px bg-accent/20 pointer-events-none"
-                                  style={{ left: `${((i + 1) / frameCount) * 100}%` }}
-                                />
-                              ))}
-                            </>
-                          )
-                        })()
-                      )}
-                      <div className="absolute left-0 right-0 inset-y-0 bg-gradient-to-r from-black/50 via-transparent to-black/40 pointer-events-none rounded-lg z-[1]" />
-                      <span className="absolute inset-y-0 left-3 flex items-center text-xs font-medium text-text-primary truncate pr-6 z-[2] drop-shadow-sm" title={title}>{title || 'Untitled'}</span>
-                      <span className="absolute inset-y-0 right-3 flex items-center text-[10px] font-mono text-text-tertiary tabular-nums z-[2] drop-shadow-sm">{fmtShort(duration)}</span>
-                      <div className="absolute left-0 inset-y-0 w-1.5 bg-accent/60 hover:bg-accent cursor-col-resize rounded-l-lg transition-colors z-[2]" />
-                      <div className="absolute right-0 inset-y-0 w-1.5 bg-accent/60 hover:bg-accent cursor-col-resize rounded-r-lg transition-colors z-[2]" />
+                  <div className={`h-[64px] shrink-0 relative border-b border-border ${trackMuted.video ? 'opacity-40' : ''}`}>
+                    <div className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden border border-accent/25 bg-gradient-to-r from-brand-charcoal via-[#123228] to-brand-charcoal shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                      <div className="absolute inset-0 flex">
+                        {timelineThumbnails.length > 0 ? (
+                          timelineThumbnails.map((src, i) => (
+                            <div key={i} className="flex-1 min-w-0 h-full relative" style={{ flexBasis: 0 }}>
+                              <img src={src} alt="" className="w-full h-full object-cover block" />
+                            </div>
+                          ))
+                        ) : (
+                          (() => {
+                            const frameCount = Math.min(16, Math.max(8, Math.floor(Math.max(duration, 8) / 2)))
+                            return Array.from({ length: frameCount }, (_, i) => (
+                              <div key={i} className="relative h-full flex-1 min-w-0 border-r border-white/10" style={{ flexBasis: 0 }}>
+                                <div className="absolute inset-0 bg-gradient-to-br from-white/[0.04] via-transparent to-black/30" />
+                                <div className="absolute inset-x-0 bottom-0 h-4 bg-gradient-to-t from-black/40 to-transparent" />
+                                <div className="absolute top-2 left-2 right-2 h-px bg-white/10" />
+                                {i === frameCount - 1 ? null : <div className="absolute top-0 right-0 bottom-0 w-px bg-accent/15" />}
+                              </div>
+                            ))
+                          })()
+                        )}
+                      </div>
+                      <div className="absolute inset-0 bg-gradient-to-r from-black/60 via-transparent to-black/40 pointer-events-none" />
+                      <div className="absolute inset-x-2.5 top-2 z-[2] flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="text-xs font-medium text-white truncate" title={title}>{title || 'Untitled'}</p>
+                        </div>
+                        <span className="rounded-full border border-white/10 bg-black/30 px-1.5 py-0.5 text-[9px] font-mono tabular-nums text-white/80">{fmtShort(duration)}</span>
+                      </div>
+                      <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-accent/80" />
+                      <div className="absolute right-0 top-0 bottom-0 w-1.5 bg-accent/60" />
+                      <div className="absolute left-0 bottom-0 h-1 bg-accent/80" style={{ width: `${Math.max(0, Math.min(100, progress * 100))}%` }} />
                     </div>
                     {trackLocked.video && (
-                      <div className="absolute inset-0 bg-background/50 rounded-lg flex items-center justify-center">
-                        <svg className="w-3.5 h-3.5 text-text-tertiary" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z" /></svg>
+                      <div className="absolute inset-0 bg-background/40 rounded-lg flex items-center justify-center">
+                        <svg className="w-4 h-4 text-text-tertiary" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z" /></svg>
                       </div>
                     )}
                   </div>
 
-                  {/* Audio track */}
-                  <div className={`h-9 shrink-0 relative border-b border-border ${trackMuted.audio ? 'opacity-40' : ''}`}>
-                    <div className="absolute inset-y-[3px] left-0 right-0 rounded-lg overflow-hidden border border-highlight/20 bg-highlight/10 flex items-center">
-                      {/* Waveform: draw on top with solid bars so it’s always visible */}
-                      {audioWaveformData.length > 0 ? (
-                        <div className="absolute inset-0 flex items-center justify-center gap-[3px] px-3 z-[1]" style={{ paddingTop: 6, paddingBottom: 6 }}>
-                          {audioWaveformData.map((amp, i) => {
-                            const normalized = Math.min(1, amp)
-                            const barHeightPx = Math.max(8, Math.round(normalized * 18))
-                            return (
-                              <div
-                                key={i}
-                                className="flex-1 min-w-0 h-full flex items-center justify-center"
-                                style={{ minWidth: 3 }}
-                              >
-                                <div
-                                  className="rounded-sm w-full shrink-0"
-                                  style={{
-                                    height: barHeightPx,
-                                    minHeight: 8,
-                                    maxWidth: 6,
-                                    backgroundColor: 'var(--strand-accent, #00DC82)',
-                                  }}
-                                  title={`${duration > 0 ? ((i / (audioWaveformData.length - 1)) * duration).toFixed(1) : 0}s`}
-                                />
-                              </div>
-                            )
-                          })}
+                  <div className={`h-[48px] shrink-0 relative border-b border-border ${trackMuted.audio ? 'opacity-40' : ''}`}>
+                    <div className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden border border-highlight/25 bg-gradient-to-r from-highlight/[0.14] via-surface to-highlight/[0.14] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                      <div className="absolute inset-0 bg-gradient-to-b from-white/[0.03] via-transparent to-highlight/[0.05] pointer-events-none" />
+                      <div className="absolute inset-x-3 top-1/2 h-px -translate-y-1/2 bg-highlight/15" />
+                      {audioWaveformPath ? (
+                        <>
+                          <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
+                            <path d={audioWaveformPath} fill="rgba(0, 220, 130, 0.16)" stroke="rgba(64, 230, 164, 0.42)" strokeWidth="1.2" />
+                          </svg>
+                          <svg
+                            className="absolute inset-0 h-full w-full z-[2]"
+                            viewBox="0 0 1200 84"
+                            preserveAspectRatio="none"
+                            aria-hidden
+                            style={{ clipPath: `inset(0 ${Math.max(0, 100 - progress * 100)}% 0 0)` }}
+                          >
+                            <path d={audioWaveformPath} fill="rgba(117, 255, 194, 0.34)" stroke="rgba(133, 255, 204, 0.98)" strokeWidth="1.4" />
+                          </svg>
+                        </>
+                      ) : (
+                        <div className="absolute inset-0 z-[1] flex items-center justify-center">
+                          <span className="rounded-full border border-highlight/20 bg-surface/80 px-2.5 py-1 text-[10px] font-medium text-text-tertiary">
+                            No waveform available for this source yet
+                          </span>
                         </div>
-                      ) : null}
-                      <div className="absolute left-0 right-0 inset-y-0 bg-gradient-to-r from-surface/50 via-transparent to-surface/50 pointer-events-none rounded-lg z-0" />
-                      <span className="absolute inset-y-0 left-3 flex items-center text-xs font-medium text-text-secondary truncate pr-2 z-[2] drop-shadow-sm">Audio</span>
-                      <span className="absolute inset-y-0 right-3 flex items-center text-[10px] font-mono text-text-tertiary tabular-nums z-[2] drop-shadow-sm">{fmtShort(duration)}</span>
-                      <div className="absolute left-0 inset-y-0 w-1.5 bg-highlight/40 hover:bg-highlight cursor-col-resize rounded-l-lg transition-colors z-[2]" />
-                      <div className="absolute right-0 inset-y-0 w-1.5 bg-highlight/40 hover:bg-highlight cursor-col-resize rounded-r-lg transition-colors z-[2]" />
+                      )}
+                      <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-highlight/70" />
+                      <div className="absolute right-0 top-0 bottom-0 w-1.5 bg-highlight/40" />
                     </div>
                     {trackLocked.audio && (
-                      <div className="absolute inset-0 bg-background/50 rounded-lg flex items-center justify-center">
-                        <svg className="w-3.5 h-3.5 text-text-tertiary" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z" /></svg>
+                      <div className="absolute inset-0 bg-background/40 rounded-lg flex items-center justify-center">
+                        <svg className="w-4 h-4 text-text-tertiary" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z" /></svg>
                       </div>
                     )}
                   </div>
 
-                  {/* Gridlines */}
                   {majorTicks.map((sec) => (
-                    <div key={`g-${sec}`} className="absolute pointer-events-none bg-border/30" style={{ left: `${duration > 0 ? (sec / duration) * 100 : 0}%`, top: 28, bottom: 0, width: 1 }} />
+                    <div key={`g-${sec}`} className="absolute pointer-events-none bg-border/30" style={{ left: `${duration > 0 ? (sec / duration) * 100 : 0}%`, top: 36, bottom: 0, width: 1 }} />
                   ))}
 
-                  {/* Buffered indicator */}
-                  <div className="absolute top-0 h-7 pointer-events-none bg-border/20 rounded-sm" style={{ left: 0, width: `${bufferedPct * 100}%` }} />
+                  <div className="absolute top-0 h-9 pointer-events-none bg-border/20 rounded-sm" style={{ left: 0, width: `${bufferedPct * 100}%` }} />
 
-                  {/* Playhead */}
                   <div className="absolute top-0 bottom-0 pointer-events-none z-30" style={{ left: `${progress * 100}%` }}>
-                    <svg className="absolute top-0 left-1/2 -translate-x-1/2" width="12" height="12" viewBox="0 0 12 12" fill="none">
-                      <path d="M6 0L9 5H6.5V12H5.5V5H3L6 0Z" fill="#00DC82" />
+                    <svg className="absolute top-0 left-1/2 -translate-x-1/2" width="14" height="14" viewBox="0 0 14 14" fill="none">
+                      <path d="M7 0L11 5.5H8V14H6V5.5H3L7 0Z" fill="#00DC82" />
                     </svg>
-                    <div className="absolute top-[10px] bottom-0 left-1/2 -translate-x-1/2 w-px bg-accent" />
+                    <div className="absolute top-[12px] bottom-0 left-1/2 -translate-x-1/2 w-px bg-accent shadow-[0_0_12px_rgba(0,220,130,0.45)]" />
                   </div>
                 </div>
               </div>
@@ -2266,7 +2724,7 @@ export default function VideoEditorPage() {
         </div>
 
         {/* ============ RIGHT SIDEBAR (collapsible) ============ */}
-        <aside className={`shrink-0 flex flex-col border-l border-border bg-surface overflow-hidden transition-[width] duration-200 ${rightSidebarOpen ? 'w-80' : 'w-10'}`}>
+        <aside className={`shrink-0 flex flex-col min-h-0 border-l border-border bg-surface overflow-hidden transition-[width] duration-200 ${rightSidebarOpen ? 'w-80' : 'w-10'}`}>
           {rightSidebarOpen ? (
             <>
               {activeTool === 'captions' ? (
@@ -2279,66 +2737,89 @@ export default function VideoEditorPage() {
                     </button>
                   </div>
 
-                  {/* Category tags */}
-                  <div className="px-3 pt-3 pb-2 border-b border-border shrink-0 space-y-2">
-                    <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider">Media</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {['Video', 'Audio'].map((tag) => (
-                        <span key={tag} className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-card border border-border text-text-secondary">
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                    <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider pt-1">Content</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {['Text-in-video', 'Conversation'].map((tag) => (
-                        <span key={tag} className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-card border border-border text-text-secondary">
-                          {tag}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Summary — collapsible; separate from chat */}
-                  <div className="shrink-0 p-3">
-                    <div className="rounded-lg border border-border bg-card overflow-hidden">
+                  {/* Overview tags — collapsible; only when overview has been generated */}
+                  {!summaryLoading && summaryTags && (
+                    <div className="border-b border-border shrink-0">
                       <button
                         type="button"
-                        onClick={() => setAnalyzeSummaryExpanded((e) => !e)}
-                        className="w-full px-3 py-2.5 flex items-center justify-between text-left bg-surface hover:bg-card transition-colors"
+                        onClick={() => setOverviewTagsExpanded((e) => !e)}
+                        className="w-full px-3 pt-3 pb-2 flex items-center justify-between text-left hover:bg-surface/50 transition-colors rounded-t-lg"
                       >
-                        <span className="text-xs font-medium text-text-secondary">Summary</span>
-                        <span className="text-text-tertiary transition-transform" style={{ transform: analyzeSummaryExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}>
+                        <span className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider">Overview</span>
+                        <span className="text-text-tertiary transition-transform shrink-0" style={{ transform: overviewTagsExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}>
                           <IconChevronRight className="w-4 h-4" />
                         </span>
                       </button>
-                      {analyzeSummaryExpanded && (
-                        <div className="px-3 pb-3 pt-0 border-t border-border">
-                          {summaryLoading && (
-                            <p className="text-xs text-text-tertiary py-2">Generating summary…</p>
-                          )}
-                          {!summaryLoading && summaryText && (
-                            <div className={`pt-2 ${markdownWrapClass}`}>
-                              <ReactMarkdown components={markdownComponents}>{summaryText}</ReactMarkdown>
+                      {overviewTagsExpanded && (
+                        <div className="px-3 pb-3 pt-0 space-y-3">
+                          {summaryTags.about && (
+                            <div className="space-y-1.5">
+                              <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1.5">
+                                <IconAbout className="w-3.5 h-3.5 opacity-70" />
+                                About
+                              </p>
+                              <p className="text-xs text-text-secondary leading-relaxed">{summaryTags.about}</p>
                             </div>
                           )}
-                          {!summaryLoading && !summaryText && (
-                            <div className="pt-2 space-y-2">
-                              <p className="text-xs text-text-tertiary">Generate a short summary of this video.</p>
-                              <button
-                                type="button"
-                                onClick={runGenerateSummary}
-                                disabled={!videoId}
-                                className="w-full h-8 rounded-md text-xs font-medium bg-accent text-white border border-accent hover:bg-accent-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                              >
-                                Generate summary
-                              </button>
+                          {summaryTags.topics && summaryTags.topics.length > 0 && (
+                            <div className="space-y-1.5">
+                              <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1.5">
+                                <IconTopics className="w-3.5 h-3.5 opacity-70" />
+                                Topics
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {summaryTags.topics.map((tag) => (
+                                  <span key={tag} className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-accent/15 text-accent border border-accent/30">
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {summaryTags.categories && summaryTags.categories.length > 0 && (
+                            <div className="space-y-1.5">
+                              <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1.5">
+                                <IconCategories className="w-3.5 h-3.5 opacity-70" />
+                                Categories
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {summaryTags.categories.map((tag) => (
+                                  <span key={tag} className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-card border border-border text-text-secondary">
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
                             </div>
                           )}
                         </div>
                       )}
                     </div>
-                  </div>
+                  )}
+
+                  {/* Overview CTA — only when overview not yet generated (About is shown above once done) */}
+                  {!summaryTags && (
+                    <div className="shrink-0 p-3">
+                      <div className="rounded-lg border border-border bg-card overflow-hidden">
+                        {summaryLoading ? (
+                          <div className="px-3 py-2.5">
+                            <p className="text-xs text-text-tertiary">Generating overview…</p>
+                          </div>
+                        ) : (
+                          <div className="px-3 py-2.5 space-y-2">
+                            <p className="text-xs text-text-tertiary">Generate a short overview of this video.</p>
+                            <button
+                              type="button"
+                              onClick={runGenerateSummary}
+                              disabled={!videoId}
+                              className="w-full h-8 rounded-md text-xs font-medium bg-accent text-white border border-accent hover:bg-accent-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              Generate overview
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Chat — analyze Q&A with markdown responses */}
                   <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
@@ -2407,7 +2888,7 @@ export default function VideoEditorPage() {
                   </div>
                 </>
               ) : (
-            /* Detection sidebar (Tracker or Detection selected) */
+            /* Detection sidebar (Tracker or Detection selected) — same flex pattern as Analyze so video player middle behaves identically */
             <>
               <div className="px-3 h-10 flex items-center justify-between border-b border-border shrink-0 gap-1">
                 <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider truncate min-w-0">Detections</span>
@@ -2419,7 +2900,7 @@ export default function VideoEditorPage() {
                 </button>
               </div>
               {hasRunDetection ? (
-                <>
+                <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                   <div className="p-2 border-b border-border shrink-0">
                     <input
                       type="search"
@@ -2432,7 +2913,7 @@ export default function VideoEditorPage() {
                       Use the eye toggle to choose which people or object classes get blurred in live preview and export.
                     </p>
                   </div>
-                  <div className="flex-1 overflow-y-auto">
+                  <div className="flex-1 min-h-0 overflow-y-auto">
                     {filteredDetections.map((d) => {
                       const excluded = excludedFromRedactionIds.includes(d.id)
                       return (
@@ -2483,9 +2964,10 @@ export default function VideoEditorPage() {
                       )
                     })}
                   </div>
-                </>
+                </div>
               ) : (
-                <div className="flex-1 overflow-y-auto flex flex-col items-center justify-center min-h-[8rem] gap-3 p-4">
+                <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                  <div className="flex-1 min-h-0 overflow-y-auto flex flex-col items-center justify-center min-h-[8rem] gap-3 p-4">
                   {detectionError && (
                     <p className="text-xs text-error text-center">{detectionError}</p>
                   )}
@@ -2500,6 +2982,7 @@ export default function VideoEditorPage() {
                   <p className="text-[10px] text-text-tertiary text-center max-w-[180px]">
                     Loads faces & objects from job (e.g. {DEFAULT_DETECTION_JOB_ID})
                   </p>
+                </div>
                 </div>
               )}
             </>

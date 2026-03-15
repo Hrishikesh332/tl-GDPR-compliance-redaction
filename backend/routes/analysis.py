@@ -71,8 +71,18 @@ def _merge_temporal_detections(detections, requested_time):
         for idx, group in enumerate(grouped):
             if group["kind"] != det["kind"]:
                 continue
+            if det["kind"] == "face":
+                group_person_id = group.get("personId")
+                det_person_id = det.get("personId")
+                if group_person_id and det_person_id and group_person_id != det_person_id:
+                    continue
             if det["kind"] == "object" and group["label"] != det["label"]:
                 continue
+            if det["kind"] == "object":
+                group_object_class = group.get("objectClass")
+                det_object_class = det.get("objectClass")
+                if group_object_class and det_object_class and group_object_class != det_object_class:
+                    continue
             iou = _detection_iou(group, det)
             center_distance = _detection_center_distance(group, det)
             max_distance = 0.18 if det["kind"] == "face" else 0.24
@@ -108,6 +118,8 @@ def _merge_temporal_detections(detections, requested_time):
             "id": f"{group['kind']}-{idx}",
             "kind": group["kind"],
             "label": group["label"],
+            "personId": group.get("personId"),
+            "objectClass": group.get("objectClass"),
             "confidence": round(float(group.get("confidence", 0.0)), 4),
             "x": round(float(group["x"]), 6),
             "y": round(float(group["y"]), 6),

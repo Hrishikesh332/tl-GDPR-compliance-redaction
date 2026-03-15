@@ -65,7 +65,7 @@ function Shell() {
   }, [mobileMenuOpen])
 
   return (
-    <div className="min-h-screen bg-background text-text-primary flex flex-col">
+    <div className="min-h-screen h-screen max-h-screen bg-background text-text-primary flex flex-col overflow-hidden">
       <div className="relative" ref={menuRef}>
         <header className="bg-background px-4 py-3 flex items-center justify-between shrink-0 border-b border-border">
           <div className="flex items-center gap-3 min-w-0 flex-1 md:flex-initial">
@@ -123,8 +123,8 @@ function Shell() {
         </div>
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
-        <main className="flex-1 overflow-auto min-w-0" key={location.pathname}>
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        <main className="flex-1 min-h-0 overflow-auto min-w-0" key={location.pathname}>
           <Routes location={location}>
             <Route path="/" element={<OverviewPage />} />
             <Route

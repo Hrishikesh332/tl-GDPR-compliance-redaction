@@ -133,3 +133,40 @@ def list_videos():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "videos": [], "index_id": index_id}), 200
+
+
+@index_bp.route("/videos/<video_id>", methods=["GET"])
+def get_video(video_id):
+    """Get single video info from TwelveLabs (includes user_metadata/overview)."""
+    index_id = request.args.get("index_id")
+    try:
+        info = twelvelabs_service.get_video_info(video_id, index_id=index_id)
+        overview = twelvelabs_service.get_video_overview_from_user_metadata(info.get("user_metadata"))
+        if overview is not None:
+            info["overview"] = overview
+        return jsonify(info)
+    except Exception as e:
+        logger.exception("get_video %s", video_id)
+        return jsonify({"error": str(e)}), 404
+
+
+@index_bp.route("/videos/<video_id>/overview", methods=["POST"])
+def save_video_overview(video_id):
+    """Save overview (about, topics, categories) to TwelveLabs video user_metadata."""
+    data = request.get_json(silent=True) or {}
+    about = data.get("about")
+    topics = data.get("topics")
+    categories = data.get("categories")
+    if about is None and topics is None and categories is None:
+        return jsonify({"error": "at least one of about, topics, categories required"}), 400
+    try:
+        twelvelabs_service.set_video_overview(
+            video_id,
+            about=about,
+            topics=topics,
+            categories=categories,
+        )
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.exception("save_video_overview %s", video_id)
+        return jsonify({"error": str(e)}), 500

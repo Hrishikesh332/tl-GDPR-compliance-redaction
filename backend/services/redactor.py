@@ -44,7 +44,7 @@ def _create_tracker(scale_adaptive=False):
                 return t
         except (AttributeError, cv2.error, Exception):
             continue
-    logger.warning("No OpenCV tracker available (install opencv-contrib-python). Manual regions will use static blur.")
+    logger.warning("No OpenCV tracker available (install opencv-contrib-python). Manual regions will fall back to optical-flow/static tracking.")
     return None
 
 
@@ -139,6 +139,18 @@ def _init_tracker_from_frame_bbox(tracker, small_frame, bbox, scale_back):
         return False
     tracker.init(small_frame, roi)
     return True
+
+
+def _create_initialized_tracker(small_frame, bbox, scale_back, scale_adaptive=True):
+    tracker = _create_tracker(scale_adaptive=scale_adaptive)
+    if tracker is None:
+        return None
+    try:
+        if _init_tracker_from_frame_bbox(tracker, small_frame, bbox, scale_back):
+            return tracker
+    except (cv2.error, AttributeError, Exception):
+        return None
+    return None
 
 
 def _custom_region_tracking_mode(region):
@@ -604,13 +616,9 @@ def redact_video(
 
                 tracker = None
                 try:
-                    tr = _create_tracker(scale_adaptive=True)
-                    if tr is None:
-                        logger.warning("Custom region %d: no tracker available, using detector/static fallback.", idx)
-                    elif _init_tracker_from_frame_bbox(tr, small, tracked_bbox, scale_back_actual):
-                        tracker = tr
-                    else:
-                        logger.warning("Custom region %d ROI too small after clamp, using detector/static fallback.", idx)
+                    tracker = _create_initialized_tracker(small, tracked_bbox, scale_back_actual, scale_adaptive=True)
+                    if tracker is None:
+                        logger.warning("Custom region %d tracker unavailable or init failed, using optical/static fallback.", idx)
                 except (cv2.error, AttributeError, Exception) as e:
                     logger.warning("Custom region %d tracker init failed, using fallback: %s", idx, e)
 
@@ -664,7 +672,14 @@ def redact_video(
                 if tr is not None and periodic_reinit and use_bbox:
                     try:
                         reinit_bbox = _expand_bbox(use_bbox, w, h, TRACKER_REINIT_BBOX_EXPAND_FACTOR)
-                        if _init_tracker_from_frame_bbox(tr, small, reinit_bbox, scale_back_actual):
+                        refreshed_tracker = _create_initialized_tracker(
+                            small,
+                            reinit_bbox,
+                            scale_back_actual,
+                            scale_adaptive=True,
+                        )
+                        if refreshed_tracker is not None:
+                            tr = refreshed_tracker
                             fail_count = 0
                     except (cv2.error, AttributeError, Exception):
                         pass
@@ -693,6 +708,21 @@ def redact_video(
                         optical_bbox = _small_bbox_to_frame_bbox(optical_small_bbox, scale_back_actual, w, h)
                         optical_ok = optical_bbox is not None
 
+                if tr is not None and optical_ok and (not tracker_ok or _bbox_iou(tracker_bbox, optical_bbox) < 0.3):
+                    try:
+                        optical_seed_bbox = _expand_bbox(optical_bbox, w, h, TRACKER_REINIT_BBOX_EXPAND_FACTOR)
+                        refreshed_tracker = _create_initialized_tracker(
+                            small,
+                            optical_seed_bbox,
+                            scale_back_actual,
+                            scale_adaptive=True,
+                        )
+                        if refreshed_tracker is not None:
+                            tr = refreshed_tracker
+                            fail_count = 0
+                    except (cv2.error, AttributeError, Exception):
+                        pass
+
                 resolved_bbox = optical_bbox if optical_ok else (tracker_bbox if tracker_ok else None)
                 resolved_face_bbox = prev_face_bbox
                 face_detected = False
@@ -718,13 +748,15 @@ def redact_video(
                             or _bbox_iou(tracker_bbox, resolved_bbox) < 0.45
                         ):
                             try:
-                                _init_tracker_from_frame_bbox(
-                                    tr,
+                                refreshed_tracker = _create_initialized_tracker(
                                     small,
                                     _expand_bbox(resolved_bbox, w, h, TRACKER_REINIT_BBOX_EXPAND_FACTOR),
                                     scale_back_actual,
+                                    scale_adaptive=True,
                                 )
-                                fail_count = 0
+                                if refreshed_tracker is not None:
+                                    tr = refreshed_tracker
+                                    fail_count = 0
                             except (cv2.error, AttributeError, Exception):
                                 pass
                     elif tracker_ok:
@@ -759,11 +791,18 @@ def redact_video(
                     custom_last_bboxes[idx] = last_bbox
                     custom_smoothed_bboxes[idx] = prev_smoothed
 
-                tracking_success = tracker_ok or face_detected
+                tracking_success = tracker_ok or optical_ok or face_detected
                 if not tracking_success and tr is not None and fail_count >= CUSTOM_TRACKER_REINIT_AFTER_FAILS and use_bbox:
                     try:
                         reinit_factor = TRACKER_REINIT_BBOX_EXPAND_FACTOR if mode != "face" else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
-                        if _init_tracker_from_frame_bbox(tr, small, _expand_bbox(use_bbox, w, h, reinit_factor), scale_back_actual):
+                        refreshed_tracker = _create_initialized_tracker(
+                            small,
+                            _expand_bbox(use_bbox, w, h, reinit_factor),
+                            scale_back_actual,
+                            scale_adaptive=True,
+                        )
+                        if refreshed_tracker is not None:
+                            tr = refreshed_tracker
                             fail_count = 0
                     except (cv2.error, AttributeError, Exception):
                         pass

@@ -408,6 +408,61 @@ def list_indexed_videos(index_id=None, page=1, page_limit=10):
     return {"videos": videos, "index_id": idx}
 
 
+def update_video_user_metadata(video_id, user_metadata, index_id=None):
+    """Update user_metadata for a video (e.g. overview). Values must be string, int, float, or bool."""
+    client = _get_client()
+    idx = index_id or TWELVELABS_INDEX_ID
+    logger.info("Updating user_metadata for video %s in index %s", video_id, idx)
+    client.indexes.videos.update(
+        index_id=idx,
+        video_id=video_id,
+        user_metadata=user_metadata,
+    )
+
+
+OVERVIEW_ABOUT_KEY = "overview_about"
+OVERVIEW_TOPICS_KEY = "overview_topics"
+OVERVIEW_CATEGORIES_KEY = "overview_categories"
+
+
+def get_video_overview_from_user_metadata(user_metadata):
+    """Extract overview (about, topics, categories) from TwelveLabs user_metadata."""
+    if not user_metadata or not isinstance(user_metadata, dict):
+        return None
+    about = user_metadata.get(OVERVIEW_ABOUT_KEY)
+    topics_raw = user_metadata.get(OVERVIEW_TOPICS_KEY)
+    categories_raw = user_metadata.get(OVERVIEW_CATEGORIES_KEY)
+    if about is None and not topics_raw and not categories_raw:
+        return None
+    try:
+        topics = json.loads(topics_raw) if isinstance(topics_raw, str) else (topics_raw if isinstance(topics_raw, list) else [])
+    except (json.JSONDecodeError, TypeError):
+        topics = []
+    try:
+        categories = json.loads(categories_raw) if isinstance(categories_raw, str) else (categories_raw if isinstance(categories_raw, list) else [])
+    except (json.JSONDecodeError, TypeError):
+        categories = []
+    return {
+        "about": about if isinstance(about, str) else None,
+        "topics": topics if isinstance(topics, list) else [],
+        "categories": categories if isinstance(categories, list) else [],
+    }
+
+
+def set_video_overview(video_id, about=None, topics=None, categories=None, index_id=None):
+    """Persist overview to TwelveLabs video user_metadata."""
+    user_metadata = {}
+    if about is not None and isinstance(about, str):
+        user_metadata[OVERVIEW_ABOUT_KEY] = about
+    if topics is not None:
+        user_metadata[OVERVIEW_TOPICS_KEY] = json.dumps(topics) if isinstance(topics, list) else json.dumps([])
+    if categories is not None:
+        user_metadata[OVERVIEW_CATEGORIES_KEY] = json.dumps(categories) if isinstance(categories, list) else json.dumps([])
+    if not user_metadata:
+        return
+    update_video_user_metadata(video_id, user_metadata, index_id=index_id)
+
+
 def get_video_info(video_id, index_id=None):
     client = _get_client()
     idx = index_id or TWELVELABS_INDEX_ID
