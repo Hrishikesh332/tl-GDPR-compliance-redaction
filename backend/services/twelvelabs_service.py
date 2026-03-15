@@ -2,6 +2,7 @@ import json
 import logging
 import time
 
+import requests
 from twelvelabs import TwelveLabs
 
 from config import (
@@ -12,9 +13,13 @@ from config import (
 logger = logging.getLogger("video_redaction.twelvelabs")
 
 _client = None
+TWELVELABS_API_BASE = "https://api.twelvelabs.io"
+TWELVELABS_API_VERSION = "v1.3"
+# TwelveLabs entity collection/entity list endpoints currently cap page_limit at 50.
+ENTITY_PAGE_LIMIT = 50
 
 
-def _get_client():
+def get_client():
     global _client
     if _client is None:
         _client = TwelveLabs(api_key=TWELVELABS_API_KEY)
@@ -25,8 +30,12 @@ def get_index_id():
     return TWELVELABS_INDEX_ID
 
 
+def entity_api_available():
+    return bool(TWELVELABS_API_KEY)
+
+
 def ingest_video(video_path, callback=None):
-    client = _get_client()
+    client = get_client()
     logger.info("Uploading video to TwelveLabs index %s", TWELVELABS_INDEX_ID)
 
     task = client.tasks.create(
@@ -59,7 +68,7 @@ def ingest_video(video_path, callback=None):
 
 
 def get_task_status(task_id):
-    client = _get_client()
+    client = get_client()
     task = client.tasks.retrieve(task_id=task_id)
     return {
         "task_id": task.id,
@@ -70,7 +79,7 @@ def get_task_status(task_id):
 
 
 def describe_people(video_id):
-    client = _get_client()
+    client = get_client()
     logger.info("Analyzing people in video %s", video_id)
 
     result = client.analyze(
@@ -103,7 +112,7 @@ def describe_people(video_id):
 
 
 def describe_objects(video_id):
-    client = _get_client()
+    client = get_client()
     logger.info("Analyzing objects in video %s", video_id)
 
     result = client.analyze(
@@ -140,7 +149,7 @@ def describe_objects(video_id):
 
 
 def get_scene_summary(video_id):
-    client = _get_client()
+    client = get_client()
     logger.info("Getting scene summary for video %s", video_id)
 
     result = client.analyze(
@@ -167,7 +176,7 @@ def get_scene_summary(video_id):
         return {"raw_summary": result.data}
 
 
-def _raw_response_to_loggable(raw_list):
+def raw_response_to_loggable(raw_list):
     """Convert raw API response items to JSON-serializable dicts for logging."""
     out = []
     for item in raw_list:
@@ -200,17 +209,27 @@ def _raw_response_to_loggable(raw_list):
     return out
 
 
-def _serialize_search_results(response):
-    results = []
+def serialize_search_results(response):
+    results_by_video = {}
     for item in response:
         grouped_clips = getattr(item, "clips", None)
         grouped_video_id = getattr(item, "id", None)
-        if grouped_video_id and grouped_clips:
-            video_result = {
-                "video_id": grouped_video_id,
-                "score": getattr(item, "score", None),
-                "clips": [],
-            }
+        video_id = getattr(item, "video_id", None) or grouped_video_id
+        if not video_id:
+            continue
+
+        video_result = results_by_video.setdefault(video_id, {
+            "video_id": video_id,
+            "score": None,
+            "clips": [],
+        })
+        item_score = getattr(item, "score", None)
+        if item_score is not None:
+            current_score = video_result.get("score")
+            if current_score is None or item_score > current_score:
+                video_result["score"] = item_score
+
+        if grouped_clips:
             for clip in grouped_clips:
                 video_result["clips"].append({
                     "start": clip.start,
@@ -219,11 +238,14 @@ def _serialize_search_results(response):
                     "rank": getattr(clip, "rank", None),
                     "thumbnail_url": getattr(clip, "thumbnail_url", None),
                 })
-            results.append(video_result)
             continue
 
-        results.append({
-            "video_id": getattr(item, "video_id", None) or grouped_video_id,
+        start = getattr(item, "start", None)
+        end = getattr(item, "end", None)
+        if start is None or end is None:
+            continue
+
+        video_result["clips"].append({
             "start": getattr(item, "start", None),
             "end": getattr(item, "end", None),
             "score": getattr(item, "score", None),
@@ -231,11 +253,21 @@ def _serialize_search_results(response):
             "thumbnail_url": getattr(item, "thumbnail_url", None),
         })
 
+    results = list(results_by_video.values())
+    for result in results:
+        result["clips"].sort(
+            key=lambda clip: (
+                clip.get("rank") is None,
+                clip.get("rank") if clip.get("rank") is not None else float("inf"),
+                -(clip.get("score") or 0),
+                clip.get("start") or 0,
+            )
+        )
     return results
 
 
 def search_segments(query=None, index_id=None, image_path=None, image_url=None):
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
     if not query and not image_path and not image_url:
         raise ValueError("query text or image is required")
@@ -265,8 +297,8 @@ def search_segments(query=None, index_id=None, image_path=None, image_url=None):
             query_media_url=image_url,
         )
         raw_list = list(response)
-        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(_raw_response_to_loggable(raw_list), default=str, indent=2))
-        return _serialize_search_results(iter(raw_list))
+        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
+        return serialize_search_results(iter(raw_list))
 
     if image_path:
         with open(image_path, "rb") as image_file:
@@ -276,17 +308,17 @@ def search_segments(query=None, index_id=None, image_path=None, image_url=None):
                 query_media_file=image_file,
             )
         raw_list = list(response)
-        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(_raw_response_to_loggable(raw_list), default=str, indent=2))
-        return _serialize_search_results(iter(raw_list))
+        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
+        return serialize_search_results(iter(raw_list))
 
     response = client.search.query(**kwargs)
     raw_list = list(response)
-    logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(_raw_response_to_loggable(raw_list), default=str, indent=2))
-    return _serialize_search_results(iter(raw_list))
+    logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
+    return serialize_search_results(iter(raw_list))
 
 
 def find_person_time_ranges(video_id, person_description):
-    client = _get_client()
+    client = get_client()
     logger.info("Finding time ranges for person: %s", person_description)
 
     response = client.search.query(
@@ -316,7 +348,7 @@ ANALYZE_FORMAT_INSTRUCTION = (
 
 
 def analyze_video_custom(video_id, prompt):
-    client = _get_client()
+    client = get_client()
     logger.info("Custom analysis on video %s", video_id)
     enhanced_prompt = f"{ANALYZE_FORMAT_INSTRUCTION}\n\n{prompt}"
     result = client.analyze(video_id=video_id, prompt=enhanced_prompt, temperature=0.2)
@@ -324,7 +356,7 @@ def analyze_video_custom(video_id, prompt):
 
 
 def index_video_from_file(video_path, index_id=None, enable_stream=True):
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
     logger.info("Submitting indexing task for %s -> index %s", video_path, idx)
 
@@ -344,7 +376,7 @@ def index_video_from_file(video_path, index_id=None, enable_stream=True):
 
 
 def index_video_from_url(video_url, index_id=None, enable_stream=True):
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
     logger.info("Submitting indexing task for URL %s -> index %s", video_url, idx)
 
@@ -364,7 +396,7 @@ def index_video_from_url(video_url, index_id=None, enable_stream=True):
 
 
 def wait_for_indexing(task_id, callback=None):
-    client = _get_client()
+    client = get_client()
 
     def _on_update(t):
         logger.info("Task %s: status=%s", task_id, t.status)
@@ -386,7 +418,7 @@ def wait_for_indexing(task_id, callback=None):
 
 
 def list_indexing_tasks(index_id=None, status_filter=None, page=1, page_limit=10):
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
 
     kwargs = {
@@ -425,7 +457,7 @@ def list_indexing_tasks(index_id=None, status_filter=None, page=1, page_limit=10
 
 
 def list_indexed_videos(index_id=None, page=1, page_limit=10):
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
     logger.info("Listing videos in index %s", idx)
 
@@ -486,7 +518,7 @@ def list_indexed_videos(index_id=None, page=1, page_limit=10):
 
 def update_video_user_metadata(video_id, user_metadata, index_id=None):
     """Update user_metadata for a video (e.g. overview). Values must be string, int, float, or bool."""
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
     logger.info("Updating user_metadata for video %s in index %s", video_id, idx)
     client.indexes.videos.update(
@@ -540,7 +572,7 @@ def set_video_overview(video_id, about=None, topics=None, categories=None, index
 
 
 def get_video_info(video_id, index_id=None):
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
     logger.info("Retrieving video %s from index %s", video_id, idx)
 
@@ -580,14 +612,14 @@ def get_video_info(video_id, index_id=None):
 
 
 def delete_indexed_video(video_id, index_id=None):
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
     logger.info("Deleting video %s from index %s", video_id, idx)
     client.indexes.videos.delete(index_id=idx, video_id=video_id)
 
 
 def get_index_info(index_id=None):
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
     logger.info("Retrieving index info for %s", idx)
     index = client.indexes.retrieve(index_id=idx)
@@ -612,114 +644,303 @@ def get_index_info(index_id=None):
 _entity_collection_id = TWELVELABS_ENTITY_COLLECTION_ID or None
 
 
-def _ensure_entity_collection():
+def entity_sdk_available():
+    try:
+        client = get_client()
+        return hasattr(client, "entity_collections") and client.entity_collections is not None
+    except Exception:
+        return False
+
+
+def get_twelvelabs_api_url(path):
+    return f"{TWELVELABS_API_BASE}/{TWELVELABS_API_VERSION}/{path.lstrip('/')}"
+
+
+def extract_api_error(response):
+    try:
+        payload = response.json()
+    except ValueError:
+        return response.text.strip() or f"TwelveLabs API request failed ({response.status_code})"
+
+    if isinstance(payload, dict):
+        for key in ("message", "error", "detail"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        inner_error = payload.get("error")
+        if isinstance(inner_error, dict):
+            for key in ("message", "detail", "error"):
+                value = inner_error.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+    return f"TwelveLabs API request failed ({response.status_code})"
+
+
+def twelvelabs_api_request(
+    method,
+    path,
+    *,
+    params=None,
+    json_body=None,
+    data=None,
+    files=None,
+    expected_status=(200,),
+    timeout=60,
+):
+    if not TWELVELABS_API_KEY:
+        raise RuntimeError("TWELVELABS_API_KEY is not configured.")
+
+    response = requests.request(
+        method=method,
+        url=get_twelvelabs_api_url(path),
+        headers={"x-api-key": TWELVELABS_API_KEY},
+        params=params,
+        json=json_body,
+        data=data,
+        files=files,
+        timeout=timeout,
+    )
+    if response.status_code not in expected_status:
+        raise RuntimeError(extract_api_error(response))
+    if response.status_code == 204 or not response.content:
+        return None
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def extract_list_items(payload):
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("data", "entity_collections", "entities", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def extract_next_page_token(payload):
+    if not isinstance(payload, dict):
+        return None
+    page_info = payload.get("page_info")
+    if isinstance(page_info, dict):
+        next_page_token = page_info.get("next_page_token")
+        if isinstance(next_page_token, str) and next_page_token:
+            return next_page_token
+    next_page_token = payload.get("next_page_token")
+    if isinstance(next_page_token, str) and next_page_token:
+        return next_page_token
+    return None
+
+
+def list_twelvelabs_items(path, *, params=None):
+    all_items = []
+    next_page_token = None
+    while True:
+        query = dict(params or {})
+        query.setdefault("page_limit", ENTITY_PAGE_LIMIT)
+        if next_page_token:
+            query["page_token"] = next_page_token
+        payload = twelvelabs_api_request("GET", path, params=query, expected_status=(200,))
+        all_items.extend(extract_list_items(payload))
+        next_page_token = extract_next_page_token(payload)
+        if not next_page_token:
+            return all_items
+
+
+def get_value(source, *keys):
+    if isinstance(source, dict):
+        for key in keys:
+            if key in source and source[key] is not None:
+                return source[key]
+        return None
+    for key in keys:
+        value = getattr(source, key, None)
+        if value is not None:
+            return value
+    return None
+
+
+def serialize_entity_collection(collection):
+    return {
+        "id": get_value(collection, "_id", "id"),
+        "name": get_value(collection, "name"),
+        "description": get_value(collection, "description"),
+        "created_at": str(get_value(collection, "created_at", "createdAt")) if get_value(collection, "created_at", "createdAt") else None,
+    }
+
+
+def ensure_entity_collection():
     global _entity_collection_id
     if _entity_collection_id:
         return _entity_collection_id
 
-    client = _get_client()
+    if entity_sdk_available():
+        client = get_client()
+        response = client.entity_collections.list(name=TWELVELABS_ENTITY_COLLECTION_NAME)
+        for collection in response:
+            if collection.name == TWELVELABS_ENTITY_COLLECTION_NAME:
+                _entity_collection_id = collection.id
+                logger.info("Found existing entity collection: %s", _entity_collection_id)
+                return _entity_collection_id
 
-    response = client.entity_collections.list(name=TWELVELABS_ENTITY_COLLECTION_NAME)
-    for collection in response:
-        if collection.name == TWELVELABS_ENTITY_COLLECTION_NAME:
-            _entity_collection_id = collection.id
-            logger.info("Found existing entity collection: %s", _entity_collection_id)
+        collection = client.entity_collections.create(
+            name=TWELVELABS_ENTITY_COLLECTION_NAME,
+            description="Face entities for video redaction pipeline",
+        )
+        _entity_collection_id = collection.id
+        logger.info("Created entity collection via SDK: %s", _entity_collection_id)
+        return _entity_collection_id
+
+    collections = list_twelvelabs_items("entity-collections")
+    for collection in collections:
+        if get_value(collection, "name") == TWELVELABS_ENTITY_COLLECTION_NAME:
+            _entity_collection_id = get_value(collection, "_id", "id")
+            logger.info("Found existing entity collection via REST: %s", _entity_collection_id)
             return _entity_collection_id
 
-    collection = client.entity_collections.create(
-        name=TWELVELABS_ENTITY_COLLECTION_NAME,
-        description="Face entities for video redaction pipeline",
+    collection = twelvelabs_api_request(
+        "POST",
+        "entity-collections",
+        json_body={
+            "name": TWELVELABS_ENTITY_COLLECTION_NAME,
+            "description": "Face entities for video redaction pipeline",
+        },
+        expected_status=(200, 201),
     )
-    _entity_collection_id = collection.id
-    logger.info("Created entity collection: %s", _entity_collection_id)
+    _entity_collection_id = get_value(collection, "_id", "id")
+    logger.info("Created entity collection via REST: %s", _entity_collection_id)
     return _entity_collection_id
 
 
 def get_entity_collection_id():
-    return _ensure_entity_collection()
+    return ensure_entity_collection()
 
 
 def list_entity_collections():
-    client = _get_client()
-    results = []
-    response = client.entity_collections.list()
-    for collection in response:
-        results.append({
-            "id": collection.id,
-            "name": collection.name,
-            "description": collection.description,
-            "created_at": str(collection.created_at) if collection.created_at else None,
-        })
-    return results
+    if entity_sdk_available():
+        client = get_client()
+        results = []
+        response = client.entity_collections.list()
+        for collection in response:
+            results.append(serialize_entity_collection(collection))
+        return results
+
+    return [serialize_entity_collection(collection) for collection in list_twelvelabs_items("entity-collections")]
 
 
 def upload_face_asset(snap_path):
-    client = _get_client()
     logger.info("Uploading face asset from %s", snap_path)
-    asset = client.assets.create(
-        method="direct",
-        file=open(snap_path, "rb"),
-    )
-    logger.info("Created asset: %s", asset.id)
-    return asset.id
+    client = get_client()
+    try:
+        with open(snap_path, "rb") as snap_file:
+            asset = client.assets.create(
+                method="direct",
+                file=snap_file,
+            )
+        logger.info("Created asset via SDK: %s", asset.id)
+        return asset.id
+    except AttributeError:
+        with open(snap_path, "rb") as snap_file:
+            asset = twelvelabs_api_request(
+                "POST",
+                "assets",
+                data={"method": "direct"},
+                files={"file": snap_file},
+                expected_status=(200, 201),
+                timeout=120,
+            )
+        asset_id = get_value(asset, "_id", "id")
+        logger.info("Created asset via REST: %s", asset_id)
+        return asset_id
 
 
 def upload_face_asset_from_url(image_url):
-    client = _get_client()
     logger.info("Uploading face asset from URL: %s", image_url)
-    asset = client.assets.create(
-        method="url",
-        url=image_url,
-    )
-    logger.info("Created asset: %s", asset.id)
-    return asset.id
+    client = get_client()
+    try:
+        asset = client.assets.create(
+            method="url",
+            url=image_url,
+        )
+        logger.info("Created asset via SDK: %s", asset.id)
+        return asset.id
+    except AttributeError:
+        asset = twelvelabs_api_request(
+            "POST",
+            "assets",
+            data={"method": "url", "url": image_url},
+            expected_status=(200, 201),
+        )
+        asset_id = get_value(asset, "_id", "id")
+        logger.info("Created asset via REST: %s", asset_id)
+        return asset_id
 
 
-def _serialize_entity(entity, metadata=None):
-    entity_id = getattr(entity, "id", None)
-    raw_metadata = metadata if metadata is not None else getattr(entity, "metadata", None)
+def serialize_entity(entity, metadata=None):
+    entity_id = get_value(entity, "_id", "id")
+    raw_metadata = metadata if metadata is not None else get_value(entity, "metadata")
     resolved_metadata = raw_metadata if isinstance(raw_metadata, dict) else None
     return {
         "id": entity_id,
         "entity_id": entity_id,
-        "name": getattr(entity, "name", None),
-        "description": getattr(entity, "description", None),
-        "status": str(entity.status) if getattr(entity, "status", None) else None,
-        "asset_ids": getattr(entity, "asset_ids", None),
+        "name": get_value(entity, "name"),
+        "description": get_value(entity, "description"),
+        "status": str(get_value(entity, "status")) if get_value(entity, "status") else None,
+        "asset_ids": get_value(entity, "asset_ids", "assetIds"),
         "metadata": resolved_metadata,
-        "created_at": str(entity.created_at) if getattr(entity, "created_at", None) else None,
+        "created_at": str(get_value(entity, "created_at", "createdAt")) if get_value(entity, "created_at", "createdAt") else None,
     }
 
 
 def create_entity(name, asset_ids, description=None, metadata=None):
-    client = _get_client()
-    collection_id = _ensure_entity_collection()
+    collection_id = ensure_entity_collection()
     logger.info("Creating entity '%s' with %d assets in collection %s",
                 name, len(asset_ids), collection_id)
 
-    entity = client.entity_collections.entities.create(
-        entity_collection_id=collection_id,
-        name=name,
-        asset_ids=asset_ids,
-        **({"description": description} if description else {}),
-        **({"metadata": metadata} if metadata else {}),
-    )
+    if entity_sdk_available():
+        client = get_client()
+        entity = client.entity_collections.entities.create(
+            entity_collection_id=collection_id,
+            name=name,
+            asset_ids=asset_ids,
+            **({"description": description} if description else {}),
+            **({"metadata": metadata} if metadata else {}),
+        )
+    else:
+        body = {
+            "name": name,
+            "asset_ids": asset_ids,
+        }
+        if description:
+            body["description"] = description
+        if metadata:
+            body["metadata"] = metadata
+        entity = twelvelabs_api_request(
+            "POST",
+            f"entity-collections/{collection_id}/entities",
+            json_body=body,
+            expected_status=(200, 201),
+        )
 
-    logger.info("Created entity: id=%s, status=%s", entity.id, entity.status)
-    return _serialize_entity(entity, metadata=metadata)
+    logger.info(
+        "Created entity: id=%s, status=%s",
+        get_value(entity, "_id", "id"),
+        get_value(entity, "status"),
+    )
+    return serialize_entity(entity, metadata=metadata)
 
 
 def wait_for_entity_ready(entity_id, timeout=120):
-    client = _get_client()
-    collection_id = _ensure_entity_collection()
+    collection_id = ensure_entity_collection()
     start = time.time()
 
     while time.time() - start < timeout:
-        entity = client.entity_collections.entities.retrieve(
-            entity_collection_id=collection_id,
-            entity_id=entity_id,
-        )
-        if entity.status and str(entity.status) == "ready":
+        entity = retrieve_entity(entity_id)
+        if entity.get("status") == "ready":
             return True
         time.sleep(3)
 
@@ -727,49 +948,97 @@ def wait_for_entity_ready(entity_id, timeout=120):
 
 
 def list_entities():
-    client = _get_client()
-    collection_id = _ensure_entity_collection()
-    results = []
-    response = client.entity_collections.entities.list(
-        entity_collection_id=collection_id,
-    )
-    for entity in response:
-        metadata = getattr(entity, "metadata", None)
-        if metadata is None and getattr(entity, "id", None):
-            try:
-                detailed = client.entity_collections.entities.retrieve(
-                    entity_collection_id=collection_id,
-                    entity_id=entity.id,
-                )
-                metadata = getattr(detailed, "metadata", None)
-            except Exception as e:
-                logger.debug("Could not enrich entity %s metadata: %s", entity.id, e)
-        results.append(_serialize_entity(entity, metadata=metadata))
-    return results
+    collection_id = ensure_entity_collection()
+    if entity_sdk_available():
+        client = get_client()
+        results = []
+        response = client.entity_collections.entities.list(
+            entity_collection_id=collection_id,
+        )
+        for entity in response:
+            metadata = getattr(entity, "metadata", None)
+            if metadata is None and getattr(entity, "id", None):
+                try:
+                    detailed = client.entity_collections.entities.retrieve(
+                        entity_collection_id=collection_id,
+                        entity_id=entity.id,
+                    )
+                    metadata = getattr(detailed, "metadata", None)
+                except Exception as e:
+                    logger.debug("Could not enrich entity %s metadata: %s", entity.id, e)
+            results.append(serialize_entity(entity, metadata=metadata))
+        return results
+
+    entities = list_twelvelabs_items(f"entity-collections/{collection_id}/entities")
+    return [serialize_entity(entity) for entity in entities]
 
 
 def retrieve_entity(entity_id):
-    client = _get_client()
-    collection_id = _ensure_entity_collection()
-    entity = client.entity_collections.entities.retrieve(
-        entity_collection_id=collection_id,
-        entity_id=entity_id,
-    )
-    return _serialize_entity(entity, metadata=getattr(entity, "metadata", None))
+    collection_id = ensure_entity_collection()
+    if entity_sdk_available():
+        client = get_client()
+        entity = client.entity_collections.entities.retrieve(
+            entity_collection_id=collection_id,
+            entity_id=entity_id,
+        )
+    else:
+        entity = twelvelabs_api_request(
+            "GET",
+            f"entity-collections/{collection_id}/entities/{entity_id}",
+            expected_status=(200,),
+        )
+    return serialize_entity(entity, metadata=get_value(entity, "metadata"))
 
 
 def delete_entity(entity_id):
-    client = _get_client()
-    collection_id = _ensure_entity_collection()
-    client.entity_collections.entities.delete(
-        entity_collection_id=collection_id,
-        entity_id=entity_id,
-    )
+    collection_id = ensure_entity_collection()
+    if entity_sdk_available():
+        client = get_client()
+        client.entity_collections.entities.delete(
+            entity_collection_id=collection_id,
+            entity_id=entity_id,
+        )
+    else:
+        twelvelabs_api_request(
+            "DELETE",
+            f"entity-collections/{collection_id}/entities/{entity_id}",
+            expected_status=(200, 204),
+        )
     logger.info("Deleted entity: %s", entity_id)
 
 
+def add_assets_to_entity(entity_id, asset_ids):
+    if not asset_ids:
+        raise ValueError("asset_ids is required")
+
+    collection_id = ensure_entity_collection()
+    logger.info(
+        "Adding %d asset(s) to entity %s in collection %s",
+        len(asset_ids),
+        entity_id,
+        collection_id,
+    )
+
+    if entity_sdk_available():
+        client = get_client()
+        entity = client.entity_collections.entities.create_assets(
+            entity_collection_id=collection_id,
+            entity_id=entity_id,
+            asset_ids=asset_ids,
+        )
+    else:
+        entity = twelvelabs_api_request(
+            "POST",
+            f"entity-collections/{collection_id}/entities/{entity_id}/assets",
+            json_body={"asset_ids": asset_ids},
+            expected_status=(200, 201),
+        )
+
+    return serialize_entity(entity, metadata=get_value(entity, "metadata"))
+
+
 def entity_search(entity_id, query_suffix="", index_id=None):
-    client = _get_client()
+    client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
 
     query_text = f"<@{entity_id}>"
@@ -786,7 +1055,7 @@ def entity_search(entity_id, query_suffix="", index_id=None):
         sort_option="score",
         page_limit=50,
     )
-    return _serialize_search_results(response)
+    return serialize_search_results(response)
 
 
 def entity_search_time_ranges(entity_id, video_id=None, index_id=None):
@@ -808,7 +1077,7 @@ def entity_search_time_ranges(entity_id, video_id=None, index_id=None):
 
 
 def create_entities_from_face_snaps(unique_faces, run_dir):
-    collection_id = _ensure_entity_collection()
+    collection_id = ensure_entity_collection()
     entities = []
     import os
 

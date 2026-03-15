@@ -134,6 +134,80 @@ function buildWaveformPath(samples: number[], width: number, height: number, pad
   return `M ${topPoints.join(' L ')} L ${bottomPoints.join(' L ')} Z`
 }
 
+function getSearchClipImportance(
+  clip: { rank?: number; score?: number },
+  maxRank: number,
+): number {
+  const score = typeof clip.score === 'number' && Number.isFinite(clip.score) ? clip.score : 0
+  const scoreWeight = Math.max(0.7, Math.min(1, 0.78 + score * 2.2))
+
+  if (clip.rank != null && maxRank > 0) {
+    const rankProgress = maxRank <= 1 ? 1 : 1 - ((clip.rank - 1) / (maxRank - 1))
+    const rankWeight = 0.16 + 0.84 * Math.pow(Math.max(0, rankProgress), 1.85)
+    return Math.max(0.12, Math.min(1, rankWeight * scoreWeight))
+  }
+
+  return Math.max(0.18, Math.min(1, scoreWeight))
+}
+
+function buildSearchWaveformSamples(
+  clips: Array<{ start: number; end: number; rank?: number; score?: number }>,
+  duration: number,
+  sampleCount: number,
+): number[] {
+  if (duration <= 0 || sampleCount <= 0 || clips.length === 0) return []
+
+  const rankedClips = clips.filter((clip) => clip.rank != null)
+  const maxRank = rankedClips.length > 0
+    ? Math.max(...rankedClips.map((clip) => clip.rank as number))
+    : 0
+  const samples = new Array(sampleCount).fill(0)
+
+  for (const clip of clips) {
+    const start = Math.max(0, Math.min(duration, clip.start))
+    const end = Math.max(start, Math.min(duration, clip.end))
+    if (end <= start) continue
+
+    const startIndex = Math.max(0, Math.floor((start / duration) * sampleCount))
+    const endIndex = Math.min(
+      sampleCount - 1,
+      Math.max(startIndex, Math.ceil((end / duration) * sampleCount) - 1),
+    )
+    const clipImportance = getSearchClipImportance(clip, maxRank)
+    const span = Math.max(1, endIndex - startIndex)
+
+    for (let index = startIndex; index <= endIndex; index += 1) {
+      const progress = span <= 1 ? 0.5 : (index - startIndex) / span
+      const centerEnvelope = Math.sin(Math.PI * progress)
+      const shapedAmplitude = clipImportance * (0.26 + 0.74 * Math.pow(Math.max(0, centerEnvelope), 0.82))
+      samples[index] = Math.max(samples[index], shapedAmplitude)
+    }
+  }
+
+  const smoothed = samples.map((sample, index) => {
+    const prev = samples[index - 1] ?? sample
+    const next = samples[index + 1] ?? sample
+    return prev * 0.18 + sample * 0.64 + next * 0.18
+  })
+  const peak = Math.max(...smoothed, 0.001)
+  return smoothed.map((value) => Math.pow(Math.min(1, value / peak), 1.28))
+}
+
+function buildTimelineBarSeries(samples: number[], barCount: number): number[] {
+  if (!samples.length || barCount <= 0) return []
+  const bars: number[] = []
+  for (let barIndex = 0; barIndex < barCount; barIndex += 1) {
+    const start = Math.floor((barIndex / barCount) * samples.length)
+    const end = Math.max(start + 1, Math.floor(((barIndex + 1) / barCount) * samples.length))
+    let peak = 0
+    for (let sampleIndex = start; sampleIndex < Math.min(samples.length, end); sampleIndex += 1) {
+      peak = Math.max(peak, samples[sampleIndex] || 0)
+    }
+    bars.push(peak)
+  }
+  return bars
+}
+
 async function seekMediaElement(video: HTMLVideoElement, time: number, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const done = (result: boolean) => {
@@ -225,7 +299,37 @@ async function sampleWaveformFromMediaElement(
 /*  Toolbar config                                                     */
 /* ------------------------------------------------------------------ */
 
-type ToolId = 'tracker' | 'search-list' | 'captions'
+type ToolId = 'tracker' | 'search' | 'captions'
+
+type SearchClip = {
+  start: number
+  end: number
+  score?: number
+  rank?: number
+  thumbnailUrl?: string
+  thumbnail_url?: string
+}
+
+type SearchVideoResult = {
+  id: string
+  video_id?: string
+  title?: string
+  clips?: SearchClip[]
+  searchScore?: number
+}
+
+type SearchSessionEntity = {
+  id: string
+  name: string
+  previewUrl?: string
+}
+
+type SearchSessionResult = {
+  query: string
+  queryText?: string
+  entities?: SearchSessionEntity[]
+  results: SearchVideoResult[]
+}
 
 type VideoViewport = {
   left: number
@@ -263,7 +367,7 @@ type TrackingPreviewRegion = {
 
 const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
   { id: 'tracker', label: 'Live Blur', iconUrl: visionIconUrl },
-  { id: 'search-list', label: 'Detection', iconUrl: searchV2IconUrl },
+  { id: 'search', label: 'Search', iconUrl: searchV2IconUrl },
   { id: 'captions', label: 'Analyze/Transcript', iconUrl: analyzeIconUrl },
 ]
 
@@ -279,6 +383,18 @@ const LIVE_FACE_MAJOR_SHIFT_ALPHA = 0.82
 const LIVE_FACE_MINOR_SHIFT_DISTANCE = 0.035
 const LIVE_FACE_MAJOR_SHIFT_DISTANCE = 0.18
 const LIVE_FACE_MAJOR_SHIFT_SIZE_RATIO = 0.45
+// Hide the audio waveform so the lower lane can focus on entity-search matches.
+const SHOW_AUDIO_WAVEFORM = false
+const ENTITY_SEARCH_LANE_COLOR = '#00dc82'
+const ENTITY_SEARCH_LANE_BORDER = 'rgba(0, 220, 130, 0.22)'
+const ENTITY_SEARCH_LANE_BACKGROUND = 'linear-gradient(90deg, rgba(0, 220, 130, 0.07) 0%, rgba(0, 220, 130, 0.025) 50%, rgba(0, 220, 130, 0.07) 100%)'
+const ENTITY_SEARCH_LANE_OVERLAY = 'linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0) 58%, rgba(0,220,130,0.02) 100%)'
+const ENTITY_SEARCH_LANE_BASELINE = 'rgba(0, 220, 130, 0.18)'
+const ENTITY_SEARCH_LANE_BAR_BASE = 'rgba(0, 220, 130, 0.28)'
+const ENTITY_SEARCH_LANE_SEGMENT_ACTIVE = 'rgba(0, 220, 130, 0.16)'
+const ENTITY_SEARCH_LANE_SEGMENT_RING = 'rgba(0, 220, 130, 0.28)'
+const ENTITY_SEARCH_LANE_EDGE_LEFT = 'rgba(0, 220, 130, 0.55)'
+const ENTITY_SEARCH_LANE_EDGE_RIGHT = 'rgba(0, 220, 130, 0.35)'
 const LIVE_REDACTION_OBJECT_CLASSES = [
   'backpack',
   'bicycle',
@@ -713,6 +829,7 @@ export default function VideoEditorPage() {
   const [summaryText, setSummaryText] = useState<string | null>(null)
   const [summaryTags, setSummaryTags] = useState<{ about?: string; topics?: string[]; categories?: string[] } | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
+  const [searchSessionResult, setSearchSessionResult] = useState<SearchSessionResult | null>(null)
   const analyzeChatEndRef = useRef<HTMLDivElement>(null)
   const [timelineThumbnails, setTimelineThumbnails] = useState<string[]>([])
   const thumbnailsGeneratedRef = useRef(false)
@@ -720,6 +837,7 @@ export default function VideoEditorPage() {
   const [audioWaveformStatus, setAudioWaveformStatus] = useState<'idle' | 'loading' | 'ready' | 'unavailable'>('idle')
   const waveformGeneratedRef = useRef(false)
   const timelinePreviewVideoRef = useRef<HTMLVideoElement | null>(null)
+  const searchClipRowRefs = useRef<Array<HTMLButtonElement | null>>([])
   const hlsPreviewRef = useRef<InstanceType<typeof Hls> | null>(null)
   const hlsPreviewLoadedUrlRef = useRef<string | null>(null)
   const [previewVideoReady, setPreviewVideoReady] = useState(false)
@@ -806,6 +924,24 @@ export default function VideoEditorPage() {
     setSummaryTags(null)
   }, [videoId])
 
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem('video_redaction_last_search')
+      if (!raw) {
+        setSearchSessionResult(null)
+        return
+      }
+      const parsed = JSON.parse(raw) as SearchSessionResult
+      if (!parsed || typeof parsed.query !== 'string' || !Array.isArray(parsed.results)) {
+        setSearchSessionResult(null)
+        return
+      }
+      setSearchSessionResult(parsed)
+    } catch {
+      setSearchSessionResult(null)
+    }
+  }, [videoId])
+
   /* Load overview from TwelveLabs video user_metadata when opening a video */
   useEffect(() => {
     if (!videoId) return
@@ -864,11 +1000,11 @@ export default function VideoEditorPage() {
   useEffect(() => {
     setTimelineThumbnails([])
     setAudioWaveformData([])
-    setAudioWaveformStatus('idle')
+    setAudioWaveformStatus(SHOW_AUDIO_WAVEFORM ? 'idle' : 'unavailable')
     setPreviewVideoReady(false)
     setPlayerAspectRatio(16 / 9)
     thumbnailsGeneratedRef.current = false
-    waveformGeneratedRef.current = false
+    waveformGeneratedRef.current = !SHOW_AUDIO_WAVEFORM
   }, [effectiveStreamUrl])
 
   /* Hidden preview video: same stream as main, used only for timeline thumbnails/waveform so main video is never sought on pause */
@@ -1008,7 +1144,9 @@ export default function VideoEditorPage() {
         }
       }
 
-      if (!waveformGeneratedRef.current) {
+      if (!SHOW_AUDIO_WAVEFORM) {
+        waveformGeneratedRef.current = true
+      } else if (!waveformGeneratedRef.current) {
         if (!cancelled) setAudioWaveformStatus('loading')
         try {
           let waveform: number[] = []
@@ -1925,6 +2063,7 @@ export default function VideoEditorPage() {
   const bufferedPct = duration > 0 ? buffered / duration : 0
   const timelineContentWidthPct = timelineZoom * 100
   const audioWaveformDisplayData = useMemo(() => {
+    if (!SHOW_AUDIO_WAVEFORM) return []
     if (audioWaveformData.length > 0) return audioWaveformData
     if (audioWaveformStatus === 'loading') {
       return generateWaveformPlaceholder(Math.min(160, Math.max(56, Math.floor(Math.max(duration, 12) * 2.5))))
@@ -1936,6 +2075,7 @@ export default function VideoEditorPage() {
     [audioWaveformDisplayData],
   )
   const audioWaveformMeta = useMemo(() => {
+    if (!SHOW_AUDIO_WAVEFORM) return 'Audio lane hidden'
     if (audioWaveformStatus === 'ready') return 'Waveform ready'
     if (audioWaveformStatus === 'loading') return 'Building waveform'
     if (audioWaveformStatus === 'unavailable') return 'Waveform unavailable'
@@ -1978,6 +2118,84 @@ export default function VideoEditorPage() {
         d.label.toLowerCase().includes(q) || d.tags.some((t: string) => t.toLowerCase().includes(q))
     )
   }, [detectionFilter, detectionList])
+  const searchResultForVideo = useMemo(() => {
+    if (!videoId || !searchSessionResult?.results?.length) return null
+    const result = searchSessionResult.results.find((entry) => entry?.id === videoId || entry?.video_id === videoId)
+    if (!result) return null
+    const clips = Array.isArray(result.clips)
+      ? result.clips
+        .filter((clip): clip is SearchClip => (
+          !!clip &&
+          Number.isFinite(clip.start) &&
+          Number.isFinite(clip.end)
+        ))
+        .map((clip) => ({
+          ...clip,
+          score: typeof clip.score === 'number' && Number.isFinite(clip.score) ? clip.score : 0,
+          rank: typeof clip.rank === 'number' && Number.isFinite(clip.rank) ? clip.rank : undefined,
+          thumbnailUrl: clip.thumbnailUrl || clip.thumbnail_url || undefined,
+        }))
+      : []
+    return {
+      ...result,
+      clips,
+    }
+  }, [searchSessionResult, videoId])
+  const orderedSearchClips = useMemo(() => {
+    const clips = [...(searchResultForVideo?.clips || [])]
+    clips.sort((a, b) => {
+      if (a.rank != null && b.rank != null && a.rank !== b.rank) return a.rank - b.rank
+      if (a.rank != null && b.rank == null) return -1
+      if (a.rank == null && b.rank != null) return 1
+      if ((b.score ?? 0) !== (a.score ?? 0)) return (b.score ?? 0) - (a.score ?? 0)
+      return a.start - b.start
+    })
+    return clips
+  }, [searchResultForVideo])
+  const maxSearchRank = useMemo(() => {
+    const rankedClips = orderedSearchClips.filter((clip) => clip.rank != null)
+    return rankedClips.length > 0
+      ? Math.max(...rankedClips.map((clip) => clip.rank as number))
+      : 0
+  }, [orderedSearchClips])
+  const searchWaveformData = useMemo(() => {
+    if (!orderedSearchClips.length || duration <= 0) return []
+    const sampleCount = Math.min(320, Math.max(96, Math.floor(duration * 4)))
+    return buildSearchWaveformSamples(orderedSearchClips, duration, sampleCount)
+  }, [duration, orderedSearchClips])
+  const searchLaneBars = useMemo(() => {
+    if (!searchWaveformData.length) return []
+    const barCount = Math.min(144, Math.max(72, Math.floor(Math.max(duration, 12) * 1.8)))
+    return buildTimelineBarSeries(searchWaveformData, barCount).map((value, index) => ({
+      value,
+      x: (index / Math.max(1, barCount)) * 1200,
+      width: Math.max(4, (1200 / Math.max(1, barCount)) - 1.6),
+    }))
+  }, [duration, searchWaveformData])
+  const activeSearchClipIndex = useMemo(
+    () => orderedSearchClips.findIndex((clip) => currentTime >= clip.start && currentTime <= clip.end),
+    [currentTime, orderedSearchClips]
+  )
+  const searchLaneSegments = useMemo(() => orderedSearchClips.map((clip, index) => {
+    const clipStartPct = duration > 0 ? (clip.start / duration) * 100 : 0
+    const clipEndPct = duration > 0 ? (clip.end / duration) * 100 : 0
+    const clipWidthPct = Math.max(1.5, clipEndPct - clipStartPct)
+    return {
+      clip,
+      index,
+      isActive: activeSearchClipIndex === index,
+      importance: getSearchClipImportance(clip, maxSearchRank),
+      left: `${Math.max(0, Math.min(100, clipStartPct))}%`,
+      width: `${Math.max(clipWidthPct, 2)}%`,
+    }
+  }), [activeSearchClipIndex, duration, maxSearchRank, orderedSearchClips])
+  const activeSearchRank = activeSearchClipIndex >= 0
+    ? (orderedSearchClips[activeSearchClipIndex]?.rank ?? activeSearchClipIndex + 1)
+    : null
+  const searchEntities = useMemo(
+    () => (searchSessionResult?.entities || []).filter((entity) => entity?.id && entity?.name),
+    [searchSessionResult]
+  )
   const visibleLiveRedactionDetections = useMemo(() => {
     const now = Date.now()
     return liveRedactionDetections.filter((detection) => {
@@ -2175,6 +2393,21 @@ export default function VideoEditorPage() {
         borderRadius: trackerShape === 'ellipse' || trackerShape === 'circle' ? '50%' : '0',
       }
     : undefined
+
+  const jumpToActiveSearchRank = useCallback(() => {
+    if (activeSearchClipIndex < 0) return
+    searchClipRowRefs.current[activeSearchClipIndex]?.scrollIntoView({
+      block: 'nearest',
+      behavior: 'smooth',
+    })
+  }, [activeSearchClipIndex])
+
+  useEffect(() => {
+    if (searchResultForVideo && orderedSearchClips.length > 0) {
+      setActiveTool('search')
+      setRightSidebarOpen(true)
+    }
+  }, [orderedSearchClips.length, searchResultForVideo, videoId])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background text-text-primary overflow-hidden">
@@ -2626,8 +2859,6 @@ export default function VideoEditorPage() {
             </div>
 
             <div className="flex flex-1 min-h-0">
-              <div className="w-16 shrink-0 border-r border-border bg-card/30" aria-hidden />
-
               <div
                 ref={timelineRef}
                 className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden bg-background"
@@ -2696,41 +2927,139 @@ export default function VideoEditorPage() {
                     )}
                   </div>
 
-                  <div className={`h-[48px] shrink-0 relative border-b border-border ${trackMuted.audio ? 'opacity-40' : ''}`}>
-                    <div className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden border border-highlight/25 bg-gradient-to-r from-highlight/[0.14] via-surface to-highlight/[0.14] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-                      <div className="absolute inset-0 bg-gradient-to-b from-white/[0.03] via-transparent to-highlight/[0.05] pointer-events-none" />
-                      <div className="absolute inset-x-3 top-1/2 h-px -translate-y-1/2 bg-highlight/15" />
-                      {audioWaveformPath ? (
-                        <>
-                          <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
-                            <path d={audioWaveformPath} fill="rgba(0, 220, 130, 0.16)" stroke="rgba(64, 230, 164, 0.42)" strokeWidth="1.2" />
-                          </svg>
-                          <svg
-                            className="absolute inset-0 h-full w-full z-[2]"
-                            viewBox="0 0 1200 84"
-                            preserveAspectRatio="none"
-                            aria-hidden
-                            style={{ clipPath: `inset(0 ${Math.max(0, 100 - progress * 100)}% 0 0)` }}
-                          >
-                            <path d={audioWaveformPath} fill="rgba(117, 255, 194, 0.34)" stroke="rgba(133, 255, 204, 0.98)" strokeWidth="1.4" />
-                          </svg>
-                        </>
-                      ) : (
-                        <div className="absolute inset-0 z-[1] flex items-center justify-center">
-                          <span className="rounded-full border border-highlight/20 bg-surface/80 px-2.5 py-1 text-[10px] font-medium text-text-tertiary">
-                            No waveform available for this source yet
-                          </span>
+                  {orderedSearchClips.length > 0 && (
+                    <div className="h-[48px] shrink-0 relative border-b border-border">
+                      <div
+                        className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                        style={{
+                          border: `1px solid ${ENTITY_SEARCH_LANE_BORDER}`,
+                          background: ENTITY_SEARCH_LANE_BACKGROUND,
+                        }}
+                      >
+                        <div
+                          className="absolute inset-0 pointer-events-none"
+                          style={{ background: ENTITY_SEARCH_LANE_OVERLAY }}
+                        />
+                        <div
+                          className="absolute inset-x-3 bottom-[9px] h-px"
+                          style={{ backgroundColor: ENTITY_SEARCH_LANE_BASELINE }}
+                        />
+                        {searchLaneBars.length > 0 ? (
+                          <>
+                            <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
+                              {searchLaneBars.map((bar, index) => {
+                                const barHeight = 8 + bar.value * 56
+                                const y = 76 - barHeight
+                                return (
+                                  <rect
+                                    key={`search-bar-base-${index}`}
+                                    x={bar.x.toFixed(2)}
+                                    y={y.toFixed(2)}
+                                    width={bar.width.toFixed(2)}
+                                    height={barHeight.toFixed(2)}
+                                    rx="1.8"
+                                    fill={ENTITY_SEARCH_LANE_BAR_BASE}
+                                  />
+                                )
+                              })}
+                            </svg>
+                            <svg
+                              className="absolute inset-0 h-full w-full z-[2]"
+                              viewBox="0 0 1200 84"
+                              preserveAspectRatio="none"
+                              aria-hidden
+                              style={{ clipPath: `inset(0 ${Math.max(0, 100 - progress * 100)}% 0 0)` }}
+                            >
+                              {searchLaneBars.map((bar, index) => {
+                                const barHeight = 8 + bar.value * 56
+                                const y = 76 - barHeight
+                                return (
+                                  <rect
+                                    key={`search-bar-active-${index}`}
+                                    x={bar.x.toFixed(2)}
+                                    y={y.toFixed(2)}
+                                    width={bar.width.toFixed(2)}
+                                    height={barHeight.toFixed(2)}
+                                    rx="1.8"
+                                    fill={ENTITY_SEARCH_LANE_COLOR}
+                                  />
+                                )
+                              })}
+                            </svg>
+                          </>
+                        ) : null}
+                        {searchLaneSegments.map(({ clip, index, isActive, importance, left, width }) => {
+                          return (
+                            <button
+                              key={`lane-hit-${clip.start}-${clip.end}-${index}`}
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                seekToTime(clip.start)
+                              }}
+                              className="absolute inset-y-0 z-[3] bg-transparent"
+                              style={{
+                                left,
+                                width,
+                              }}
+                              title={`${fmtShort(clip.start)} - ${fmtShort(clip.end)}`}
+                            >
+                              <span
+                                className={`absolute inset-y-1 rounded-full transition-all ${isActive ? '' : 'hover:bg-[rgba(0,220,130,0.10)]'}`}
+                                style={{
+                                  left: 0,
+                                  right: 0,
+                                  backgroundColor: isActive ? ENTITY_SEARCH_LANE_SEGMENT_ACTIVE : undefined,
+                                  boxShadow: isActive ? `0 0 0 1px ${ENTITY_SEARCH_LANE_SEGMENT_RING}` : undefined,
+                                  opacity: isActive ? 0.95 : 0.15 + importance * 0.42,
+                                }}
+                              />
+                            </button>
+                          )
+                        })}
+                        <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_LEFT }} />
+                        <div className="absolute right-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_RIGHT }} />
+                      </div>
+                    </div>
+                  )}
+
+                  {SHOW_AUDIO_WAVEFORM && (
+                    <div className={`h-[48px] shrink-0 relative border-b border-border ${trackMuted.audio ? 'opacity-40' : ''}`}>
+                      <div className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden border border-highlight/25 bg-gradient-to-r from-highlight/[0.14] via-surface to-highlight/[0.14] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                        <div className="absolute inset-0 bg-gradient-to-b from-white/[0.03] via-transparent to-highlight/[0.05] pointer-events-none" />
+                        <div className="absolute inset-x-3 top-1/2 h-px -translate-y-1/2 bg-highlight/15" />
+                        {audioWaveformPath ? (
+                          <>
+                            <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
+                              <path d={audioWaveformPath} fill="rgba(0, 220, 130, 0.16)" stroke="rgba(64, 230, 164, 0.42)" strokeWidth="1.2" />
+                            </svg>
+                            <svg
+                              className="absolute inset-0 h-full w-full z-[2]"
+                              viewBox="0 0 1200 84"
+                              preserveAspectRatio="none"
+                              aria-hidden
+                              style={{ clipPath: `inset(0 ${Math.max(0, 100 - progress * 100)}% 0 0)` }}
+                            >
+                              <path d={audioWaveformPath} fill="rgba(117, 255, 194, 0.34)" stroke="rgba(133, 255, 204, 0.98)" strokeWidth="1.4" />
+                            </svg>
+                          </>
+                        ) : (
+                          <div className="absolute inset-0 z-[1] flex items-center justify-center">
+                            <span className="rounded-full border border-highlight/20 bg-surface/80 px-2.5 py-1 text-[10px] font-medium text-text-tertiary">
+                              No waveform available for this source yet
+                            </span>
+                          </div>
+                        )}
+                        <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-highlight/70" />
+                        <div className="absolute right-0 top-0 bottom-0 w-1.5 bg-highlight/40" />
+                      </div>
+                      {trackLocked.audio && (
+                        <div className="absolute inset-0 bg-background/40 rounded-lg flex items-center justify-center">
+                          <svg className="w-4 h-4 text-text-tertiary" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z" /></svg>
                         </div>
                       )}
-                      <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-highlight/70" />
-                      <div className="absolute right-0 top-0 bottom-0 w-1.5 bg-highlight/40" />
                     </div>
-                    {trackLocked.audio && (
-                      <div className="absolute inset-0 bg-background/40 rounded-lg flex items-center justify-center">
-                        <svg className="w-4 h-4 text-text-tertiary" viewBox="0 0 24 24" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z" /></svg>
-                      </div>
-                    )}
-                  </div>
+                  )}
 
                   {majorTicks.map((sec) => (
                     <div key={`g-${sec}`} className="absolute pointer-events-none bg-border/30" style={{ left: `${duration > 0 ? (sec / duration) * 100 : 0}%`, top: 36, bottom: 0, width: 1 }} />
@@ -2913,6 +3242,138 @@ export default function VideoEditorPage() {
                       </div>
                     </div>
                   </div>
+                </>
+              ) : activeTool === 'search' ? (
+                <>
+                  <div className="px-3 h-10 flex items-center justify-between border-b border-border shrink-0">
+                    <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Search</span>
+                    <button type="button" onClick={() => setRightSidebarOpen(false)} className={`h-7 w-7 shrink-0 rounded-md ${btnBase}`} aria-label="Collapse sidebar" title="Collapse sidebar">
+                      <IconChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                  {searchResultForVideo ? (
+                    <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                      <div className="p-3 border-b border-border shrink-0 space-y-3">
+                        {searchEntities.length > 0 && (
+                          <div>
+                            <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider">Entity</p>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {searchEntities.map((entity) => (
+                                <div
+                                  key={entity.id}
+                                  className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-2.5 py-1.5"
+                                >
+                                  <div className="h-8 w-8 shrink-0 overflow-hidden rounded-full border border-border bg-surface">
+                                    {entity.previewUrl ? (
+                                      <img
+                                        src={entity.previewUrl}
+                                        alt={entity.name}
+                                        className="h-full w-full object-cover"
+                                      />
+                                    ) : (
+                                      <div className="flex h-full w-full items-center justify-center text-[11px] font-medium text-text-tertiary">
+                                        {entity.name.trim().charAt(0).toUpperCase()}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <span className="text-xs text-text-primary">{entity.name}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {searchSessionResult?.queryText && (
+                          <div>
+                            <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider">Query</p>
+                            <p className="mt-1 text-xs leading-relaxed text-text-primary">
+                              {searchSessionResult.queryText}
+                            </p>
+                          </div>
+                        )}
+                        {!searchEntities.length && !searchSessionResult?.queryText && (
+                          <div>
+                            <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider">Search</p>
+                            <p className="mt-1 text-xs leading-relaxed text-text-primary">
+                              {searchSessionResult?.query || 'Latest search'}
+                            </p>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between gap-2 text-xs">
+                          <span className="text-text-tertiary">Matched clips</span>
+                          <span className="text-text-primary">
+                            {orderedSearchClips.length} clip{orderedSearchClips.length === 1 ? '' : 's'}
+                          </span>
+                        </div>
+                        {activeSearchRank != null && (
+                          <button
+                            type="button"
+                            onClick={jumpToActiveSearchRank}
+                            className="inline-flex w-full items-center justify-between rounded-lg border border-border bg-card px-3 py-2 text-left text-xs text-text-primary transition-colors hover:bg-background"
+                          >
+                            <span>Jump to current rank</span>
+                            <span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] font-semibold text-accent">
+                              Rank {activeSearchRank}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex-1 min-h-0 overflow-y-auto">
+                        {orderedSearchClips.length > 0 ? orderedSearchClips.map((clip, index) => {
+                          const rank = clip.rank ?? index + 1
+                          const isActive = activeSearchClipIndex === index
+                          return (
+                            <button
+                              ref={(node) => {
+                                searchClipRowRefs.current[index] = node
+                              }}
+                              key={`${clip.start}-${clip.end}-${rank}-${index}`}
+                              type="button"
+                              onClick={() => seekToTime(clip.start)}
+                              className={`w-full border-b border-l-2 px-3 py-3 text-left transition-colors ${isActive ? 'border-l-accent bg-accent/10' : 'border-l-transparent hover:bg-card'}`}
+                            >
+                              <div className="flex items-start gap-3">
+                                <div className={`relative h-12 w-20 shrink-0 overflow-hidden rounded-md border bg-card ${isActive ? 'border-accent/50 shadow-[0_0_0_1px_rgba(0,220,130,0.14)]' : 'border-border'}`}>
+                                  {clip.thumbnailUrl ? (
+                                    <img
+                                      src={clip.thumbnailUrl}
+                                      alt=""
+                                      className="h-full w-full object-cover"
+                                    />
+                                  ) : (
+                                    <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-card to-surface text-[10px] font-medium text-text-tertiary">
+                                      {fmtShort(clip.start)}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className={`truncate text-sm ${isActive ? 'text-accent' : 'text-text-primary'}`}>
+                                      {fmtShort(clip.start)} - {fmtShort(clip.end)}
+                                    </p>
+                                    <div className="flex shrink-0 items-center gap-2">
+                                      <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${isActive ? 'border-accent/40 bg-accent/15 text-accent' : 'border-border bg-card text-text-secondary'}`}>
+                                        Rank {rank}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            </button>
+                          )
+                        }) : (
+                          <div className="px-3 py-6">
+                            <p className="text-xs text-text-tertiary">No clips were returned for this search result.</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex-1 min-h-0 flex items-center justify-center p-4">
+                      <p className="max-w-[220px] text-center text-xs leading-relaxed text-text-tertiary">
+                        Run a search from the dashboard, then open a result video to see matched clips and rank here.
+                      </p>
+                    </div>
+                  )}
                 </>
               ) : (
             /* Detection sidebar (Tracker or Detection selected) — same flex pattern as Analyze so video player middle behaves identically */

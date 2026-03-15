@@ -34,7 +34,7 @@ _lock = threading.Lock()
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm")
 
 
-def _parse_iso_timestamp(value):
+def parse_iso_timestamp(value):
     if not value:
         return None
     try:
@@ -43,7 +43,7 @@ def _parse_iso_timestamp(value):
         return None
 
 
-def _run_dir_mtime(job_id):
+def run_dir_mtime(job_id):
     run_dir = get_run_dir(job_id)
     try:
         return os.path.getmtime(run_dir)
@@ -51,7 +51,7 @@ def _run_dir_mtime(job_id):
         return None
 
 
-def _candidate_source_videos():
+def candidate_source_videos():
     if not os.path.isdir(OUTPUT_DIR):
         return []
     candidates = []
@@ -68,9 +68,9 @@ def _candidate_source_videos():
     return sorted(candidates)
 
 
-def _infer_video_path_for_job(job_id, target_meta=None):
-    run_mtime = _run_dir_mtime(job_id)
-    candidates = _candidate_source_videos()
+def infer_video_path_for_job(job_id, target_meta=None):
+    run_mtime = run_dir_mtime(job_id)
+    candidates = candidate_source_videos()
     if not candidates:
         return None
 
@@ -110,7 +110,7 @@ def _infer_video_path_for_job(job_id, target_meta=None):
     return best_path
 
 
-def _build_manifest(job_id, job=None, overrides=None):
+def build_manifest(job_id, job=None, overrides=None):
     manifest = dict(load_job_manifest(job_id) or {})
     source = job or {}
     manifest.update({
@@ -129,17 +129,17 @@ def _build_manifest(job_id, job=None, overrides=None):
     return manifest
 
 
-def _persist_job_manifest(job_id, job=None, overrides=None):
-    manifest = _build_manifest(job_id, job=job, overrides=overrides)
+def persist_job_manifest(job_id, job=None, overrides=None):
+    manifest = build_manifest(job_id, job=job, overrides=overrides)
     run_dir = get_run_dir(job_id)
     save_job_manifest(run_dir, manifest)
     return manifest
 
 
-def _load_job_from_disk(job_id):
+def load_job_from_disk(job_id):
     manifest = load_job_manifest(job_id)
     disk = load_faces_objects_from_disk(job_id)
-    run_mtime = _run_dir_mtime(job_id)
+    run_mtime = run_dir_mtime(job_id)
 
     if manifest is None and disk is None:
         return None
@@ -149,7 +149,7 @@ def _load_job_from_disk(job_id):
     if video_path and not os.path.isfile(video_path):
         video_path = None
     if not video_path:
-        video_path = _infer_video_path_for_job(job_id, target_meta=target_meta)
+        video_path = infer_video_path_for_job(job_id, target_meta=target_meta)
         if video_path:
             manifest = manifest or {"job_id": job_id}
             manifest["video_path"] = video_path
@@ -174,11 +174,11 @@ def _load_job_from_disk(job_id):
     }
 
     if manifest:
-        _persist_job_manifest(job_id, overrides=manifest)
+        persist_job_manifest(job_id, overrides=manifest)
     return job
 
 
-def _recover_job_id_for_video(video_id):
+def recover_job_id_for_video(video_id):
     try:
         info = twelvelabs_service.get_video_info(video_id)
     except Exception as e:
@@ -187,7 +187,7 @@ def _recover_job_id_for_video(video_id):
 
     target_meta = info.get("system_metadata") or {}
     target_filename = target_meta.get("filename")
-    target_time = _parse_iso_timestamp(info.get("indexed_at")) or _parse_iso_timestamp(info.get("created_at"))
+    target_time = parse_iso_timestamp(info.get("indexed_at")) or parse_iso_timestamp(info.get("created_at"))
     if target_time is None and not target_filename and not target_meta:
         return None
 
@@ -200,7 +200,7 @@ def _recover_job_id_for_video(video_id):
             return job_id
 
         score = 0.0
-        run_time = _run_dir_mtime(job_id)
+        run_time = run_dir_mtime(job_id)
         if target_time is not None and run_time is not None:
             score += abs(run_time - target_time)
         if target_filename:
@@ -212,7 +212,7 @@ def _recover_job_id_for_video(video_id):
 
         inferred_path = manifest.get("video_path")
         if not inferred_path or not os.path.isfile(inferred_path):
-            inferred_path = _infer_video_path_for_job(job_id, target_meta=target_meta)
+            inferred_path = infer_video_path_for_job(job_id, target_meta=target_meta)
         if inferred_path:
             score -= 120.0
         else:
@@ -228,20 +228,20 @@ def _recover_job_id_for_video(video_id):
     recovered_manifest = {
         "job_id": best_job_id,
         "status": "ready",
-        "created_at": datetime.fromtimestamp(_run_dir_mtime(best_job_id), tz=timezone.utc).isoformat() if _run_dir_mtime(best_job_id) else None,
-        "video_path": _infer_video_path_for_job(best_job_id, target_meta=target_meta),
+        "created_at": datetime.fromtimestamp(run_dir_mtime(best_job_id), tz=timezone.utc).isoformat() if run_dir_mtime(best_job_id) else None,
+        "video_path": infer_video_path_for_job(best_job_id, target_meta=target_meta),
         "video_filename": target_filename,
         "twelvelabs_video_id": video_id,
         "video_metadata": target_meta or None,
         "twelvelabs_status": "done",
         "local_status": "done",
     }
-    _persist_job_manifest(best_job_id, overrides=recovered_manifest)
+    persist_job_manifest(best_job_id, overrides=recovered_manifest)
     logger.info("Recovered disk job %s for video %s using persisted snaps/output files", best_job_id, video_id)
     return best_job_id
 
 
-def _new_job_id():
+def new_job_id():
     return str(uuid.uuid4())[:12]
 
 
@@ -250,7 +250,7 @@ def get_job(job_id):
         job = _jobs.get(job_id)
     if job:
         return job
-    disk_job = _load_job_from_disk(job_id)
+    disk_job = load_job_from_disk(job_id)
     if disk_job:
         with _lock:
             _jobs[job_id] = disk_job
@@ -270,7 +270,7 @@ def get_job_id_by_video_id(video_id):
         manifest = load_job_manifest(jid)
         if manifest and manifest.get("twelvelabs_video_id") == video_id:
             return jid
-    return _recover_job_id_for_video(video_id)
+    return recover_job_id_for_video(video_id)
 
 
 def list_jobs():
@@ -287,7 +287,7 @@ def list_jobs():
 
 
 def start_ingestion(video_path, video_filename=None, interval_sec=None, skip_indexing=False, existing_video_id=None):
-    job_id = _new_job_id()
+    job_id = new_job_id()
     interval = interval_sec or KEYFRAME_INTERVAL_SEC
 
     with _lock:
@@ -300,10 +300,10 @@ def start_ingestion(video_path, video_filename=None, interval_sec=None, skip_ind
             "local_status": "pending",
             "error": None,
         }
-    _persist_job_manifest(job_id, job=_jobs[job_id])
+    persist_job_manifest(job_id, job=_jobs[job_id])
 
     thread = threading.Thread(
-        target=_run_ingestion,
+        target=run_ingestion,
         args=(job_id, video_path, interval, skip_indexing, existing_video_id),
         daemon=True,
     )
@@ -311,7 +311,7 @@ def start_ingestion(video_path, video_filename=None, interval_sec=None, skip_ind
     return job_id
 
 
-def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existing_video_id=None):
+def run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existing_video_id=None):
     try:
         logger.info("[Job %s] Pipeline started (interval=%.1fs, skip_indexing=%s)", job_id, interval_sec, skip_indexing)
 
@@ -321,7 +321,7 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
         with _lock:
             _jobs[job_id]["video_metadata"] = metadata
             snapshot = dict(_jobs[job_id])
-        _persist_job_manifest(job_id, job=snapshot)
+        persist_job_manifest(job_id, job=snapshot)
         logger.info("[Job %s] STEP 1/7: Done — %sx%s, %.1fs, %.0f fps", job_id,
                     metadata.get("width"), metadata.get("height"),
                     metadata.get("duration_sec"), metadata.get("fps"))
@@ -338,13 +338,13 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
                 _jobs[job_id]["twelvelabs_video_id"] = video_id
                 _jobs[job_id]["twelvelabs_status"] = "indexed"
                 snapshot = dict(_jobs[job_id])
-            _persist_job_manifest(job_id, job=snapshot)
+            persist_job_manifest(job_id, job=snapshot)
         elif skip_indexing:
             logger.info("[Job %s] STEP 2/7: Skipping indexing (no video_id provided)", job_id)
             with _lock:
                 _jobs[job_id]["twelvelabs_status"] = "skipped"
                 snapshot = dict(_jobs[job_id])
-            _persist_job_manifest(job_id, job=snapshot)
+            persist_job_manifest(job_id, job=snapshot)
         else:
             logger.info("[Job %s] STEP 2/7: TwelveLabs — uploading and indexing video...", job_id)
             with _lock:
@@ -360,7 +360,7 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
                     _jobs[job_id]["twelvelabs_task_id"] = task_id
                     _jobs[job_id]["twelvelabs_status"] = "indexed"
                     snapshot = dict(_jobs[job_id])
-                _persist_job_manifest(job_id, job=snapshot)
+                persist_job_manifest(job_id, job=snapshot)
 
                 logger.info("[Job %s] STEP 2/7: Done — indexed, video_id=%s", job_id, video_id)
 
@@ -369,7 +369,7 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
                 with _lock:
                     _jobs[job_id]["twelvelabs_status"] = f"index_failed: {str(e)}"
                     snapshot = dict(_jobs[job_id])
-                _persist_job_manifest(job_id, job=snapshot)
+                persist_job_manifest(job_id, job=snapshot)
 
         # ── STEP 3: TwelveLabs analysis → get timestamps ────────────────
         if video_id:
@@ -388,7 +388,7 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
                     _jobs[job_id]["twelvelabs_scene_summary"] = scene_summary
                     _jobs[job_id]["twelvelabs_status"] = "analyzed"
                     snapshot = dict(_jobs[job_id])
-                _persist_job_manifest(job_id, job=snapshot)
+                persist_job_manifest(job_id, job=snapshot)
 
                 logger.info("[Job %s] STEP 3/7: Done — analysis complete", job_id)
 
@@ -397,7 +397,7 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
                 with _lock:
                     _jobs[job_id]["twelvelabs_status"] = f"analysis_failed: {str(e)}"
                     snapshot = dict(_jobs[job_id])
-                _persist_job_manifest(job_id, job=snapshot)
+                persist_job_manifest(job_id, job=snapshot)
         else:
             logger.info("[Job %s] STEP 3/7: Skipped (no video_id)", job_id)
 
@@ -408,7 +408,7 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
         with _lock:
             _jobs[job_id]["local_status"] = "extracting_keyframes"
 
-        analyzed_timestamps = _collect_timestamps_from_analysis(
+        analyzed_timestamps = collect_timestamps_from_analysis(
             people_desc, objects_desc
         )
 
@@ -456,7 +456,7 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
         save_unique_face_snaps(run_dir, unique_faces)
         save_unique_object_snaps(run_dir, unique_objects)
 
-        _enrich_faces_with_descriptions(job_id, people_desc, unique_faces)
+        enrich_faces_with_descriptions(job_id, people_desc, unique_faces)
 
         with _lock:
             _jobs[job_id]["local_status"] = "done"
@@ -468,7 +468,7 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
             if video_id and "failed" not in _jobs[job_id].get("twelvelabs_status", ""):
                 _jobs[job_id]["twelvelabs_status"] = "done"
             snapshot = dict(_jobs[job_id])
-        _persist_job_manifest(job_id, job=snapshot)
+        persist_job_manifest(job_id, job=snapshot)
         logger.info("[Job %s] STEP 7/7: Done — snapshots saved", job_id)
 
         logger.info("[Job %s] Pipeline complete — status=ready", job_id)
@@ -479,10 +479,10 @@ def _run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existi
             _jobs[job_id]["status"] = "failed"
             _jobs[job_id]["error"] = str(e)
             snapshot = dict(_jobs[job_id])
-        _persist_job_manifest(job_id, job=snapshot)
+        persist_job_manifest(job_id, job=snapshot)
 
 
-def _collect_timestamps_from_analysis(people_desc, objects_desc):
+def collect_timestamps_from_analysis(people_desc, objects_desc):
     """Extract smart keyframe timestamps from TwelveLabs analysis time ranges.
 
     Only collects the actual time ranges where people/objects were detected,
@@ -517,7 +517,7 @@ def _collect_timestamps_from_analysis(people_desc, objects_desc):
     return timestamps_from_time_ranges(all_ranges)
 
 
-def _enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
+def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
     faces = unique_faces
     if faces is None:
         with _lock:

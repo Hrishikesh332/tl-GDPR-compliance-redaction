@@ -11,7 +11,7 @@ logger = logging.getLogger("video_redaction.routes.redaction")
 redaction_bp = Blueprint("redaction", __name__)
 
 
-def _parse_custom_regions(data):
+def parse_custom_regions(data):
     custom_regions = data.get("custom_regions")
     if custom_regions is None and request.form.get("custom_regions"):
         try:
@@ -113,7 +113,7 @@ def redact():
             except json.JSONDecodeError:
                 entity_ids = [s.strip() for s in raw_entities.split(",") if s.strip()]
 
-    custom_regions = _parse_custom_regions(data)
+    custom_regions = parse_custom_regions(data)
 
     total_targets = (len(face_encodings) if face_encodings else 0) + (len(object_classes) if object_classes else 0) + len(custom_regions)
     if total_targets == 0 and not entity_ids:
@@ -174,7 +174,7 @@ def preview_track():
             "status": job["status"],
         }), 409
 
-    custom_regions = _parse_custom_regions(data)
+    custom_regions = parse_custom_regions(data)
     if not custom_regions:
         return jsonify({"error": "Provide at least one custom region for preview tracking."}), 400
 

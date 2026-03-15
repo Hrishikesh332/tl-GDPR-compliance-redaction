@@ -65,6 +65,7 @@ def search():
     payload = {
         "query": query,
         "index_id": index_id or twelvelabs_service.get_index_id(),
+        "group_by": "video",
         "results": results,
     }
     logger.info("Search response payload: %s", json.dumps(payload, default=str, indent=2))

@@ -18,7 +18,7 @@ logger = logging.getLogger("video_redaction.routes.analysis")
 analysis_bp = Blueprint("analysis", __name__)
 
 
-def _normalize_bbox(bbox, frame_w, frame_h):
+def normalize_bbox(bbox, frame_w, frame_h):
     if not bbox or frame_w <= 0 or frame_h <= 0:
         return None
     x1, y1, x2, y2 = [float(v) for v in bbox]
@@ -36,7 +36,7 @@ def _normalize_bbox(bbox, frame_w, frame_h):
     }
 
 
-def _detection_iou(box_a, box_b):
+def detection_iou(box_a, box_b):
     ax2 = box_a["x"] + box_a["width"]
     ay2 = box_a["y"] + box_a["height"]
     bx2 = box_b["x"] + box_b["width"]
@@ -50,7 +50,7 @@ def _detection_iou(box_a, box_b):
     return inter / union if union > 0 else 0.0
 
 
-def _detection_center_distance(box_a, box_b):
+def detection_center_distance(box_a, box_b):
     ax = box_a["x"] + box_a["width"] / 2.0
     ay = box_a["y"] + box_a["height"] / 2.0
     bx = box_b["x"] + box_b["width"] / 2.0
@@ -58,7 +58,7 @@ def _detection_center_distance(box_a, box_b):
     return float(np.hypot(ax - bx, ay - by))
 
 
-def _merge_temporal_detections(detections, requested_time):
+def merge_temporal_detections(detections, requested_time):
     grouped = []
     ordered = sorted(
         detections,
@@ -83,8 +83,8 @@ def _merge_temporal_detections(detections, requested_time):
                 det_object_class = det.get("objectClass")
                 if group_object_class and det_object_class and group_object_class != det_object_class:
                     continue
-            iou = _detection_iou(group, det)
-            center_distance = _detection_center_distance(group, det)
+            iou = detection_iou(group, det)
+            center_distance = detection_center_distance(group, det)
             max_distance = 0.18 if det["kind"] == "face" else 0.24
             if iou < 0.05 and center_distance > max_distance:
                 continue
@@ -331,7 +331,7 @@ def live_redaction_detect():
             for sample_time in sample_times:
                 sample_frame = frames_by_time.get(round(sample_time, 3), frame)
                 for face in identify_faces_in_frame(sample_frame, selected_faces):
-                    normalized = _normalize_bbox(face.get("bbox"), frame_w, frame_h)
+                    normalized = normalize_bbox(face.get("bbox"), frame_w, frame_h)
                     if normalized is None:
                         continue
                     detections.append({
@@ -353,7 +353,7 @@ def live_redaction_detect():
                     confidence_threshold=face_confidence,
                     include_supplemental=True,
                 ):
-                    normalized = _normalize_bbox(face.get("bbox"), frame_w, frame_h)
+                    normalized = normalize_bbox(face.get("bbox"), frame_w, frame_h)
                     if normalized is None:
                         continue
                     detections.append({
@@ -380,7 +380,7 @@ def live_redaction_detect():
                 obj_label = str(obj.get("identification") or "Object")
                 if object_class_set and obj_label not in object_class_set:
                     continue
-                normalized = _normalize_bbox(obj.get("bbox"), frame_w, frame_h)
+                normalized = normalize_bbox(obj.get("bbox"), frame_w, frame_h)
                 if normalized is None:
                     continue
                 detections.append({
@@ -393,7 +393,7 @@ def live_redaction_detect():
                 })
         object_detection_error = get_object_detection_error()
 
-    detections = _merge_temporal_detections(detections, time_sec)
+    detections = merge_temporal_detections(detections, time_sec)
 
     return jsonify({
         "status": "ready",

@@ -12,22 +12,21 @@ logger = logging.getLogger("video_redaction.routes.entity")
 entity_bp = Blueprint("entity", __name__)
 
 ENTITY_UNAVAILABLE = (
-    "TwelveLabs entity API (entity_collections) is not available in this SDK version. "
-    "Use face encodings from job faces for redaction instead."
+    "TwelveLabs entity API is unavailable. Ensure TWELVELABS_API_KEY is configured "
+    "and the v1.3 entity endpoints are reachable."
 )
 
 
-def _entity_api_available():
+def entity_api_available():
     try:
-        client = twelvelabs_service._get_client()
-        return hasattr(client, "entity_collections") and client.entity_collections is not None
+        return twelvelabs_service.entity_api_available()
     except Exception:
         return False
 
 
 @entity_bp.route("/entities", methods=["GET"])
 def list_entities():
-    if not _entity_api_available():
+    if not entity_api_available():
         return jsonify({
             "entity_collection_id": None,
             "entities": [],
@@ -40,19 +39,19 @@ def list_entities():
             "entity_collection_id": twelvelabs_service.get_entity_collection_id(),
             "entities": entities,
         })
-    except AttributeError as e:
+    except Exception as e:
         logger.warning("Entity API not available: %s", e)
         return jsonify({
             "entity_collection_id": None,
             "entities": [],
             "unavailable": True,
-            "message": ENTITY_UNAVAILABLE,
+            "message": str(e) or ENTITY_UNAVAILABLE,
         })
 
 
 @entity_bp.route("/entities/<entity_id>", methods=["GET"])
 def get_entity(entity_id):
-    if not _entity_api_available():
+    if not entity_api_available():
         return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True}), 503
     try:
         entity = twelvelabs_service.retrieve_entity(entity_id)
@@ -63,7 +62,7 @@ def get_entity(entity_id):
 
 @entity_bp.route("/entities", methods=["POST"])
 def create_entity():
-    if not _entity_api_available():
+    if not entity_api_available():
         return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True}), 503
     data = request.get_json(silent=True) or {}
     name = data.get("name")
@@ -84,13 +83,14 @@ def create_entity():
             metadata=metadata,
         )
         return jsonify(result), 201
-    except AttributeError as e:
-        return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True}), 503
+    except Exception as e:
+        logger.exception("create_entity failed")
+        return jsonify({"error": str(e) or ENTITY_UNAVAILABLE, "unavailable": True}), 503
 
 
 @entity_bp.route("/entities/<entity_id>", methods=["DELETE"])
 def delete_entity(entity_id):
-    if not _entity_api_available():
+    if not entity_api_available():
         return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True}), 503
     try:
         twelvelabs_service.delete_entity(entity_id)
@@ -101,7 +101,7 @@ def delete_entity(entity_id):
 
 @entity_bp.route("/entities/upload-face", methods=["POST"])
 def upload_face_and_create_entity():
-    if not _entity_api_available():
+    if not entity_api_available():
         return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True}), 503
     if "image" not in request.files:
         return jsonify({"error": "missing image file"}), 400
@@ -139,8 +139,6 @@ def upload_face_and_create_entity():
             "asset_id": asset_id,
             "entity": entity_result,
         }), 201
-    except AttributeError:
-        return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True}), 503
     except Exception as e:
         logger.exception("upload_face_and_create_entity failed")
         return jsonify({"error": str(e)}), 500
@@ -151,7 +149,7 @@ def upload_face_and_create_entity():
 
 @entity_bp.route("/entities/<entity_id>/add-asset", methods=["POST"])
 def add_asset_to_entity(entity_id):
-    if not _entity_api_available():
+    if not entity_api_available():
         return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True}), 503
     if "image" in request.files:
         image_file = request.files["image"]
@@ -175,33 +173,22 @@ def add_asset_to_entity(entity_id):
         asset_id = twelvelabs_service.upload_face_asset_from_url(image_url)
 
     try:
-        client = twelvelabs_service._get_client()
-        collection_id = twelvelabs_service.get_entity_collection_id()
-
-        existing = client.entity_collections.entities.retrieve(
-            entity_collection_id=collection_id,
-            entity_id=entity_id,
-        )
-        current_assets = list(existing.asset_ids or [])
-        current_assets.append(asset_id)
-
-        client.entity_collections.entities.update(
-            entity_collection_id=collection_id,
-            entity_id=entity_id,
-        )
+        entity = twelvelabs_service.add_assets_to_entity(entity_id, [asset_id])
 
         return jsonify({
             "entity_id": entity_id,
             "new_asset_id": asset_id,
-            "total_assets": len(current_assets),
+            "total_assets": len(entity.get("asset_ids") or []),
+            "entity": entity,
         })
-    except AttributeError:
-        return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True}), 503
+    except Exception as e:
+        logger.exception("add_asset_to_entity failed")
+        return jsonify({"error": str(e) or ENTITY_UNAVAILABLE, "unavailable": True}), 503
 
 
 @entity_bp.route("/entities/<entity_id>/search", methods=["POST"])
 def search_by_entity(entity_id):
-    if not _entity_api_available():
+    if not entity_api_available():
         return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True, "results": []}), 503
     data = request.get_json(silent=True) or {}
     query_suffix = data.get("query", "")
@@ -217,15 +204,17 @@ def search_by_entity(entity_id):
             "entity_id": entity_id,
             "query_suffix": query_suffix,
             "index_id": index_id or twelvelabs_service.get_index_id(),
+            "group_by": "video",
             "results": results,
         })
-    except AttributeError:
-        return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True, "results": []}), 503
+    except Exception as e:
+        logger.exception("search_by_entity failed")
+        return jsonify({"error": str(e) or ENTITY_UNAVAILABLE, "unavailable": True, "results": []}), 503
 
 
 @entity_bp.route("/entities/<entity_id>/time-ranges", methods=["POST"])
 def entity_time_ranges(entity_id):
-    if not _entity_api_available():
+    if not entity_api_available():
         return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True, "time_ranges": []}), 503
     data = request.get_json(silent=True) or {}
     video_id = data.get("video_id")
@@ -242,16 +231,18 @@ def entity_time_ranges(entity_id):
             "video_id": video_id,
             "time_ranges": ranges,
         })
-    except AttributeError:
-        return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True, "time_ranges": []}), 503
+    except Exception as e:
+        logger.exception("entity_time_ranges failed")
+        return jsonify({"error": str(e) or ENTITY_UNAVAILABLE, "unavailable": True, "time_ranges": []}), 503
 
 
 @entity_bp.route("/entity-collections", methods=["GET"])
 def list_collections():
-    if not _entity_api_available():
+    if not entity_api_available():
         return jsonify({"collections": [], "unavailable": True, "message": ENTITY_UNAVAILABLE})
     try:
         collections = twelvelabs_service.list_entity_collections()
         return jsonify({"collections": collections})
-    except AttributeError:
-        return jsonify({"collections": [], "unavailable": True, "message": ENTITY_UNAVAILABLE})
+    except Exception as e:
+        logger.exception("list_collections failed")
+        return jsonify({"collections": [], "unavailable": True, "message": str(e) or ENTITY_UNAVAILABLE})

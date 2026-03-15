@@ -15,6 +15,27 @@ type SearchAttachment = {
   file?: File
 }
 
+type SearchSessionAttachment = {
+  id: string
+  type: 'image' | 'entity'
+  name: string
+  previewUrl: string
+}
+
+type SearchSessionEntity = {
+  id: string
+  name: string
+  previewUrl: string
+}
+
+type SearchSessionResult = {
+  query: string
+  queryText?: string
+  attachments?: SearchSessionAttachment[]
+  entities?: SearchSessionEntity[]
+  results: VideoItem[]
+}
+
 type EntityOption = {
   id: string
   name: string
@@ -151,6 +172,111 @@ function IconVideo({ className = 'w-4 h-4' }: { className?: string }) {
   )
 }
 
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result)
+        return
+      }
+      reject(new Error('Unable to read image preview'))
+    }
+    reader.onerror = () => reject(reader.error ?? new Error('Unable to read image preview'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function fileFromDataUrl(dataUrl: string, fileName: string): File | undefined {
+  try {
+    const [header, payload] = dataUrl.split(',', 2)
+    if (!header || !payload || !header.startsWith('data:')) return undefined
+    const mimeType = header.match(/data:([^;]+)/)?.[1] || 'image/png'
+    const binary = atob(payload)
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index)
+    }
+    return new File([bytes], fileName || 'search-image', { type: mimeType })
+  } catch {
+    return undefined
+  }
+}
+
+function normalizePersistedSearchAttachments(parsed: SearchSessionResult): SearchAttachment[] {
+  if (Array.isArray(parsed.attachments) && parsed.attachments.length > 0) {
+    return parsed.attachments.map((attachment) => ({
+      ...attachment,
+      file: attachment.type === 'image' && attachment.previewUrl.startsWith('data:')
+        ? fileFromDataUrl(attachment.previewUrl, attachment.name)
+        : undefined,
+    }))
+  }
+
+  if (!Array.isArray(parsed.entities)) return []
+  return parsed.entities.map((entity) => ({
+    id: entity.id,
+    type: 'entity' as const,
+    name: entity.name,
+    previewUrl: entity.previewUrl,
+  }))
+}
+
+function SearchAttachmentChip({
+  attachment,
+  onRemove,
+  compact = false,
+}: {
+  attachment: SearchAttachment | SearchSessionAttachment
+  onRemove?: () => void
+  compact?: boolean
+}) {
+  const isEntity = attachment.type === 'entity'
+  const initials = attachment.name.trim().slice(0, 2).toUpperCase() || (isEntity ? 'EN' : 'IM')
+
+  return (
+    <span className="inline-flex items-center gap-1.5 pl-1 pr-2 py-0.5 rounded-full border border-border bg-card text-text-secondary">
+      {attachment.previewUrl ? (
+        <img
+          src={attachment.previewUrl}
+          alt={attachment.name}
+          className={`${compact ? 'w-5 h-5' : 'w-6 h-6'} object-cover ${isEntity ? 'rounded-full' : 'rounded'}`}
+        />
+      ) : (
+        <span
+          className={`${compact ? 'w-5 h-5 text-[10px]' : 'w-6 h-6 text-[10px]'} ${
+            isEntity ? 'rounded-full' : 'rounded'
+          } bg-gray-200 text-gray-600 flex items-center justify-center font-medium shrink-0`}
+          aria-hidden
+        >
+          {initials}
+        </span>
+      )}
+      <span className={`max-w-[120px] truncate font-medium ${compact ? 'text-[11px]' : 'text-xs'}`}>{attachment.name}</span>
+      {onRemove ? (
+        <button
+          type="button"
+          onClick={onRemove}
+          className="ml-0.5 p-0.5 rounded-full hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
+          aria-label={`Remove ${attachment.name}`}
+        >
+          <svg className="w-3 h-3" viewBox="0 0 12 12" fill="currentColor">
+            <path d="M6.02 5.31L8.97 2.37l.71.7L6.73 6.02l2.93 2.93-.71.71L6.02 6.73 3.07 9.67l-.7-.7L5.31 6.02 2.35 3.05l.7-.7L6.02 5.31Z" />
+          </svg>
+        </button>
+      ) : null}
+    </span>
+  )
+}
+
+function SearchQueryChip({ queryText }: { queryText: string }) {
+  return (
+    <span className="inline-flex items-center px-3 py-1 rounded-full border border-border bg-card text-sm text-text-primary max-w-full">
+      <span className="truncate">{queryText}</span>
+    </span>
+  )
+}
+
 function EntityAvatars({ entities }: { entities: TableEntity[] }) {
   if (!entities?.length) return <span className="text-sm text-gray-400">—</span>
   const maxCircles = 4
@@ -210,8 +336,10 @@ type TableEntity = { id: string; name: string; imageUrl?: string; initials: stri
 type ClipMatch = {
   start: number
   end: number
-  score: number
+  score?: number
   type: string
+  rank?: number
+  thumbnailUrl?: string
 }
 
 type VideoItem = {
@@ -227,22 +355,28 @@ type VideoItem = {
   thumbnailUrl?: string
   clips?: ClipMatch[]
   searchScore?: number
+  bestRank?: number
 }
 
 function relevanceLabel(clips: ClipMatch[] | undefined): { label: string; color: string } {
   if (!clips || clips.length === 0) return { label: '', color: '' }
-  const best = Math.max(...clips.map((c) => c.score))
-  if (best >= 0.10) return { label: 'Highest', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' }
-  if (best >= 0.08) return { label: 'High', color: 'bg-green-100 text-green-800 border-green-300' }
-  if (best >= 0.06) return { label: 'Medium', color: 'bg-yellow-100 text-yellow-800 border-yellow-300' }
-  return { label: 'Low', color: 'bg-red-50 text-red-700 border-red-200' }
-}
+  const rankedClips = clips.filter((clip) => typeof clip.rank === 'number' && Number.isFinite(clip.rank))
+  if (rankedClips.length > 0) {
+    const bestRank = Math.min(...rankedClips.map((clip) => clip.rank as number))
+    if (bestRank <= 1) return { label: 'Rank 1', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' }
+    if (bestRank <= 3) return { label: `Rank ${bestRank}`, color: 'bg-green-100 text-green-800 border-green-300' }
+    if (bestRank <= 5) return { label: `Rank ${bestRank}`, color: 'bg-yellow-100 text-yellow-800 border-yellow-300' }
+    return { label: `Rank ${bestRank}`, color: 'bg-slate-100 text-slate-700 border-slate-300' }
+  }
 
-function clipScoreColor(score: number): string {
-  if (score >= 0.10) return 'bg-emerald-50 text-emerald-700 border-emerald-200'
-  if (score >= 0.08) return 'bg-green-50 text-green-700 border-green-200'
-  if (score >= 0.06) return 'bg-yellow-50 text-yellow-700 border-yellow-200'
-  return 'bg-red-50 text-red-600 border-red-200'
+  const scoredClips = clips.filter((clip) => typeof clip.score === 'number' && Number.isFinite(clip.score))
+  if (scoredClips.length === 0) return { label: 'Match', color: 'bg-slate-100 text-slate-700 border-slate-300' }
+
+  const bestScore = Math.max(...scoredClips.map((clip) => clip.score as number))
+  if (bestScore >= 0.10) return { label: 'Highest', color: 'bg-emerald-100 text-emerald-800 border-emerald-300' }
+  if (bestScore >= 0.08) return { label: 'High', color: 'bg-green-100 text-green-800 border-green-300' }
+  if (bestScore >= 0.06) return { label: 'Medium', color: 'bg-yellow-100 text-yellow-800 border-yellow-300' }
+  return { label: 'Match', color: 'bg-slate-100 text-slate-700 border-slate-300' }
 }
 
 function formatTotalDuration(videos: VideoItem[], videoDurations?: Record<string, number>) {
@@ -499,7 +633,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
     lexical: true,
     semantic: true,
   })
-  const [searchResults, setSearchResults] = useState<{ query: string; results: VideoItem[] } | null>(null)
+  const [searchResults, setSearchResults] = useState<SearchSessionResult | null>(null)
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [entitiesList, setEntitiesList] = useState<EntityOption[]>([])
@@ -672,11 +806,18 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
         const normalizedClips = (r.clips || []).map((c) => ({
           start: c.start,
           end: c.end,
-          score: typeof c.score === 'number' && Number.isFinite(c.score) ? c.score : 0,
+          score: typeof c.score === 'number' && Number.isFinite(c.score) ? c.score : undefined,
+          rank: typeof c.rank === 'number' && Number.isFinite(c.rank) ? c.rank : undefined,
+          thumbnailUrl: c.thumbnail_url || undefined,
         }))
-        const bestScore = normalizedClips.length > 0
-          ? Math.max(...normalizedClips.map((c) => c.score))
-          : (typeof r.score === 'number' && Number.isFinite(r.score) ? r.score : 0)
+        const rankedClips = normalizedClips.filter((c) => typeof c.rank === 'number')
+        const bestRank = rankedClips.length > 0
+          ? Math.min(...rankedClips.map((c) => c.rank as number))
+          : undefined
+        const scoredClips = normalizedClips.filter((c) => typeof c.score === 'number')
+        const bestScore = scoredClips.length > 0
+          ? Math.max(...scoredClips.map((c) => c.score as number))
+          : (typeof r.score === 'number' && Number.isFinite(r.score) ? r.score : undefined)
         return {
           id: r.video_id,
           title: meta.filename || r.video_id,
@@ -688,12 +829,30 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
           entities: [],
           streamUrl: cached?.stream_url || undefined,
           thumbnailUrl: cached?.thumbnail_url || undefined,
-          clips: normalizedClips.map((c) => ({ start: c.start, end: c.end, score: c.score, type: 'visual' })),
+          clips: normalizedClips.map((c) => ({
+            start: c.start,
+            end: c.end,
+            score: c.score,
+            type: 'visual',
+            rank: c.rank,
+            thumbnailUrl: c.thumbnailUrl,
+          })),
+          bestRank,
           searchScore: bestScore,
         }
       })
 
-      results.sort((a, b) => (b.searchScore ?? 0) - (a.searchScore ?? 0))
+      results.sort((a, b) => {
+        const rankA = a.bestRank ?? Number.POSITIVE_INFINITY
+        const rankB = b.bestRank ?? Number.POSITIVE_INFINITY
+        if (rankA !== rankB) return rankA - rankB
+
+        const scoreA = a.searchScore ?? Number.NEGATIVE_INFINITY
+        const scoreB = b.searchScore ?? Number.NEGATIVE_INFINITY
+        if (scoreA !== scoreB) return scoreB - scoreA
+
+        return a.title.localeCompare(b.title)
+      })
 
       const displayParts: string[] = []
       if (hasQuery) displayParts.push(query)
@@ -702,9 +861,35 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
         displayParts.push(`Entity: ${searchAttachments.filter((a) => a.type === 'entity').map((a) => a.name).join(', ')}`)
       }
       const displayQuery = displayParts.join(' + ')
-      setSearchResults({ query: displayQuery, results })
+      const persistedAttachments: SearchSessionAttachment[] = searchAttachments.map((attachment) => ({
+        id: attachment.id,
+        type: attachment.type,
+        name: attachment.name,
+        previewUrl: attachment.previewUrl,
+      }))
+      const entities = persistedAttachments
+        .filter((attachment): attachment is SearchSessionAttachment & { type: 'entity' } => attachment.type === 'entity')
+        .map((attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          previewUrl: attachment.previewUrl,
+        }))
+      setSearchResults({
+        query: displayQuery,
+        queryText: hasQuery ? query : '',
+        attachments: persistedAttachments,
+        entities,
+        results,
+      })
       try {
-        sessionStorage.setItem('video_redaction_last_search', JSON.stringify({ query: displayQuery, results }))
+        const sessionPayload: SearchSessionResult = {
+          query: displayQuery,
+          queryText: hasQuery ? query : '',
+          attachments: persistedAttachments,
+          entities,
+          results,
+        }
+        sessionStorage.setItem('video_redaction_last_search', JSON.stringify(sessionPayload))
       } catch { /* ignore */ }
     } catch (e) {
       setSearchError('Search request failed')
@@ -718,10 +903,34 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
     try {
       const raw = sessionStorage.getItem('video_redaction_last_search')
       if (raw) {
-        const parsed = JSON.parse(raw) as { query: string; results: VideoItem[] }
+        const parsed = JSON.parse(raw) as SearchSessionResult
         if (parsed?.query != null && Array.isArray(parsed.results)) {
-          setSearchQuery(parsed.query)
-          setSearchResults({ query: parsed.query, results: parsed.results })
+          const restoredAttachments = normalizePersistedSearchAttachments(parsed)
+          const restoredQuery = typeof parsed.queryText === 'string'
+            ? parsed.queryText
+            : restoredAttachments.length > 0
+              ? ''
+              : parsed.query
+          setSearchQuery(restoredQuery)
+          setSearchAttachments(restoredAttachments)
+          setSearchResults({
+            query: parsed.query,
+            queryText: typeof parsed.queryText === 'string' ? parsed.queryText : '',
+            attachments: restoredAttachments.map((attachment) => ({
+              id: attachment.id,
+              type: attachment.type,
+              name: attachment.name,
+              previewUrl: attachment.previewUrl,
+            })),
+            entities: Array.isArray(parsed.entities) ? parsed.entities : restoredAttachments
+              .filter((attachment): attachment is SearchAttachment & { type: 'entity' } => attachment.type === 'entity')
+              .map((attachment) => ({
+                id: attachment.id,
+                name: attachment.name,
+                previewUrl: attachment.previewUrl,
+              })),
+            results: parsed.results,
+          })
         }
       }
     } catch {
@@ -774,27 +983,11 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
             {/* Attachment chips + input on one line */}
             <div className="flex flex-wrap items-center gap-2 min-w-0">
               {searchAttachments.map((att) => (
-                <span
+                <SearchAttachmentChip
                   key={att.id}
-                  className="inline-flex items-center gap-1.5 pl-1 pr-2 py-0.5 rounded-full border border-border bg-card text-sm text-text-secondary"
-                >
-                  <img
-                    src={att.previewUrl}
-                    alt={att.name}
-                    className={`w-6 h-6 object-cover ${att.type === 'entity' ? 'rounded-full' : 'rounded'}`}
-                  />
-                  <span className="max-w-[120px] truncate text-xs font-medium">{att.name}</span>
-                  <button
-                    type="button"
-                    onClick={() => removeSearchAttachment(att.id)}
-                    className="ml-0.5 p-0.5 rounded-full hover:bg-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
-                    aria-label={`Remove ${att.name}`}
-                  >
-                    <svg className="w-3 h-3" viewBox="0 0 12 12" fill="currentColor">
-                      <path d="M6.02 5.31L8.97 2.37l.71.7L6.73 6.02l2.93 2.93-.71.71L6.02 6.73 3.07 9.67l-.7-.7L5.31 6.02 2.35 3.05l.7-.7L6.02 5.31Z" />
-                    </svg>
-                  </button>
-                </span>
+                  attachment={att}
+                  onRemove={() => removeSearchAttachment(att.id)}
+                />
               ))}
               <div ref={entityDropdownRef} className="relative flex-1 min-w-[100px] sm:min-w-[120px] overflow-visible">
                 {!searchQuery && !searchAttachments.length && (
@@ -927,13 +1120,24 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <span className="text-sm text-text-secondary">
             {searchResults.results.length === 0
-              ? `No videos found for “${searchResults.query}”.`
-              : `${searchResults.results.length} result${searchResults.results.length !== 1 ? 's' : ''} for “${searchResults.query}”`}
+              ? 'No videos found for'
+              : `${searchResults.results.length} result${searchResults.results.length !== 1 ? 's' : ''} for`}
           </span>
+          {searchResults.queryText ? <SearchQueryChip queryText={searchResults.queryText} /> : null}
+          {(searchResults.attachments || []).map((attachment) => (
+            <SearchAttachmentChip
+              key={`summary-${attachment.id}`}
+              attachment={attachment}
+              compact
+            />
+          ))}
+          {!searchResults.queryText && !(searchResults.attachments || []).length ? (
+            <span className="text-sm text-text-secondary">“{searchResults.query}”</span>
+          ) : null}
           <button
             type="button"
             onClick={clearSearch}
-            className="text-sm font-medium text-brand-charcoal hover:underline focus:outline-none focus:ring-2 focus:ring-brand-charcoal/30 rounded"
+            className="inline-flex items-center px-3 py-1.5 text-sm font-medium text-brand-charcoal bg-card border border-border rounded-lg hover:bg-gray-200/80 hover:border-gray-400 focus:outline-none focus:ring-2 focus:ring-brand-charcoal/30 focus:ring-offset-1 transition-colors"
           >
             Clear search
           </button>
@@ -1040,11 +1244,16 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
       <AddImageModal
         open={addImageModalOpen}
         onClose={() => setAddImageModalOpen(false)}
-        onImageAdded={(file) => {
-          const url = URL.createObjectURL(file)
+        onImageAdded={async (file) => {
+          let previewUrl = ''
+          try {
+            previewUrl = await readFileAsDataUrl(file)
+          } catch {
+            previewUrl = URL.createObjectURL(file)
+          }
           setSearchAttachments((prev) => [
             ...prev,
-            { id: `img-${Date.now()}`, type: 'image', name: file.name, previewUrl: url, file },
+            { id: `img-${Date.now()}`, type: 'image', name: file.name, previewUrl, file },
           ])
           setAddImageModalOpen(false)
         }}

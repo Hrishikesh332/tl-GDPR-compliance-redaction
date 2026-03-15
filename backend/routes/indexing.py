@@ -16,7 +16,7 @@ _indexing_jobs = {}
 _lock = threading.Lock()
 
 
-def _track_indexing_async(tracking_id, task_id):
+def track_indexing_async(tracking_id, task_id):
     def _run():
         try:
             with _lock:
@@ -93,7 +93,7 @@ def index_video():
 
     wait = request.args.get("wait", "false").lower() == "true"
     if not wait:
-        _track_indexing_async(tracking_id, result["task_id"])
+        track_indexing_async(tracking_id, result["task_id"])
 
         return jsonify({
             "task_id": result["task_id"],
@@ -134,7 +134,7 @@ def index_local_file():
             "result": None,
         }
 
-    _track_indexing_async(tracking_id, result["task_id"])
+    track_indexing_async(tracking_id, result["task_id"])
 
     return jsonify({
         "task_id": result["task_id"],

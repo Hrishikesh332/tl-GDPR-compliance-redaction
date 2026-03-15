@@ -7,7 +7,7 @@ logger = logging.getLogger("video_redaction.clustering")
 COSINE_SIM_THRESHOLD = 0.55
 
 
-def _cosine_sim(a, b):
+def cosine_sim(a, b):
     return float(np.dot(a, b))
 
 
@@ -36,7 +36,7 @@ def cluster_faces(all_faces, similarity_threshold=None):
         best_sim = -1.0
 
         for cluster in clusters:
-            sim = _cosine_sim(enc, cluster["centroid"])
+            sim = cosine_sim(enc, cluster["centroid"])
             if sim > similarity_threshold and sim > best_sim:
                 best_sim = sim
                 best_cluster = cluster
@@ -76,7 +76,7 @@ def cluster_faces(all_faces, similarity_threshold=None):
             for j in range(i + 1, len(clusters)):
                 if j in used:
                     continue
-                sim = _cosine_sim(current["centroid"], clusters[j]["centroid"])
+                sim = cosine_sim(current["centroid"], clusters[j]["centroid"])
                 if sim > similarity_threshold:
                     current["appearances"].extend(clusters[j]["appearances"])
                     current["all_encodings"].extend(clusters[j]["all_encodings"])

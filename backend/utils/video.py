@@ -115,7 +115,7 @@ def extract_frame_at_time(video_path, time_sec):
     }
 
 
-def _merge_overlapping_ranges(ranges):
+def merge_overlapping_ranges(ranges):
     """Merge overlapping/adjacent time ranges into non-overlapping intervals."""
     if not ranges:
         return []
@@ -152,7 +152,7 @@ def timestamps_from_time_ranges(time_ranges, sample_interval=None):
     if not raw_ranges:
         return []
 
-    merged = _merge_overlapping_ranges(raw_ranges)
+    merged = merge_overlapping_ranges(raw_ranges)
 
     total_coverage = sum(e - s for s, e in merged)
     logger.info("Analysis ranges: %d raw -> %d merged, covering %.1fs of video (sample_interval=%.1fs)",

@@ -8,4 +8,5 @@ matplotlib<4
 ultralytics>=8,<9
 insightface
 onnxruntime
+requests
 twelvelabs

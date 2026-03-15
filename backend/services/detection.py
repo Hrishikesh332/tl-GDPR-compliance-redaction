@@ -17,7 +17,7 @@ _PROTOTXT = os.path.join(_BACKEND_DIR, "models", "deploy.prototxt")
 _CAFFEMODEL = os.path.join(_BACKEND_DIR, "models", "res10_300x300_ssd_iter_140000.caffemodel")
 
 
-def _is_git_lfs_pointer(path: str) -> bool:
+def is_git_lfs_pointer(path: str) -> bool:
     """Return True if the file looks like a Git LFS pointer stub (not real weights)."""
     try:
         if not os.path.isfile(path):
@@ -32,7 +32,7 @@ def _is_git_lfs_pointer(path: str) -> bool:
         return False
 
 
-def _build_yolo_model_candidates():
+def build_yolo_model_candidates():
     configured = (os.environ.get("YOLO_OBJECT_MODEL") or "").strip()
     if configured:
         return [
@@ -51,11 +51,11 @@ def _build_yolo_model_candidates():
 
 
 _YOLO_MODEL_CANDIDATES = []
-for _candidate in _build_yolo_model_candidates():
+for _candidate in build_yolo_model_candidates():
     if not _candidate:
         continue
     if os.path.isabs(_candidate):
-        if os.path.isfile(_candidate) and not _is_git_lfs_pointer(_candidate):
+        if os.path.isfile(_candidate) and not is_git_lfs_pointer(_candidate):
             _YOLO_MODEL_CANDIDATES.append(_candidate)
     else:
         _YOLO_MODEL_CANDIDATES.append(_candidate)
@@ -96,7 +96,7 @@ def get_object_detection_error():
     return _obj_model_error
 
 
-def _get_face_net():
+def get_face_net():
     """Load the res10_300x300_ssd face detector (~10.7 MB Caffe model)."""
     global _face_net
     if _face_net is None:
@@ -105,7 +105,7 @@ def _get_face_net():
     return _face_net
 
 
-def _get_face_app():
+def get_face_app():
     """Load InsightFace buffalo_l for primary face detection plus ArcFace embeddings."""
     global _face_app, _face_app_load_failed
     if _face_app_load_failed:
@@ -130,7 +130,7 @@ def _get_face_app():
     return _face_app
 
 
-def _get_obj_model():
+def get_obj_model():
     global _obj_model, _obj_model_load_failed, _obj_model_error
     if _obj_model_load_failed:
         raise ObjectDetectionUnavailable(_obj_model_error or "YOLO object detection is unavailable.")
@@ -174,7 +174,7 @@ def _get_obj_model():
     return _obj_model
 
 
-def _face_sharpness(img_bgr, bbox):
+def face_sharpness(img_bgr, bbox):
     x1, y1, x2, y2 = [int(v) for v in bbox]
     h, w = img_bgr.shape[:2]
     x1, y1 = max(0, x1), max(0, y1)
@@ -186,9 +186,9 @@ def _face_sharpness(img_bgr, bbox):
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 
-def _detect_faces_res10(img_bgr, confidence_threshold=RES10_CONFIDENCE):
+def detect_faces_res10(img_bgr, confidence_threshold=RES10_CONFIDENCE):
     """Run res10_300x300_ssd face detector. Returns list of (x1,y1,x2,y2,conf)."""
-    net = _get_face_net()
+    net = get_face_net()
     h, w = img_bgr.shape[:2]
     blob = cv2.dnn.blobFromImage(
         img_bgr, 1.0, (300, 300), (104.0, 177.0, 123.0), swapRB=False, crop=False
@@ -213,7 +213,7 @@ def _detect_faces_res10(img_bgr, confidence_threshold=RES10_CONFIDENCE):
     return boxes
 
 
-def _iou(box_a, box_b):
+def iou(box_a, box_b):
     xa = max(box_a[0], box_b[0])
     ya = max(box_a[1], box_b[1])
     xb = min(box_a[2], box_b[2])
@@ -225,11 +225,11 @@ def _iou(box_a, box_b):
     return inter / union if union > 0 else 0
 
 
-def _get_embeddings_for_boxes(img_bgr, res10_boxes):
+def get_embeddings_for_boxes(img_bgr, res10_boxes):
     """Run InsightFace on the frame, then match its detections to res10 boxes by IoU
     to assign 512-d ArcFace embeddings to each res10 detection.
     Also returns unmatched InsightFace detections (faces res10 missed)."""
-    insight_faces = _get_insightface_detections(img_bgr, with_encodings=True)
+    insight_faces = get_insightface_detections(img_bgr, with_encodings=True)
     if not insight_faces:
         return [None] * len(res10_boxes), []
 
@@ -242,7 +242,7 @@ def _get_embeddings_for_boxes(img_bgr, res10_boxes):
         best_j = -1
         for j, iface in enumerate(insight_faces):
             ib = iface["bbox"]
-            overlap = _iou(r_box[:4], ib)
+            overlap = iou(r_box[:4], ib)
             if overlap > best_iou and iface.get("embedding") is not None:
                 best_iou = overlap
                 best_emb = iface["embedding"]
@@ -269,8 +269,8 @@ def _get_embeddings_for_boxes(img_bgr, res10_boxes):
     return embeddings, unmatched
 
 
-def _get_insightface_detections(img_bgr, with_encodings=False):
-    app = _get_face_app()
+def get_insightface_detections(img_bgr, with_encodings=False):
+    app = get_face_app()
     if app is None:
         return []
 
@@ -296,12 +296,12 @@ def _get_insightface_detections(img_bgr, with_encodings=False):
 
 def detect_face_boxes(img_bgr, confidence_threshold=RES10_CONFIDENCE, include_supplemental=False):
     """Return face boxes with confidence metadata, without encoding snapshots."""
-    insight_detections = _get_insightface_detections(img_bgr, with_encodings=False)
+    insight_detections = get_insightface_detections(img_bgr, with_encodings=False)
     if insight_detections:
         results = []
         for det in insight_detections:
             x1, y1, x2, y2 = det["bbox"]
-            sharpness = _face_sharpness(img_bgr, (x1, y1, x2, y2))
+            sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
             if sharpness < MIN_FACE_SHARPNESS:
                 continue
             results.append({
@@ -313,11 +313,11 @@ def detect_face_boxes(img_bgr, confidence_threshold=RES10_CONFIDENCE, include_su
         if results:
             return results
 
-    res10_boxes = _detect_faces_res10(img_bgr, confidence_threshold=confidence_threshold)
+    res10_boxes = detect_faces_res10(img_bgr, confidence_threshold=confidence_threshold)
 
     results = []
     for (x1, y1, x2, y2, conf) in res10_boxes:
-        sharpness = _face_sharpness(img_bgr, (x1, y1, x2, y2))
+        sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
         if sharpness < MIN_FACE_SHARPNESS:
             continue
         results.append({
@@ -330,10 +330,10 @@ def detect_face_boxes(img_bgr, confidence_threshold=RES10_CONFIDENCE, include_su
     if not include_supplemental:
         return results
 
-    _, unmatched_insight = _get_embeddings_for_boxes(img_bgr, res10_boxes)
+    _, unmatched_insight = get_embeddings_for_boxes(img_bgr, res10_boxes)
     for extra in unmatched_insight:
         x1, y1, x2, y2 = extra["bbox"]
-        sharpness = _face_sharpness(img_bgr, (x1, y1, x2, y2))
+        sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
         if sharpness < MIN_FACE_SHARPNESS:
             continue
         results.append({
@@ -351,12 +351,12 @@ def detect_faces(img_bgr, with_encodings=False):
     InsightFace provides stronger face localization and embeddings, which helps
     live blur alignment and person-specific matching remain stable.
     """
-    insight_detections = _get_insightface_detections(img_bgr, with_encodings=with_encodings)
+    insight_detections = get_insightface_detections(img_bgr, with_encodings=with_encodings)
     if insight_detections:
         results = []
         for det in insight_detections:
             x1, y1, x2, y2 = det["bbox"]
-            sharpness = _face_sharpness(img_bgr, (x1, y1, x2, y2))
+            sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
             if sharpness < MIN_FACE_SHARPNESS:
                 continue
 
@@ -379,20 +379,20 @@ def detect_faces(img_bgr, with_encodings=False):
         if results:
             return results
 
-    res10_boxes = _detect_faces_res10(img_bgr)
+    res10_boxes = detect_faces_res10(img_bgr)
 
     embeddings = [None] * len(res10_boxes)
     unmatched_insight = []
     if with_encodings:
         if res10_boxes:
-            embeddings, unmatched_insight = _get_embeddings_for_boxes(img_bgr, res10_boxes)
+            embeddings, unmatched_insight = get_embeddings_for_boxes(img_bgr, res10_boxes)
         else:
-            _, unmatched_insight = _get_embeddings_for_boxes(img_bgr, [])
+            _, unmatched_insight = get_embeddings_for_boxes(img_bgr, [])
 
     results = []
 
     for i, (x1, y1, x2, y2, conf) in enumerate(res10_boxes):
-        sharpness = _face_sharpness(img_bgr, (x1, y1, x2, y2))
+        sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
         if sharpness < MIN_FACE_SHARPNESS:
             continue
 
@@ -414,7 +414,7 @@ def detect_faces(img_bgr, with_encodings=False):
 
     for extra in unmatched_insight:
         x1, y1, x2, y2 = extra["bbox"]
-        sharpness = _face_sharpness(img_bgr, (x1, y1, x2, y2))
+        sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
         if sharpness < MIN_FACE_SHARPNESS:
             continue
 
@@ -442,7 +442,7 @@ def detect_faces(img_bgr, with_encodings=False):
 
 def detect_objects(img_bgr, conf_threshold=0.25, forensic_only=True, strict=True):
     try:
-        model = _get_obj_model()
+        model = get_obj_model()
     except ObjectDetectionUnavailable:
         if strict:
             raise
@@ -481,9 +481,9 @@ def match_faces_in_frame(frame_bgr, target_encodings, tolerance=0.35):
     if not target_encodings:
         return []
 
-    res10_boxes = _detect_faces_res10(frame_bgr, confidence_threshold=0.4)
+    res10_boxes = detect_faces_res10(frame_bgr, confidence_threshold=0.4)
 
-    embeddings, unmatched_insight = _get_embeddings_for_boxes(frame_bgr, res10_boxes)
+    embeddings, unmatched_insight = get_embeddings_for_boxes(frame_bgr, res10_boxes)
 
     all_boxes = [(x1, y1, x2, y2) for (x1, y1, x2, y2, _) in res10_boxes]
     all_embeddings = list(embeddings)
@@ -517,7 +517,7 @@ def match_objects_in_frame(frame_bgr, target_classes, conf_threshold=0.25, stric
     if not target_classes:
         return []
     try:
-        model = _get_obj_model()
+        model = get_obj_model()
     except ObjectDetectionUnavailable:
         if strict:
             raise
