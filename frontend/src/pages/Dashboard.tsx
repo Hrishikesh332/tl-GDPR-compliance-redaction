@@ -36,6 +36,13 @@ type SearchSessionResult = {
   results: VideoItem[]
 }
 
+const SEARCH_SUGGESTIONS: string[] = [
+  'Primary suspect in courtroom',
+  'Judge announcing verdict or ruling',
+  'Witness testimony',
+  'Faces or people to anonymize',
+]
+
 type EntityOption = {
   id: string
   name: string
@@ -633,6 +640,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
     lexical: true,
     semantic: true,
   })
+  const [searchSuggestionsOpen, setSearchSuggestionsOpen] = useState(false)
   const [searchResults, setSearchResults] = useState<SearchSessionResult | null>(null)
   const [searchLoading, setSearchLoading] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
@@ -1078,6 +1086,35 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
                 <span className="hidden sm:inline">Add Entity</span>
                 <span className="hidden sm:inline text-[10px] font-medium bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">BETA</span>
               </button>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setSearchSuggestionsOpen((open) => !open)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-border bg-surface text-sm text-text-secondary hover:bg-card hover:text-text-primary transition-colors"
+                  aria-haspopup="true"
+                  aria-expanded={searchSuggestionsOpen}
+                >
+                  SUGGESTIONS
+                  <IconChevronDown className={`w-3 h-3 shrink-0 transition-transform ${searchSuggestionsOpen ? 'rotate-180' : ''}`} />
+                </button>
+                {searchSuggestionsOpen && (
+                  <div className="absolute left-0 mt-1 w-72 max-w-xs rounded-xl border border-border bg-surface shadow-xl z-50 py-1">
+                    {SEARCH_SUGGESTIONS.map((suggestion) => (
+                      <button
+                        key={suggestion}
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery(suggestion)
+                          setSearchSuggestionsOpen(false)
+                        }}
+                        className="w-full px-3 py-1.5 text-left text-[11px] text-text-secondary hover:bg-card hover:text-text-primary transition-colors"
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               {/* AdvancedParamsDropdown (Filter) commented out per request
               <AdvancedParamsDropdown
                 options={searchOptions}

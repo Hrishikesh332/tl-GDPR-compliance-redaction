@@ -8,6 +8,13 @@ import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
 
+const ANALYZE_SUGGESTIONS: string[] = [
+  'Courtroom summary with key timestamps',
+  'When does the primary suspect appear?',
+  'Suspect and law enforcement interactions',
+  'Which faces should be anonymized?',
+]
+
 function isHlsUrl(url: string): boolean {
   return /\.m3u8(\?|$)/i.test(url) || url.includes('m3u8')
 }
@@ -823,6 +830,7 @@ export default function VideoEditorPage() {
   const [overviewTagsExpanded, setOverviewTagsExpanded] = useState(true)
   const [analyzeQuery, setAnalyzeQuery] = useState('')
   const [analyzeLoading, setAnalyzeLoading] = useState(false)
+  const [analyzeSuggestionsOpen, setAnalyzeSuggestionsOpen] = useState(false)
   const [analyzeError, setAnalyzeError] = useState<string | null>(null)
   type AnalyzeMessage = { id: string; role: 'user' | 'assistant'; content: string }
   const [analyzeMessages, setAnalyzeMessages] = useState<AnalyzeMessage[]>([])
@@ -3225,6 +3233,35 @@ export default function VideoEditorPage() {
                           disabled={!videoId}
                           className="flex-1 h-9 rounded-md bg-surface border border-border px-3 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent disabled:opacity-60 disabled:cursor-not-allowed"
                         />
+                        <div className="relative shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => setAnalyzeSuggestionsOpen((open) => !open)}
+                            className="h-9 px-2 inline-flex items-center gap-1 rounded-md bg-surface border border-border text-[11px] font-medium text-text-secondary hover:bg-card hover:text-text-primary transition-colors"
+                            aria-haspopup="true"
+                            aria-expanded={analyzeSuggestionsOpen}
+                          >
+                            Suggestions
+                            <IconChevronDown className={`w-3 h-3 transition-transform ${analyzeSuggestionsOpen ? 'rotate-180' : ''}`} />
+                          </button>
+                          {analyzeSuggestionsOpen && (
+                            <div className="absolute right-0 top-full mt-1 py-1 min-w-[14rem] max-w-xs rounded-lg border border-border bg-surface shadow-lg z-50">
+                              {ANALYZE_SUGGESTIONS.map((suggestion) => (
+                                <button
+                                  key={suggestion}
+                                  type="button"
+                                  onClick={() => {
+                                    setAnalyzeQuery(suggestion)
+                                    setAnalyzeSuggestionsOpen(false)
+                                  }}
+                                  className="w-full px-3 py-1.5 text-left text-[11px] text-text-secondary hover:bg-card hover:text-text-primary transition-colors"
+                                >
+                                  {suggestion}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
                         <button
                           type="button"
                           onClick={runAnalyze}
