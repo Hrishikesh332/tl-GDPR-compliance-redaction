@@ -94,21 +94,35 @@ def _merge_temporal_detections(detections, requested_time):
                 best_score = score
 
         if best_idx < 0:
+            sample_time = float(det.get("sample_time", requested_time))
+            time_weight = 1.0 / (1.0 + abs(sample_time - requested_time) * 12.0)
+            confidence = max(0.05, float(det.get("confidence", 0.0)))
+            weight = confidence * time_weight
             grouped.append({
                 **det,
-                "_x2": det["x"] + det["width"],
-                "_y2": det["y"] + det["height"],
+                "_sum_weight": weight,
+                "_sum_x": det["x"] * weight,
+                "_sum_y": det["y"] * weight,
+                "_sum_width": det["width"] * weight,
+                "_sum_height": det["height"] * weight,
                 "_members": 1,
             })
             continue
 
         group = grouped[best_idx]
-        group["x"] = min(group["x"], det["x"])
-        group["y"] = min(group["y"], det["y"])
-        group["_x2"] = max(group["_x2"], det["x"] + det["width"])
-        group["_y2"] = max(group["_y2"], det["y"] + det["height"])
-        group["width"] = group["_x2"] - group["x"]
-        group["height"] = group["_y2"] - group["y"]
+        sample_time = float(det.get("sample_time", requested_time))
+        time_weight = 1.0 / (1.0 + abs(sample_time - requested_time) * 12.0)
+        confidence = max(0.05, float(det.get("confidence", 0.0)))
+        weight = confidence * time_weight
+        group["_sum_weight"] += weight
+        group["_sum_x"] += det["x"] * weight
+        group["_sum_y"] += det["y"] * weight
+        group["_sum_width"] += det["width"] * weight
+        group["_sum_height"] += det["height"] * weight
+        group["x"] = group["_sum_x"] / group["_sum_weight"]
+        group["y"] = group["_sum_y"] / group["_sum_weight"]
+        group["width"] = group["_sum_width"] / group["_sum_weight"]
+        group["height"] = group["_sum_height"] / group["_sum_weight"]
         group["confidence"] = max(float(group.get("confidence", 0.0)), float(det.get("confidence", 0.0)))
         group["_members"] += 1
 
@@ -287,7 +301,7 @@ def live_redaction_detect():
     except (TypeError, ValueError):
         face_confidence = 0.28
 
-    sample_offsets = (-0.10, 0.0, 0.10)
+    sample_offsets = (-0.12, -0.06, 0.0, 0.06, 0.12) if person_ids else (-0.10, 0.0, 0.10)
     sample_times = []
     for offset in sample_offsets:
         ts = max(0.0, time_sec + offset)
@@ -324,7 +338,8 @@ def live_redaction_detect():
                         "kind": "face",
                         "label": str(face.get("person_id") or "Face"),
                         "personId": str(face.get("person_id") or "").strip() or None,
-                        "confidence": round(float(face.get("det_score", 0.0)), 4),
+                        "confidence": round((float(face.get("match_score", 0.0)) * 0.65) + (float(face.get("det_score", 0.0)) * 0.35), 4),
+                        "match_score": round(float(face.get("match_score", 0.0)), 4),
                         "sample_time": sample_time,
                         **normalized,
                     })

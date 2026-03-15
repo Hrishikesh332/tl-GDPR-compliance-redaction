@@ -90,6 +90,7 @@ export default function AddEntityModal({ open, onClose, onEntityAdded }: AddEnti
   const [detectError, setDetectError] = useState<string | null>(null)
   const [selectedFaceIdx, setSelectedFaceIdx] = useState<number | null>(null)
   const [isRegistering, setIsRegistering] = useState(false)
+  const [registrationError, setRegistrationError] = useState<string | null>(null)
 
   const [crop, setCrop] = useState<CropRect>({ x: 80, y: 60, width: 120, height: 120 })
   const [isDragging, setIsDragging] = useState(false)
@@ -113,6 +114,7 @@ export default function AddEntityModal({ open, onClose, onEntityAdded }: AddEnti
       setDetectError(null)
       setSelectedFaceIdx(null)
       setIsRegistering(false)
+      setRegistrationError(null)
     }
   }, [open])
 
@@ -122,13 +124,19 @@ export default function AddEntityModal({ open, onClose, onEntityAdded }: AddEnti
     fetch(`${API_BASE}/api/entities`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error('Failed to load'))))
       .then((data) => {
-        if (data.unavailable) { setExistingEntities([]); return }
+        if (data.unavailable) {
+          setExistingEntities([])
+          setExistingError(data.message || 'Entity search is unavailable.')
+          return
+        }
         const list: ExistingEntity[] = (data.entities || []).map((e: any) => {
+          const id = e.id || e.entity_id
+          if (!id) return null
           const meta = e.metadata || {}
           const faceB64 = meta.face_snap_base64
           const previewUrl = faceB64 ? `data:image/png;base64,${faceB64}` : ''
-          return { id: e.id, name: meta.name || e.name || e.id, previewUrl }
-        })
+          return { id, name: meta.name || e.name || id, previewUrl }
+        }).filter(Boolean) as ExistingEntity[]
         setExistingEntities(list)
       })
       .catch(() => setExistingError('Could not load entities.'))
@@ -175,9 +183,89 @@ export default function AddEntityModal({ open, onClose, onEntityAdded }: AddEnti
     setDetectedFaces([])
     setDetectError(null)
     setSelectedFaceIdx(null)
+    setRegistrationError(null)
     setStep('detect')
     setCrop({ x: 80, y: 60, width: 120, height: 120 })
   }, [imagePreview])
+
+  const dataUrlToFile = useCallback(async (dataUrl: string, filename: string) => {
+    const response = await fetch(dataUrl)
+    const blob = await response.blob()
+    return new File([blob], filename, { type: blob.type || 'image/png' })
+  }, [])
+
+  const cropSelectionToDataUrl = useCallback(async () => {
+    if (!imagePreview) throw new Error('No image selected.')
+
+    const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => resolve(img)
+      img.onerror = () => reject(new Error('Could not load image for cropping.'))
+      img.src = imagePreview
+    })
+
+    const containerWidth = containerRef.current?.clientWidth || 320
+    const containerHeight = containerRef.current?.clientHeight || 240
+    const scale = Math.max(containerWidth / image.naturalWidth, containerHeight / image.naturalHeight)
+    const renderedWidth = image.naturalWidth * scale
+    const renderedHeight = image.naturalHeight * scale
+    const offsetX = (containerWidth - renderedWidth) / 2
+    const offsetY = (containerHeight - renderedHeight) / 2
+
+    const sourceX = Math.max(0, Math.min(image.naturalWidth, (crop.x - offsetX) / scale))
+    const sourceY = Math.max(0, Math.min(image.naturalHeight, (crop.y - offsetY) / scale))
+    const sourceWidth = Math.max(1, Math.min(image.naturalWidth - sourceX, crop.width / scale))
+    const sourceHeight = Math.max(1, Math.min(image.naturalHeight - sourceY, crop.height / scale))
+
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(sourceWidth))
+    canvas.height = Math.max(1, Math.round(sourceHeight))
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Could not prepare crop canvas.')
+    ctx.drawImage(
+      image,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height,
+    )
+    return canvas.toDataURL('image/png')
+  }, [crop, imagePreview])
+
+  const registerEntityWithFile = useCallback(async (file: File, previewUrl: string, previewBase64?: string) => {
+    const name = entityName.trim()
+    if (!name) throw new Error('Name is required.')
+
+    const formData = new FormData()
+    formData.append('image', file)
+    formData.append('name', name)
+    if (previewBase64) formData.append('preview_base64', previewBase64)
+
+    const res = await fetch(`${API_BASE}/api/entities/upload-face`, { method: 'POST', body: formData })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`)
+    }
+
+    const entity = data.entity || {}
+    const entityId = entity.id || entity.entity_id
+    if (!entityId) {
+      throw new Error('Entity was created without an ID.')
+    }
+
+    onEntityAdded?.({
+      id: entityId,
+      file,
+      previewUrl,
+      name: entity.name || name,
+      faceBase64: previewBase64,
+    })
+    onClose()
+  }, [entityName, onClose, onEntityAdded])
 
   const clampCrop = useCallback((c: CropRect, maxW: number, maxH: number): CropRect => {
     const w = Math.max(MIN_CROP_SIZE, Math.min(MAX_CROP_SIZE, c.width))
@@ -243,36 +331,39 @@ export default function AddEntityModal({ open, onClose, onEntityAdded }: AddEnti
     inputRef.current?.click()
   }
 
-  function handleAutoConfirm() {
+  async function handleAutoConfirm() {
     if (!imageFile || selectedFaceIdx === null || !detectedFaces[selectedFaceIdx] || !entityName.trim()) return
     const face = detectedFaces[selectedFaceIdx]
     const facePreviewUrl = `data:image/png;base64,${face.image_base64}`
 
     setIsRegistering(true)
-    const formData = new FormData()
-    formData.append('image', imageFile)
-    formData.append('name', entityName.trim())
-
-    fetch(`${API_BASE}/api/entities/upload-face`, { method: 'POST', body: formData })
-      .then(res => res.ok ? res.json() : Promise.reject())
-      .then(data => {
-        const entityId = data.entity?.id
-        const name = entityName.trim()
-        onEntityAdded?.({ id: entityId, file: imageFile, previewUrl: facePreviewUrl, name, faceBase64: face.image_base64 })
-        onClose()
-      })
-      .catch(() => {
-        onEntityAdded?.({ file: imageFile, previewUrl: facePreviewUrl, name: entityName.trim(), faceBase64: face.image_base64 })
-        onClose()
-      })
-      .finally(() => setIsRegistering(false))
+    setRegistrationError(null)
+    try {
+      const safeName = entityName.trim().replace(/\s+/g, '-').toLowerCase() || 'entity'
+      const faceFile = await dataUrlToFile(facePreviewUrl, `${safeName}.png`)
+      await registerEntityWithFile(faceFile, facePreviewUrl, face.image_base64)
+    } catch (e) {
+      setRegistrationError(e instanceof Error ? e.message : 'Could not create entity.')
+    } finally {
+      setIsRegistering(false)
+    }
   }
 
-  function handleCropConfirm() {
-    if (imageFile && imagePreview) {
-      onEntityAdded?.({ file: imageFile, crop, previewUrl: imagePreview, name: entityName.trim() || undefined })
+  async function handleCropConfirm() {
+    if (!imagePreview || !entityName.trim()) return
+    setIsRegistering(true)
+    setRegistrationError(null)
+    try {
+      const croppedDataUrl = await cropSelectionToDataUrl()
+      const previewBase64 = croppedDataUrl.includes(',') ? croppedDataUrl.split(',', 2)[1] : undefined
+      const safeName = entityName.trim().replace(/\s+/g, '-').toLowerCase() || 'entity'
+      const croppedFile = await dataUrlToFile(croppedDataUrl, `${safeName}.png`)
+      await registerEntityWithFile(croppedFile, croppedDataUrl, previewBase64)
+    } catch (e) {
+      setRegistrationError(e instanceof Error ? e.message : 'Could not create entity.')
+    } finally {
+      setIsRegistering(false)
     }
-    onClose()
   }
 
   function handleDetectBack() {
@@ -283,10 +374,12 @@ export default function AddEntityModal({ open, onClose, onEntityAdded }: AddEnti
     setDetectedFaces([])
     setDetectError(null)
     setSelectedFaceIdx(null)
+    setRegistrationError(null)
   }
 
   function handleCropBack() {
     setStep('detect')
+    setRegistrationError(null)
   }
 
   if (!open) return null
@@ -532,6 +625,10 @@ export default function AddEntityModal({ open, onClose, onEntityAdded }: AddEnti
               </div>
             )}
 
+            {registrationError && (
+              <p className="mb-4 text-sm text-red-600">{registrationError}</p>
+            )}
+
             {/* Actions */}
             <div className="flex justify-between">
               <BackButton onClick={handleDetectBack} />
@@ -663,6 +760,10 @@ export default function AddEntityModal({ open, onClose, onEntityAdded }: AddEnti
               </div>
             </div>
 
+            {registrationError && (
+              <p className="mt-4 text-sm text-red-600">{registrationError}</p>
+            )}
+
             <div className="mt-5 flex justify-between">
               <BackButton onClick={handleCropBack} />
               <div className="flex gap-2">
@@ -676,9 +777,13 @@ export default function AddEntityModal({ open, onClose, onEntityAdded }: AddEnti
                 <button
                   type="button"
                   onClick={handleCropConfirm}
-                  className="h-8 px-3 rounded-[9.6px] text-sm font-medium bg-brand-charcoal text-brand-white hover:bg-gray-700 transition-colors"
+                  disabled={!entityName.trim() || isRegistering}
+                  className="h-8 px-3 rounded-[9.6px] text-sm font-medium bg-brand-charcoal text-brand-white hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
                 >
-                  Confirm selection
+                  {isRegistering && (
+                    <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  )}
+                  {isRegistering ? 'Adding...' : 'Confirm selection'}
                 </button>
               </div>
             </div>

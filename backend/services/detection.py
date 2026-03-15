@@ -558,7 +558,7 @@ def identify_faces_in_frame(frame_bgr, known_faces, tolerance=0.35):
         return []
 
     detections = detect_faces(frame_bgr, with_encodings=True)
-    identified = []
+    best_by_person = {}
     for det in detections:
         enc = det.get("encoding")
         if enc is None:
@@ -572,11 +572,20 @@ def identify_faces_in_frame(frame_bgr, known_faces, tolerance=0.35):
                 best_sim = sim
                 best_person_id = person_id
         if best_person_id and best_sim >= (1.0 - tolerance):
-            identified.append({
+            candidate = {
                 "bbox": det.get("bbox"),
                 "person_id": best_person_id,
                 "match_score": round(best_sim, 4),
                 "det_score": round(float(det.get("det_score", 0.0)), 4),
-            })
+            }
+            previous = best_by_person.get(best_person_id)
+            if previous is None or (
+                candidate["match_score"],
+                candidate["det_score"],
+            ) > (
+                previous["match_score"],
+                previous["det_score"],
+            ):
+                best_by_person[best_person_id] = candidate
 
-    return identified
+    return list(best_by_person.values())

@@ -130,6 +130,15 @@ def list_videos():
             page=page,
             page_limit=page_limit,
         )
+        # Override filename with original upload name when we have it (TwelveLabs stores temp path name)
+        for v in result.get("videos") or []:
+            job_id = get_job_id_by_video_id(v.get("video_id"))
+            if job_id:
+                job = get_job(job_id)
+                if job and job.get("video_filename"):
+                    if v.get("system_metadata") is not None:
+                        v["system_metadata"] = dict(v["system_metadata"])
+                        v["system_metadata"]["filename"] = job["video_filename"]
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e), "videos": [], "index_id": index_id}), 200
@@ -141,6 +150,13 @@ def get_video(video_id):
     index_id = request.args.get("index_id")
     try:
         info = twelvelabs_service.get_video_info(video_id, index_id=index_id)
+        # Use original upload filename when we have it
+        job_id = get_job_id_by_video_id(video_id)
+        if job_id:
+            job = get_job(job_id)
+            if job and job.get("video_filename") and info.get("system_metadata") is not None:
+                info["system_metadata"] = dict(info["system_metadata"])
+                info["system_metadata"]["filename"] = job["video_filename"]
         overview = twelvelabs_service.get_video_overview_from_user_metadata(info.get("user_metadata"))
         if overview is not None:
             info["overview"] = overview

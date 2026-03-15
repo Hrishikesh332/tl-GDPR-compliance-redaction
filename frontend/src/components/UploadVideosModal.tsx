@@ -1,5 +1,4 @@
 import { useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { API_BASE } from '../lib/api'
 
 function IconClose({ className = 'w-5 h-5' }: { className?: string }) {
@@ -23,14 +22,15 @@ function IconUpload({ className = 'w-5 h-5' }: { className?: string }) {
 interface UploadVideosModalProps {
   open: boolean
   onClose: () => void
+  /** Called as soon as the user submits; modal closes and uploads run in background. */
+  onUploadSubmitted?: () => void
+  /** Called when a background upload succeeds (e.g. to refresh dashboard list). */
+  onUploadSuccess?: () => void
 }
 
-export default function UploadVideosModal({ open, onClose }: UploadVideosModalProps) {
+export default function UploadVideosModal({ open, onClose, onUploadSubmitted, onUploadSuccess }: UploadVideosModalProps) {
   const inputRef = useRef<HTMLInputElement>(null)
-  const navigate = useNavigate()
   const [files, setFiles] = useState<File[]>([])
-  const [uploading, setUploading] = useState(false)
-  const [progress, setProgress] = useState<Record<string, 'pending' | 'uploading' | 'done' | 'error'>>({})
   const [error, setError] = useState<string | null>(null)
 
   if (!open) return null
@@ -48,51 +48,31 @@ export default function UploadVideosModal({ open, onClose }: UploadVideosModalPr
     setFiles((prev) => prev.filter((_, i) => i !== idx))
   }
 
-  async function handleUpload() {
+  function handleUpload() {
     if (!files.length) return
-    setUploading(true)
     setError(null)
-    const newProgress: Record<string, 'pending' | 'uploading' | 'done' | 'error'> = {}
-    files.forEach((f) => { newProgress[f.name] = 'pending' })
-    setProgress({ ...newProgress })
 
-    let allOk = true
-    for (const file of files) {
-      newProgress[file.name] = 'uploading'
-      setProgress({ ...newProgress })
-      try {
-        const formData = new FormData()
-        formData.append('video', file)
-        const resp = await fetch(`${API_BASE}/api/indexing`, { method: 'POST', body: formData })
-        if (!resp.ok) {
-          const data = await resp.json().catch(() => ({}))
-          throw new Error(data.error || `HTTP ${resp.status}`)
-        }
-        newProgress[file.name] = 'done'
-      } catch (e: any) {
-        newProgress[file.name] = 'error'
-        allOk = false
-        setError(e.message || 'Upload failed')
-      }
-      setProgress({ ...newProgress })
+    const filesToUpload = [...files]
+    for (const file of filesToUpload) {
+      const formData = new FormData()
+      formData.append('video', file)
+      fetch(`${API_BASE}/api/indexing`, { method: 'POST', body: formData })
+        .then((resp) => {
+          if (resp.ok) onUploadSuccess?.()
+          return resp
+        })
+        .catch(() => {})
     }
 
-    setUploading(false)
-    if (allOk) {
-      setFiles([])
-      setProgress({})
-      onClose()
-      navigate('/')
-    }
+    setFiles([])
+    onUploadSubmitted?.()
+    onClose()
   }
 
   function handleClose() {
-    if (!uploading) {
-      setFiles([])
-      setProgress({})
-      setError(null)
-      onClose()
-    }
+    setFiles([])
+    setError(null)
+    onClose()
   }
 
   return (
@@ -101,7 +81,7 @@ export default function UploadVideosModal({ open, onClose }: UploadVideosModalPr
       <div className="relative w-full max-w-md rounded-xl border border-border bg-surface shadow-xl" role="dialog" aria-modal="true" aria-labelledby="upload-modal-title">
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <h2 id="upload-modal-title" className="text-lg font-semibold text-text-primary">Upload videos</h2>
-          <button type="button" onClick={handleClose} disabled={uploading} className="p-2 rounded-lg text-text-tertiary hover:bg-card hover:text-text-primary transition-colors disabled:opacity-50" aria-label="Close">
+          <button type="button" onClick={handleClose} className="p-2 rounded-lg text-text-tertiary hover:bg-card hover:text-text-primary transition-colors" aria-label="Close">
             <IconClose />
           </button>
         </div>
@@ -123,45 +103,34 @@ export default function UploadVideosModal({ open, onClose }: UploadVideosModalPr
             </button>
           ) : (
             <div className="space-y-2 max-h-60 overflow-y-auto">
-              {files.map((f, i) => {
-                const status = progress[f.name]
-                return (
-                  <div key={`${f.name}-${i}`} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-gray-50 border border-gray-200">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900 truncate">{f.name}</p>
-                      <p className="text-xs text-gray-500">{(f.size / (1024 * 1024)).toFixed(1)} MB</p>
-                    </div>
-                    {status === 'uploading' && <div className="w-4 h-4 border-2 border-gray-300 border-t-gray-800 rounded-full animate-spin shrink-0" />}
-                    {status === 'done' && <span className="text-green-600 text-sm shrink-0">Done</span>}
-                    {status === 'error' && <span className="text-red-600 text-sm shrink-0">Failed</span>}
-                    {!status && !uploading && (
-                      <button type="button" onClick={() => removeFile(i)} className="text-gray-400 hover:text-gray-700 shrink-0 text-sm">Remove</button>
-                    )}
+              {files.map((f, i) => (
+                <div key={`${f.name}-${i}`} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-gray-50 border border-gray-200">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-gray-900 truncate">{f.name}</p>
+                    <p className="text-xs text-gray-500">{(f.size / (1024 * 1024)).toFixed(1)} MB</p>
                   </div>
-                )
-              })}
-              {!uploading && (
-                <button type="button" onClick={() => inputRef.current?.click()} className="w-full py-2 text-sm text-gray-500 hover:text-gray-700 underline underline-offset-2">
-                  + Add more files
-                </button>
-              )}
+                  <button type="button" onClick={() => removeFile(i)} className="text-gray-400 hover:text-gray-700 shrink-0 text-sm">Remove</button>
+                </div>
+              ))}
+              <button type="button" onClick={() => inputRef.current?.click()} className="w-full py-2 text-sm text-gray-500 hover:text-gray-700 underline underline-offset-2">
+                + Add more files
+              </button>
             </div>
           )}
 
           {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
 
           <div className="mt-5 flex justify-end gap-2">
-            <button type="button" onClick={handleClose} disabled={uploading} className="h-8 px-3 rounded-[9.6px] text-sm font-medium text-gray-700 bg-gray-200 hover:bg-gray-300 transition-colors disabled:opacity-50">
+            <button type="button" onClick={handleClose} className="h-8 px-3 rounded-[9.6px] text-sm font-medium text-gray-700 bg-gray-200 hover:bg-gray-300 transition-colors">
               Cancel
             </button>
             <button
               type="button"
               onClick={handleUpload}
-              disabled={!files.length || uploading}
-              className="h-8 px-3 rounded-[9.6px] text-sm font-medium bg-brand-charcoal text-brand-white hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+              disabled={!files.length}
+              className="h-8 px-3 rounded-[9.6px] text-sm font-medium bg-brand-charcoal text-brand-white hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {uploading && <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
-              {uploading ? 'Uploading...' : `Upload ${files.length || ''}`}
+              Send for indexing {files.length ? `(${files.length})` : ''}
             </button>
           </div>
         </div>

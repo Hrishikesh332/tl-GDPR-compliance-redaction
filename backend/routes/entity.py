@@ -109,6 +109,7 @@ def upload_face_and_create_entity():
     image_file = request.files["image"]
     name = request.form.get("name", "")
     description = request.form.get("description", "")
+    preview_base64 = (request.form.get("preview_base64") or "").strip()
 
     if not name:
         return jsonify({"error": "name is required"}), 400
@@ -123,11 +124,15 @@ def upload_face_and_create_entity():
 
     try:
         asset_id = twelvelabs_service.upload_face_asset(tmp.name)
+        metadata = {"name": name}
+        if preview_base64:
+            metadata["face_snap_base64"] = preview_base64
 
         entity_result = twelvelabs_service.create_entity(
             name=name,
             asset_ids=[asset_id],
             description=description or f"Face entity: {name}",
+            metadata=metadata,
         )
 
         return jsonify({
@@ -136,6 +141,9 @@ def upload_face_and_create_entity():
         }), 201
     except AttributeError:
         return jsonify({"error": ENTITY_UNAVAILABLE, "unavailable": True}), 503
+    except Exception as e:
+        logger.exception("upload_face_and_create_entity failed")
+        return jsonify({"error": str(e)}), 500
     finally:
         if os.path.exists(tmp.name):
             os.remove(tmp.name)

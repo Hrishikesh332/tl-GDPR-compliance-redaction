@@ -18,7 +18,7 @@ from config import (
     MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR,
     MANUAL_FACE_DETECTION_CONFIDENCE,
 )
-from utils.image import apply_blur
+from utils.image import apply_redaction
 from utils.video import small_frame_for_tracking, reencode_mp4_to_h264
 
 logger = logging.getLogger("video_redaction.redactor")
@@ -445,6 +445,7 @@ def redact_video(
     face_tolerance=None,
     obj_conf=0.25,
     blur_strength=DEFAULT_BLUR_STRENGTH,
+    redaction_style="blur",
     detect_every_n=DEFAULT_DETECT_EVERY_N,
     detect_every_seconds=None,
     temporal_ranges=None,
@@ -612,7 +613,7 @@ def redact_video(
 
                 frame_custom_display_bboxes[idx] = tracked_bbox
                 if not preview_only:
-                    apply_blur(frame, tracked_bbox, blur_strength)
+                    apply_redaction(frame, tracked_bbox, effect, blur_strength)
 
                 tracker = None
                 try:
@@ -783,7 +784,7 @@ def redact_video(
                     display_bbox = _smooth_bbox(resolved_bbox, prev_smoothed, TRACKER_SMOOTHING_ALPHA, w, h)
                     frame_custom_display_bboxes[idx] = display_bbox
                     if not preview_only:
-                        apply_blur(frame, display_bbox, blur_strength)
+                        apply_redaction(frame, display_bbox, custom_effects[idx] or "blur", blur_strength)
                     custom_last_bboxes[idx] = display_bbox
                     custom_smoothed_bboxes[idx] = display_bbox
                 else:
@@ -855,7 +856,7 @@ def redact_video(
             # Motion tracking via trackers is temporarily disabled.
             for box in all_boxes:
                 x1, y1, x2, y2 = [int(v) for v in box]
-                apply_blur(frame, (x1, y1, x2, y2), blur_strength)
+                apply_redaction(frame, (x1, y1, x2, y2), redaction_style, blur_strength)
 
         if writer is not None:
             writer.write(frame)

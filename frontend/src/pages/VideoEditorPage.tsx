@@ -586,6 +586,8 @@ function drawCanvasBlurRegion(
   detection: LiveRedactionDetection,
   destWidth: number,
   destHeight: number,
+  style: 'blur' | 'black',
+  blurStrength: number,
 ) {
   const sx = detection.x * video.videoWidth
   const sy = detection.y * video.videoHeight
@@ -602,11 +604,17 @@ function drawCanvasBlurRegion(
   ctx.beginPath()
   ctx.rect(dx, dy, dw, dh)
   ctx.clip()
-  ctx.filter = `blur(${Math.max(18, Math.round(Math.min(dw, dh) * 0.22))}px)`
-  ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
-  ctx.filter = 'none'
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.16)'
-  ctx.fillRect(dx, dy, dw, dh)
+  if (style === 'black') {
+    ctx.fillStyle = 'rgba(5, 6, 8, 0.96)'
+    ctx.fillRect(dx, dy, dw, dh)
+  } else {
+    const blurPx = Math.max(10, Math.round((blurStrength / 100) * Math.min(dw, dh) * 0.55))
+    ctx.filter = `blur(${blurPx}px)`
+    ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
+    ctx.filter = 'none'
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.16)'
+    ctx.fillRect(dx, dy, dw, dh)
+  }
   ctx.restore()
 
   const isFace = detection.kind === 'face'
@@ -679,6 +687,8 @@ export default function VideoEditorPage() {
   const [liveRedactionLoading, setLiveRedactionLoading] = useState(false)
   const [liveRedactionError, setLiveRedactionError] = useState<string | null>(null)
   const [excludedFromRedactionIds, setExcludedFromRedactionIds] = useState<string[]>([])
+  const [redactionStyle, setRedactionStyle] = useState<'blur' | 'black'>('blur')
+  const [blurIntensity, setBlurIntensity] = useState(60)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [leftSidebarOpen, setLeftSidebarOpen] = useState(true)
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true)
@@ -1356,6 +1366,7 @@ export default function VideoEditorPage() {
         setDetectionError(null)
       }
       setApiDetections(items)
+      setExcludedFromRedactionIds(items.filter((item) => item.kind === 'face').map((item) => item.id))
       setHasRunDetection(true)
     } catch (e) {
       setDetectionError(e instanceof Error ? e.message : 'Detection request failed')
@@ -1516,6 +1527,8 @@ export default function VideoEditorPage() {
         job_id: jobId,
         detect_every_n: 1,
         use_temporal_optimization: false,
+        blur_strength: blurIntensity,
+        redaction_style: redactionStyle,
       }
       const customRegions = buildCustomRegionPayload(trackingRegions)
       if (customRegions.length > 0) {
@@ -2060,7 +2073,7 @@ export default function VideoEditorPage() {
         visibleLiveRedactionDetections.length > 0
       ) {
         for (const detection of visibleLiveRedactionDetections) {
-          drawCanvasBlurRegion(ctx, video, detection, width, height)
+          drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
         }
       }
       liveBlurAnimationFrameRef.current = window.requestAnimationFrame(render)
@@ -2075,7 +2088,7 @@ export default function VideoEditorPage() {
       }
       ctx.clearRect(0, 0, Math.max(0, overlayViewport.width), Math.max(0, overlayViewport.height))
     }
-  }, [liveRedactionActive, overlayViewport.height, overlayViewport.width, visibleLiveRedactionDetections])
+  }, [blurIntensity, liveRedactionActive, overlayViewport.height, overlayViewport.width, redactionStyle, visibleLiveRedactionDetections])
 
   useEffect(() => {
     if (!liveRedactionActive || !hasRunDetection) return
@@ -2168,7 +2181,7 @@ export default function VideoEditorPage() {
       <div className="flex flex-1 min-h-0">
 
         {/* ============ LEFT SIDEBAR (collapsible) ============ */}
-        <aside className={`shrink-0 flex flex-col border-r border-border bg-surface overflow-hidden transition-[width] duration-200 ${leftSidebarOpen ? 'w-sidebar' : 'w-10'}`}>
+        <aside className={`shrink-0 flex flex-col min-w-0 border-r border-border bg-surface overflow-hidden transition-[width] duration-200 ${leftSidebarOpen ? 'w-sidebar' : 'w-10'}`}>
           {leftSidebarOpen ? (
             <>
               <div className="px-4 h-10 flex items-center justify-between border-b border-border shrink-0 gap-1">
@@ -2206,9 +2219,9 @@ export default function VideoEditorPage() {
 
               {/* Live blur panel */}
           {activeTool === 'tracker' && (
-            <div className="border-t border-border p-3 space-y-3 shrink-0 overflow-y-auto max-h-[50vh]">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Live Blur</span>
+            <div className="border-t border-border p-3 space-y-3 shrink-0 min-w-0 overflow-x-hidden overflow-y-auto max-h-[50vh]">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider truncate min-w-0">Live Blur</span>
                 <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none">
                   <input
                     type="checkbox"
@@ -2220,35 +2233,64 @@ export default function VideoEditorPage() {
                 </label>
               </div>
 
-              <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-3">
-                <p className="text-xs text-text-secondary leading-relaxed">
+              <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-3 min-w-0 overflow-hidden">
+                <p className="text-xs text-text-secondary leading-relaxed break-words">
                   Live blur now uses per-frame detection only. Click a blurred face or object in the player to include or exclude it from redaction.
                 </p>
+                <div className="space-y-2 border-t border-border pt-3 min-w-0">
+                  <span className="text-[11px] font-medium uppercase tracking-wider text-text-tertiary">Redaction</span>
+                  <label className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-secondary min-w-0">
+                    <span className="shrink-0">Style</span>
+                    <select
+                      value={redactionStyle}
+                      onChange={(e) => setRedactionStyle(e.target.value as 'blur' | 'black')}
+                      className="h-8 w-full min-w-0 max-w-[8rem] rounded-md border border-border bg-background px-2 text-xs text-text-primary shrink"
+                    >
+                      <option value="blur">Blur</option>
+                      <option value="black">Black mask</option>
+                    </select>
+                  </label>
+                  <label className={`flex items-center gap-2 text-xs min-w-0 ${redactionStyle === 'blur' ? 'text-text-secondary' : 'text-text-tertiary'}`}>
+                    <span className="whitespace-nowrap shrink-0">Intensity</span>
+                    <input
+                      type="range"
+                      min="15"
+                      max="99"
+                      step="2"
+                      value={blurIntensity}
+                      onChange={(e) => setBlurIntensity(Number(e.target.value))}
+                      disabled={redactionStyle !== 'blur'}
+                      className="flex-1 min-w-0 h-2 rounded-full accent-accent cursor-pointer bg-card border border-border disabled:opacity-40 disabled:cursor-not-allowed"
+                      aria-label="Blur intensity"
+                    />
+                    <span className="w-8 shrink-0 text-right font-mono tabular-nums text-text-primary">{blurIntensity}</span>
+                  </label>
+                </div>
               </div>
 
-              <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-2">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs text-text-tertiary">Status</span>
+              <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-2 min-w-0 overflow-hidden">
+                <div className="flex items-center justify-between gap-2 min-w-0">
+                  <span className="text-xs text-text-tertiary truncate min-w-0">Status</span>
                   <span className={`text-xs font-medium ${liveRedactionActive ? 'text-accent' : 'text-text-tertiary'}`}>
                     {liveRedactionActive ? 'Running' : 'Paused'}
                   </span>
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs text-text-tertiary">Current frame</span>
-                  <span className="text-xs text-text-primary tabular-nums">
+                <div className="flex items-center justify-between gap-2 min-w-0">
+                  <span className="text-xs text-text-tertiary truncate min-w-0">Current frame</span>
+                  <span className="text-xs text-text-primary tabular-nums shrink-0">
                     {liveRedactionLoading && visibleLiveRedactionDetections.length === 0
                       ? 'Scanning...'
                       : `${visibleLiveRedactionDetections.length} blur region${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
                   </span>
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs text-text-tertiary">Export mode</span>
-                  <span className="text-xs text-text-primary">Per-frame detection</span>
+                <div className="flex items-center justify-between gap-2 min-w-0">
+                  <span className="text-xs text-text-tertiary truncate min-w-0">Export mode</span>
+                  <span className="text-xs text-text-primary shrink-0">Per-frame detection</span>
                 </div>
                 {hasRunDetection && (
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-xs text-text-tertiary">People blurred</span>
-                    <span className="text-xs text-text-primary">
+                  <div className="flex items-center justify-between gap-2 min-w-0">
+                    <span className="text-xs text-text-tertiary truncate min-w-0">People blurred</span>
+                    <span className="text-xs text-text-primary shrink-0">
                       {selectedFacePersonIds.length > 0 ? selectedFacePersonIds.length : 'None selected'}
                     </span>
                   </div>
@@ -2261,21 +2303,6 @@ export default function VideoEditorPage() {
                 </div>
               )}
 
-              <button
-                type="button"
-                className={`w-full h-9 text-sm ${btnBase} flex items-center justify-center gap-2`}
-                onClick={() => requestLiveRedaction(videoRef.current?.currentTime ?? currentTime)}
-                disabled={!liveRedactionActive}
-              >
-                <IconPlay className="w-4 h-4" />
-                Refresh current frame
-              </button>
-
-              <div className="pt-2 border-t border-border">
-                <p className="text-xs text-text-tertiary leading-relaxed">
-                  Export detects every frame and blurs the returned faces and YOLO objects. Click any blurred face or object in the player to toggle that detected item.
-                </p>
-              </div>
             </div>
           )}
             </>
@@ -2910,7 +2937,7 @@ export default function VideoEditorPage() {
                       className="w-full h-8 rounded-md bg-surface border border-border px-3 text-xs text-text-primary placeholder:text-text-tertiary"
                     />
                     <p className="mt-2 text-[10px] leading-relaxed text-text-tertiary">
-                      Use the eye toggle to choose which people or object classes get blurred in live preview and export.
+                      Faces start off unblurred by default. Use the eye toggle to turn on just the person you want, or add object classes for preview and export.
                     </p>
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto">

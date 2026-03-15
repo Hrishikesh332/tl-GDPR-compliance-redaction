@@ -167,46 +167,122 @@ def get_scene_summary(video_id):
         return {"raw_summary": result.data}
 
 
-def search_segments(query, index_id=None):
-    client = _get_client()
-    idx = index_id or TWELVELABS_INDEX_ID
-    logger.info("Searching index %s for: %s", idx, query)
+def _raw_response_to_loggable(raw_list):
+    """Convert raw API response items to JSON-serializable dicts for logging."""
+    out = []
+    for item in raw_list:
+        clips = getattr(item, "clips", None)
+        if clips is not None:
+            out.append({
+                "id": getattr(item, "id", None),
+                "score": getattr(item, "score", None),
+                "clips": [
+                    {
+                        "start": getattr(c, "start", None),
+                        "end": getattr(c, "end", None),
+                        "score": getattr(c, "score", None),
+                        "rank": getattr(c, "rank", None),
+                        "thumbnail_url": getattr(c, "thumbnail_url", None),
+                    }
+                    for c in clips
+                ],
+            })
+        else:
+            out.append({
+                "video_id": getattr(item, "video_id", None),
+                "id": getattr(item, "id", None),
+                "start": getattr(item, "start", None),
+                "end": getattr(item, "end", None),
+                "score": getattr(item, "score", None),
+                "rank": getattr(item, "rank", None),
+                "thumbnail_url": getattr(item, "thumbnail_url", None),
+            })
+    return out
 
-    response = client.search.query(
-        index_id=idx,
-        search_options=["visual"],
-        query_text=query,
-        group_by="video",
-        page_limit=20,
-    )
 
+def _serialize_search_results(response):
     results = []
     for item in response:
-        if item.id and item.clips:
+        grouped_clips = getattr(item, "clips", None)
+        grouped_video_id = getattr(item, "id", None)
+        if grouped_video_id and grouped_clips:
             video_result = {
-                "video_id": item.id,
+                "video_id": grouped_video_id,
+                "score": getattr(item, "score", None),
                 "clips": [],
             }
-            for clip in item.clips:
+            for clip in grouped_clips:
                 video_result["clips"].append({
                     "start": clip.start,
                     "end": clip.end,
-                    "score": clip.score,
-                    "rank": clip.rank,
-                    "thumbnail_url": clip.thumbnail_url,
+                    "score": getattr(clip, "score", None),
+                    "rank": getattr(clip, "rank", None),
+                    "thumbnail_url": getattr(clip, "thumbnail_url", None),
                 })
             results.append(video_result)
-        else:
-            results.append({
-                "video_id": item.video_id,
-                "start": item.start,
-                "end": item.end,
-                "score": item.score,
-                "rank": item.rank,
-                "thumbnail_url": item.thumbnail_url,
-            })
+            continue
+
+        results.append({
+            "video_id": getattr(item, "video_id", None) or grouped_video_id,
+            "start": getattr(item, "start", None),
+            "end": getattr(item, "end", None),
+            "score": getattr(item, "score", None),
+            "rank": getattr(item, "rank", None),
+            "thumbnail_url": getattr(item, "thumbnail_url", None),
+        })
 
     return results
+
+
+def search_segments(query=None, index_id=None, image_path=None, image_url=None):
+    client = _get_client()
+    idx = index_id or TWELVELABS_INDEX_ID
+    if not query and not image_path and not image_url:
+        raise ValueError("query text or image is required")
+
+    logger.info(
+        "Searching index %s (text=%s, image_path=%s, image_url=%s)",
+        idx,
+        bool(query),
+        bool(image_path),
+        bool(image_url),
+    )
+
+    kwargs = {
+        "index_id": idx,
+        "search_options": ["visual"],
+        "group_by": "video",
+        "page_limit": 20,
+        "sort_option": "score",
+    }
+    if query:
+        kwargs["query_text"] = query
+
+    if image_url:
+        response = client.search.query(
+            **kwargs,
+            query_media_type="image",
+            query_media_url=image_url,
+        )
+        raw_list = list(response)
+        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(_raw_response_to_loggable(raw_list), default=str, indent=2))
+        return _serialize_search_results(iter(raw_list))
+
+    if image_path:
+        with open(image_path, "rb") as image_file:
+            response = client.search.query(
+                **kwargs,
+                query_media_type="image",
+                query_media_file=image_file,
+            )
+        raw_list = list(response)
+        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(_raw_response_to_loggable(raw_list), default=str, indent=2))
+        return _serialize_search_results(iter(raw_list))
+
+    response = client.search.query(**kwargs)
+    raw_list = list(response)
+    logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(_raw_response_to_loggable(raw_list), default=str, indent=2))
+    return _serialize_search_results(iter(raw_list))
 
 
 def find_person_time_ranges(video_id, person_description):
@@ -599,6 +675,22 @@ def upload_face_asset_from_url(image_url):
     return asset.id
 
 
+def _serialize_entity(entity, metadata=None):
+    entity_id = getattr(entity, "id", None)
+    raw_metadata = metadata if metadata is not None else getattr(entity, "metadata", None)
+    resolved_metadata = raw_metadata if isinstance(raw_metadata, dict) else None
+    return {
+        "id": entity_id,
+        "entity_id": entity_id,
+        "name": getattr(entity, "name", None),
+        "description": getattr(entity, "description", None),
+        "status": str(entity.status) if getattr(entity, "status", None) else None,
+        "asset_ids": getattr(entity, "asset_ids", None),
+        "metadata": resolved_metadata,
+        "created_at": str(entity.created_at) if getattr(entity, "created_at", None) else None,
+    }
+
+
 def create_entity(name, asset_ids, description=None, metadata=None):
     client = _get_client()
     collection_id = _ensure_entity_collection()
@@ -614,12 +706,7 @@ def create_entity(name, asset_ids, description=None, metadata=None):
     )
 
     logger.info("Created entity: id=%s, status=%s", entity.id, entity.status)
-    return {
-        "entity_id": entity.id,
-        "name": entity.name,
-        "status": str(entity.status) if entity.status else None,
-        "asset_ids": entity.asset_ids,
-    }
+    return _serialize_entity(entity, metadata=metadata)
 
 
 def wait_for_entity_ready(entity_id, timeout=120):
@@ -647,14 +734,17 @@ def list_entities():
         entity_collection_id=collection_id,
     )
     for entity in response:
-        results.append({
-            "entity_id": entity.id,
-            "name": entity.name,
-            "description": entity.description,
-            "status": str(entity.status) if entity.status else None,
-            "asset_ids": entity.asset_ids,
-            "created_at": str(entity.created_at) if entity.created_at else None,
-        })
+        metadata = getattr(entity, "metadata", None)
+        if metadata is None and getattr(entity, "id", None):
+            try:
+                detailed = client.entity_collections.entities.retrieve(
+                    entity_collection_id=collection_id,
+                    entity_id=entity.id,
+                )
+                metadata = getattr(detailed, "metadata", None)
+            except Exception as e:
+                logger.debug("Could not enrich entity %s metadata: %s", entity.id, e)
+        results.append(_serialize_entity(entity, metadata=metadata))
     return results
 
 
@@ -665,15 +755,7 @@ def retrieve_entity(entity_id):
         entity_collection_id=collection_id,
         entity_id=entity_id,
     )
-    return {
-        "entity_id": entity.id,
-        "name": entity.name,
-        "description": entity.description,
-        "status": str(entity.status) if entity.status else None,
-        "asset_ids": entity.asset_ids,
-        "metadata": entity.metadata,
-        "created_at": str(entity.created_at) if entity.created_at else None,
-    }
+    return _serialize_entity(entity, metadata=getattr(entity, "metadata", None))
 
 
 def delete_entity(entity_id):
@@ -701,34 +783,10 @@ def entity_search(entity_id, query_suffix="", index_id=None):
         search_options=["visual"],
         query_text=query_text,
         group_by="video",
+        sort_option="score",
         page_limit=50,
     )
-
-    results = []
-    for item in response:
-        if item.id and item.clips:
-            video_result = {
-                "video_id": item.id,
-                "clips": [],
-            }
-            for clip in item.clips:
-                video_result["clips"].append({
-                    "start": clip.start,
-                    "end": clip.end,
-                    "rank": clip.rank,
-                    "thumbnail_url": clip.thumbnail_url,
-                })
-            results.append(video_result)
-        else:
-            results.append({
-                "video_id": item.video_id,
-                "start": item.start,
-                "end": item.end,
-                "rank": item.rank,
-                "thumbnail_url": item.thumbnail_url,
-            })
-
-    return results
+    return _serialize_search_results(response)
 
 
 def entity_search_time_ranges(entity_id, video_id=None, index_id=None):
