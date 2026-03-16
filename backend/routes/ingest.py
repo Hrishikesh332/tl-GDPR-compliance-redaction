@@ -87,7 +87,7 @@ def jobs():
 
 @index_bp.route("/jobs/by-video/<video_id>", methods=["GET"])
 def job_by_video(video_id):
-    """Return job_id for the first job whose twelvelabs_video_id matches (for editor detection)."""
+    """Return the best matching job_id for this video (used by the editor Detect flow)."""
     job_id = get_job_id_by_video_id(video_id)
     if not job_id:
         return jsonify({"error": "no job found for this video"}), 404

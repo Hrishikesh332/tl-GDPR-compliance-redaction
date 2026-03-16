@@ -149,6 +149,12 @@ def get_faces(job_id):
     if result is None:
         return jsonify({"error": "job not found"}), 404
 
+    if result["status"] == "failed":
+        return jsonify({
+            "status": result["status"],
+            "error": result.get("error") or "Analysis failed for this job.",
+        }), 409
+
     if result["status"] not in ("ready",):
         return jsonify({
             "status": result["status"],
@@ -186,6 +192,12 @@ def get_objects(job_id):
     result = get_enriched_faces(job_id)
     if result is None:
         return jsonify({"error": "job not found"}), 404
+
+    if result["status"] == "failed":
+        return jsonify({
+            "status": result["status"],
+            "error": result.get("error") or "Analysis failed for this job.",
+        }), 409
 
     if result["status"] not in ("ready",):
         return jsonify({

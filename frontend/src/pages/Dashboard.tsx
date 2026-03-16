@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import AddImageModal from '../components/AddImageModal'
-import AddEntityModal, { type EntitySelection } from '../components/AddEntityModal'
+import AddEntityModal from '../components/AddEntityModal'
 import { useVideoCache, type CachedVideo } from '../contexts/VideoCache'
 import { API_BASE } from '../lib/api'
 import searchIconUrl from '../../strand/icons/search.svg?url'
@@ -721,86 +721,70 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
     const imageAttachments = searchAttachments.filter(
       (a): a is SearchAttachment & { type: 'image'; file: File } => a.type === 'image' && !!a.file,
     )
-    const entityIds = searchAttachments.filter((a) => a.type === 'entity').map((a) => a.id)
+    const entityAttachments = searchAttachments.filter(
+      (a): a is SearchAttachment & { type: 'entity' } => a.type === 'entity',
+    )
     const hasQuery = query.length > 0
     const hasImages = imageAttachments.length > 0
-    const hasEntities = entityIds.length > 0
+    const hasEntities = entityAttachments.length > 0
     if (!hasQuery && !hasImages && !hasEntities) return
     setSearchError(null)
     setSearchLoading(true)
     try {
       type RawClip = { start: number; end: number; score?: number | null; rank?: number; thumbnail_url?: string }
       type RawResult = { video_id: string; score?: number | null; clips?: RawClip[] }
-      let allResults: RawResult[] = []
-      const mergeResults = (incoming: RawResult[]) => {
-        for (const result of incoming) {
-          const existing = allResults.find((entry) => entry.video_id === result.video_id)
-          if (existing) {
-            existing.clips = [...(existing.clips || []), ...(result.clips || [])]
-            existing.score = Math.max(existing.score ?? 0, result.score ?? 0)
-          } else {
-            allResults.push({
-              video_id: result.video_id,
-              score: result.score ?? 0,
-              clips: [...(result.clips || [])],
-            })
-          }
-        }
-      }
-
-      if (hasQuery) {
-        const res = await fetch(`${API_BASE}/api/search`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query }),
+      const dedupeRawClips = (clips: RawClip[]) => {
+        const seen = new Set<string>()
+        return clips.filter((clip) => {
+          const key = [
+            clip.start,
+            clip.end,
+            clip.rank ?? '',
+            clip.score ?? '',
+            clip.thumbnail_url ?? '',
+          ].join('|')
+          if (seen.has(key)) return false
+          seen.add(key)
+          return true
         })
-        const data = await res.json().catch(() => ({}))
-        if (!res.ok) { setSearchError(data.error || 'Search failed'); setSearchResults(null); return }
-        mergeResults(data.results || [])
       }
+      const composedQuery = [
+        ...entityAttachments.map((attachment) => `<@${attachment.id}>`),
+        query,
+      ].filter(Boolean).join(' ').trim()
+      const operator = hasImages && (imageAttachments.length > 1 || composedQuery.length > 0)
+        ? 'and'
+        : undefined
 
-      if (hasImages) {
-        for (const attachment of imageAttachments) {
+      const res = hasImages
+        ? await (async () => {
           const formData = new FormData()
-          formData.append('image', attachment.file)
-          if (hasQuery) formData.append('query', query)
-
-          const res = await fetch(`${API_BASE}/api/search`, {
+          for (const attachment of imageAttachments) {
+            formData.append('image', attachment.file)
+          }
+          if (composedQuery) formData.append('query', composedQuery)
+          if (operator) formData.append('operator', operator)
+          return fetch(`${API_BASE}/api/search`, {
             method: 'POST',
             body: formData,
           })
-          const data = await res.json().catch(() => ({}))
-          if (!res.ok) {
-            setSearchError(data.error || 'Image search failed')
-            setSearchResults(null)
-            return
-          }
-          mergeResults(data.results || [])
-        }
-      }
-
-      if (hasEntities) {
-        for (const entityId of entityIds) {
-          const res = await fetch(`${API_BASE}/api/entities/${entityId}/search`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ query: hasQuery ? query : '' }),
-          })
-          const data = await res.json().catch(() => ({}))
-          if (!res.ok) {
-            setSearchError(data.error || 'Entity search failed')
-            setSearchResults(null)
-            return
-          }
-          if (data.results) {
-            mergeResults(data.results as RawResult[])
-          }
-        }
+        })()
+        : await fetch(`${API_BASE}/api/search`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: composedQuery }),
+        })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setSearchError(data.error || 'Search failed')
+        setSearchResults(null)
+        return
       }
 
       const videoLookup = new Map(cachedVideos.map((v) => [v.id, v]))
 
-      const results: VideoItem[] = allResults.map((r) => {
+      const rawResults = Array.isArray(data.results) ? (data.results as RawResult[]) : []
+      const results: VideoItem[] = rawResults.map((r) => {
         const cached = videoLookup.get(r.video_id)
         const meta = cached?.metadata || {}
         let uploadDate = ''
@@ -811,7 +795,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
             uploadDate = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}-${d.getFullYear()}`
           }
         } catch { /* ignore */ }
-        const normalizedClips = (r.clips || []).map((c) => ({
+        const normalizedClips = dedupeRawClips(r.clips || []).map((c) => ({
           start: c.start,
           end: c.end,
           score: typeof c.score === 'number' && Number.isFinite(c.score) ? c.score : undefined,
@@ -866,7 +850,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
       if (hasQuery) displayParts.push(query)
       if (hasImages) displayParts.push(`${imageAttachments.length} image${imageAttachments.length === 1 ? '' : 's'}`)
       if (hasEntities) {
-        displayParts.push(`Entity: ${searchAttachments.filter((a) => a.type === 'entity').map((a) => a.name).join(', ')}`)
+        displayParts.push(`Entity: ${entityAttachments.map((a) => a.name).join(', ')}`)
       }
       const displayQuery = displayParts.join(' + ')
       const persistedAttachments: SearchSessionAttachment[] = searchAttachments.map((attachment) => ({
@@ -1299,10 +1283,11 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
         open={addEntityModalOpen}
         onClose={() => setAddEntityModalOpen(false)}
         onEntityAdded={(selection) => {
-          if (!selection.id) return
+          const entityId = selection.id
+          if (!entityId) return
           setSearchAttachments((prev) => [
             ...prev,
-            { id: selection.id, type: 'entity', name: selection.name?.trim() || 'Entity', previewUrl: selection.previewUrl },
+            { id: entityId, type: 'entity', name: selection.name?.trim() || 'Entity', previewUrl: selection.previewUrl },
           ])
           setAddEntityModalOpen(false)
         }}

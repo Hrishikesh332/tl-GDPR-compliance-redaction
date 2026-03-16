@@ -378,18 +378,23 @@ const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
   { id: 'captions', label: 'Analyze/Transcript', iconUrl: analyzeIconUrl },
 ]
 
-const DEFAULT_DETECTION_JOB_ID = '0456d15f-f83'
 const LIVE_DETECTION_POLL_MS = 200
-const LIVE_DETECTION_HOLD_MS = 320
-const LIVE_IDENTIFIED_FACE_HOLD_MS = 900
+const LIVE_DETECTION_HOLD_MS = 520
+const LIVE_IDENTIFIED_FACE_HOLD_MS = 1200
 const LIVE_FACE_PADDING = 0.36
 const LIVE_OBJECT_PADDING = 0.08
 const LIVE_DETECTION_SMOOTHING = 0.42
+const LIVE_DETECTION_VELOCITY_BLEND = 0.58
 const LIVE_FACE_STICKY_ALPHA = 0.18
 const LIVE_FACE_MAJOR_SHIFT_ALPHA = 0.82
 const LIVE_FACE_MINOR_SHIFT_DISTANCE = 0.035
 const LIVE_FACE_MAJOR_SHIFT_DISTANCE = 0.18
 const LIVE_FACE_MAJOR_SHIFT_SIZE_RATIO = 0.45
+const LIVE_FACE_MAX_VELOCITY = 0.95
+const LIVE_OBJECT_MAX_VELOCITY = 1.3
+const LIVE_SIZE_MAX_VELOCITY = 1.1
+const LIVE_PREDICTION_MAX_LEAD_SEC = 0.28
+const LIVE_PREDICTION_MAX_LAG_SEC = 0.08
 // Hide the audio waveform so the lower lane can focus on entity-search matches.
 const SHOW_AUDIO_WAVEFORM = false
 const ENTITY_SEARCH_LANE_COLOR = '#00dc82'
@@ -442,6 +447,15 @@ type LiveRedactionDetection = {
   height: number
   sourceTime?: number
   lastSeenAtMs?: number
+  velocityX?: number
+  velocityY?: number
+  velocityWidth?: number
+  velocityHeight?: number
+}
+
+type VideoFrameCallbackCapableElement = HTMLVideoElement & {
+  requestVideoFrameCallback?: (callback: VideoFrameRequestCallback) => number
+  cancelVideoFrameCallback?: (handle: number) => void
 }
 
 function clampUnit(value: number): number {
@@ -491,6 +505,11 @@ function liveDetectionTrackKey(detection: LiveRedactionDetection): string | null
   return null
 }
 
+function getStableLiveDetectionId(detection: LiveRedactionDetection): string {
+  return liveDetectionTrackKey(detection)
+    ?? `${detection.kind}:${detection.label}:${detection.id}`
+}
+
 function liveDetectionSizeChangeRatio(a: LiveRedactionDetection, b: LiveRedactionDetection): number {
   const widthBase = Math.max(a.width, 0.001)
   const heightBase = Math.max(a.height, 0.001)
@@ -502,6 +521,15 @@ function liveDetectionSizeChangeRatio(a: LiveRedactionDetection, b: LiveRedactio
 
 function getLiveDetectionHoldMs(detection: LiveRedactionDetection): number {
   return detection.kind === 'face' && detection.personId ? LIVE_IDENTIFIED_FACE_HOLD_MS : LIVE_DETECTION_HOLD_MS
+}
+
+function clampLiveVelocity(value: number, maxVelocity: number): number {
+  return Math.max(-maxVelocity, Math.min(maxVelocity, value))
+}
+
+function blendLiveVelocity(previousValue: number | undefined, nextValue: number): number {
+  if (!Number.isFinite(previousValue)) return nextValue
+  return (previousValue as number) * (1 - LIVE_DETECTION_VELOCITY_BLEND) + nextValue * LIVE_DETECTION_VELOCITY_BLEND
 }
 
 function smoothLiveDetection(
@@ -518,6 +546,72 @@ function smoothLiveDetection(
   }
 }
 
+function withLiveDetectionVelocity(
+  previous: LiveRedactionDetection,
+  next: LiveRedactionDetection,
+): LiveRedactionDetection {
+  const sourceDelta = Math.max(
+    1 / 120,
+    Math.abs((next.sourceTime ?? 0) - (previous.sourceTime ?? next.sourceTime ?? 0)),
+  )
+  const maxVelocity = next.kind === 'face' ? LIVE_FACE_MAX_VELOCITY : LIVE_OBJECT_MAX_VELOCITY
+
+  return {
+    ...next,
+    velocityX: blendLiveVelocity(
+      previous.velocityX,
+      clampLiveVelocity((next.x - previous.x) / sourceDelta, maxVelocity),
+    ),
+    velocityY: blendLiveVelocity(
+      previous.velocityY,
+      clampLiveVelocity((next.y - previous.y) / sourceDelta, maxVelocity),
+    ),
+    velocityWidth: blendLiveVelocity(
+      previous.velocityWidth,
+      clampLiveVelocity((next.width - previous.width) / sourceDelta, LIVE_SIZE_MAX_VELOCITY),
+    ),
+    velocityHeight: blendLiveVelocity(
+      previous.velocityHeight,
+      clampLiveVelocity((next.height - previous.height) / sourceDelta, LIVE_SIZE_MAX_VELOCITY),
+    ),
+  }
+}
+
+function predictLiveDetection(
+  detection: LiveRedactionDetection,
+  playbackTime: number,
+): LiveRedactionDetection {
+  if (!Number.isFinite(playbackTime) || !Number.isFinite(detection.sourceTime)) return detection
+
+  const predictionDelta = Math.max(
+    -LIVE_PREDICTION_MAX_LAG_SEC,
+    Math.min(LIVE_PREDICTION_MAX_LEAD_SEC, playbackTime - (detection.sourceTime as number)),
+  )
+
+  if (Math.abs(predictionDelta) < 1e-4) return detection
+
+  const width = clampUnit(
+    Math.min(1, detection.width + (detection.velocityWidth ?? 0) * predictionDelta),
+  )
+  const height = clampUnit(
+    Math.min(1, detection.height + (detection.velocityHeight ?? 0) * predictionDelta),
+  )
+  const x = clampUnit(
+    Math.min(1 - width, detection.x + (detection.velocityX ?? 0) * predictionDelta),
+  )
+  const y = clampUnit(
+    Math.min(1 - height, detection.y + (detection.velocityY ?? 0) * predictionDelta),
+  )
+
+  return {
+    ...detection,
+    x,
+    y,
+    width,
+    height,
+  }
+}
+
 function stabilizeLiveDetections(
   previous: LiveRedactionDetection[],
   incoming: LiveRedactionDetection[],
@@ -528,6 +622,10 @@ function stabilizeLiveDetections(
     ...detection,
     sourceTime,
     lastSeenAtMs: now,
+    velocityX: 0,
+    velocityY: 0,
+    velocityWidth: 0,
+    velocityHeight: 0,
   }))
   const next: LiveRedactionDetection[] = []
   const used = new Set<number>()
@@ -578,18 +676,33 @@ function stabilizeLiveDetections(
             : LIVE_DETECTION_SMOOTHING
       }
 
-      next.push(smoothLiveDetection(previousDetection, matchedDetection, alpha))
+      next.push({
+        ...withLiveDetectionVelocity(
+          previousDetection,
+          smoothLiveDetection(previousDetection, matchedDetection, alpha),
+        ),
+        id: previousDetection.id,
+      })
       continue
     }
 
     if (now - (previousDetection.lastSeenAtMs ?? now) <= getLiveDetectionHoldMs(previousDetection)) {
-      next.push(previousDetection)
+      next.push({
+        ...previousDetection,
+        velocityX: (previousDetection.velocityX ?? 0) * 0.86,
+        velocityY: (previousDetection.velocityY ?? 0) * 0.86,
+        velocityWidth: (previousDetection.velocityWidth ?? 0) * 0.82,
+        velocityHeight: (previousDetection.velocityHeight ?? 0) * 0.82,
+      })
     }
   }
 
   for (let idx = 0; idx < prepared.length; idx += 1) {
     if (!used.has(idx)) {
-      next.push(prepared[idx])
+      next.push({
+        ...prepared[idx],
+        id: getStableLiveDetectionId(prepared[idx]),
+      })
     }
   }
 
@@ -857,7 +970,8 @@ export default function VideoEditorPage() {
   const liveRedactionRequestIdRef = useRef(0)
   const liveRedactionLastResolvedTimeRef = useRef<number | null>(null)
   const liveBlurAnimationFrameRef = useRef<number | null>(null)
-  const autoDetectTriggeredRef = useRef(false)
+  const liveBlurVideoFrameCallbackRef = useRef<number | null>(null)
+  const visibleLiveRedactionDetectionsRef = useRef<LiveRedactionDetection[]>([])
 
   const getPlaybackAnchorTime = useCallback(() => videoRef.current?.currentTime ?? currentTime, [currentTime])
   const updateVideoViewport = useCallback(() => {
@@ -914,17 +1028,22 @@ export default function VideoEditorPage() {
   /* ---- HLS: play m3u8 streams in Chrome/Firefox (TwelveLabs returns HLS) ---- */
   const effectiveStreamUrl = exportRedactDownloadUrl || streamUrl
   const useHls = effectiveStreamUrl && isHlsUrl(effectiveStreamUrl) && Hls.isSupported()
-  const liveRedactionActive = liveRedactionEnabled && !!streamUrl && !exportRedactDownloadUrl
+  const liveRedactionReady = liveRedactionEnabled && !!streamUrl && !exportRedactDownloadUrl
+  const liveRedactionActive = liveRedactionReady && hasRunDetection
 
   useEffect(() => {
     setDetectionJobId(null)
+    setHasRunDetection(false)
+    setApiDetections([])
+    setExcludedFromRedactionIds([])
+    setDetectionLoading(false)
+    setDetectionError(null)
     setLiveRedactionDetections([])
     setLiveRedactionLoading(false)
     setLiveRedactionError(null)
     liveRedactionPendingTimeRef.current = null
     liveRedactionRequestIdRef.current = 0
     liveRedactionLastResolvedTimeRef.current = null
-    autoDetectTriggeredRef.current = false
   }, [videoId, effectiveStreamUrl])
 
   useEffect(() => {
@@ -1445,17 +1564,27 @@ export default function VideoEditorPage() {
   }, [videoId])
 
   const runDetect = useCallback(async () => {
+    if (!videoId) {
+      setDetectionError('Video not loaded.')
+      return
+    }
+
     setDetectionError(null)
     setDetectionLoading(true)
-    let jobId = DEFAULT_DETECTION_JOB_ID
     try {
-      if (videoId) {
-        const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}`)
-        if (r.ok) {
-          const data = await r.json().catch(() => ({}))
-          if (data.job_id) jobId = data.job_id
-        }
+      const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}`)
+      const data = await r.json().catch(() => ({}))
+      const jobId = r.ok && data.job_id ? String(data.job_id) : ''
+
+      if (!jobId) {
+        setDetectionJobId(null)
+        setApiDetections([])
+        setExcludedFromRedactionIds([])
+        setHasRunDetection(false)
+        setDetectionError('No local detection job was found for this video yet. Process this video from the dashboard first.')
+        return
       }
+
       setDetectionJobId(jobId)
       const [facesRes, objectsRes] = await Promise.all([
         fetch(`${API_BASE}/api/faces/${encodeURIComponent(jobId)}`),
@@ -1464,13 +1593,26 @@ export default function VideoEditorPage() {
       const facesJson = await facesRes.json().catch(() => ({}))
       const objectsJson = await objectsRes.json().catch(() => ({}))
       if (facesRes.status === 202 || objectsRes.status === 202) {
+        setApiDetections([])
+        setExcludedFromRedactionIds([])
+        setHasRunDetection(false)
         setDetectionError('Analysis still in progress. Try again in a moment.')
-        setDetectionLoading(false)
         return
       }
       if (facesRes.status === 404 || objectsRes.status === 404) {
-        setDetectionError('Job not found. Use a job ID that has completed detection (e.g. 0456d15f-f83).')
-        setDetectionLoading(false)
+        setApiDetections([])
+        setExcludedFromRedactionIds([])
+        setHasRunDetection(false)
+        setDetectionError('Detection data is not ready for this video yet. Run processing for this video and try again.')
+        return
+      }
+      if (!facesRes.ok || !objectsRes.ok) {
+        setApiDetections([])
+        setExcludedFromRedactionIds([])
+        setHasRunDetection(false)
+        const faceError = (facesJson as { error?: string; message?: string }).error || (facesJson as { error?: string; message?: string }).message
+        const objectError = (objectsJson as { error?: string; message?: string }).error || (objectsJson as { error?: string; message?: string }).message
+        setDetectionError(faceError || objectError || 'Detection request failed.')
         return
       }
       const items: DetectionItem[] = []
@@ -1510,9 +1652,9 @@ export default function VideoEditorPage() {
       }
       if (items.length === 0) {
         if (facesRes.status === 404 && objectsRes.status === 404) {
-          setDetectionError('Job not found. Ensure the job has run and snaps exist (e.g. snaps/0456d15f-f83).')
+          setDetectionError('Detection data was not found for this video.')
         } else if (facesRes.ok || objectsRes.ok) {
-          setDetectionError('No faces or objects found for this job.')
+          setDetectionError('No faces or objects found for this video.')
         }
       } else {
         setDetectionError(null)
@@ -1542,17 +1684,10 @@ export default function VideoEditorPage() {
     [apiDetections, excludedFromRedactionIds]
   )
 
-  useEffect(() => {
-    if (!liveRedactionActive || hasRunDetection || detectionLoading || autoDetectTriggeredRef.current) return
-    autoDetectTriggeredRef.current = true
-    runDetect()
-  }, [detectionLoading, hasRunDetection, liveRedactionActive, runDetect])
-
   const resolveRedactionJobId = useCallback(async () => {
     if (detectionJobId) return detectionJobId
     if (!videoId) {
-      setDetectionJobId(DEFAULT_DETECTION_JOB_ID)
-      return DEFAULT_DETECTION_JOB_ID
+      throw new Error('Video not loaded.')
     }
 
     const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}`)
@@ -2218,6 +2353,9 @@ export default function VideoEditorPage() {
       return true
     })
   }, [liveRedactionDetections])
+  useEffect(() => {
+    visibleLiveRedactionDetectionsRef.current = visibleLiveRedactionDetections
+  }, [visibleLiveRedactionDetections])
 
   /* Strand shared classes */
   const btnBase = 'inline-flex items-center justify-center rounded-md border border-border bg-surface text-text-primary hover:bg-card transition-colors'
@@ -2292,7 +2430,7 @@ export default function VideoEditorPage() {
     if (!ctx) return
 
     let cancelled = false
-    const render = () => {
+    const drawFrame = (playbackTime: number) => {
       if (cancelled) return
       const width = Math.max(0, overlayViewport.width)
       const height = Math.max(0, overlayViewport.height)
@@ -2302,25 +2440,55 @@ export default function VideoEditorPage() {
         width > 0 &&
         height > 0 &&
         video.readyState >= 2 &&
-        visibleLiveRedactionDetections.length > 0
+        visibleLiveRedactionDetectionsRef.current.length > 0
       ) {
-        for (const detection of visibleLiveRedactionDetections) {
+        for (const detection of visibleLiveRedactionDetectionsRef.current.map((entry) => predictLiveDetection(entry, playbackTime))) {
           drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
         }
       }
-      liveBlurAnimationFrameRef.current = window.requestAnimationFrame(render)
     }
 
-    render()
+    const scheduleNextFrame = () => {
+      if (cancelled) return
+
+      if (isPlaying) {
+        const frameVideo = video as VideoFrameCallbackCapableElement
+        if (typeof frameVideo.requestVideoFrameCallback === 'function') {
+          liveBlurVideoFrameCallbackRef.current = frameVideo.requestVideoFrameCallback((_, metadata) => {
+            drawFrame(metadata.mediaTime ?? video.currentTime ?? 0)
+            scheduleNextFrame()
+          })
+          return
+        }
+
+        liveBlurAnimationFrameRef.current = window.requestAnimationFrame(() => {
+          drawFrame(video.currentTime ?? 0)
+          scheduleNextFrame()
+        })
+        return
+      }
+
+      drawFrame(video.currentTime ?? 0)
+    }
+
+    scheduleNextFrame()
     return () => {
       cancelled = true
       if (liveBlurAnimationFrameRef.current !== null) {
         window.cancelAnimationFrame(liveBlurAnimationFrameRef.current)
         liveBlurAnimationFrameRef.current = null
       }
+      const frameVideo = video as VideoFrameCallbackCapableElement
+      if (
+        liveBlurVideoFrameCallbackRef.current !== null &&
+        typeof frameVideo.cancelVideoFrameCallback === 'function'
+      ) {
+        frameVideo.cancelVideoFrameCallback(liveBlurVideoFrameCallbackRef.current)
+        liveBlurVideoFrameCallbackRef.current = null
+      }
       ctx.clearRect(0, 0, Math.max(0, overlayViewport.width), Math.max(0, overlayViewport.height))
     }
-  }, [blurIntensity, liveRedactionActive, overlayViewport.height, overlayViewport.width, redactionStyle, visibleLiveRedactionDetections])
+  }, [blurIntensity, isPlaying, liveRedactionActive, overlayViewport.height, overlayViewport.width, redactionStyle])
 
   useEffect(() => {
     if (!liveRedactionActive || !hasRunDetection) return
@@ -2518,14 +2686,22 @@ export default function VideoEditorPage() {
               <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-2 min-w-0 overflow-hidden">
                 <div className="flex items-center justify-between gap-2 min-w-0">
                   <span className="text-xs text-text-tertiary truncate min-w-0">Status</span>
-                  <span className={`text-xs font-medium ${liveRedactionActive ? 'text-accent' : 'text-text-tertiary'}`}>
-                    {liveRedactionActive ? 'Running' : 'Paused'}
+                  <span className={`text-xs font-medium ${
+                    !liveRedactionReady
+                      ? 'text-text-tertiary'
+                      : hasRunDetection
+                        ? 'text-accent'
+                        : 'text-text-secondary'
+                  }`}>
+                    {!liveRedactionReady ? 'Paused' : hasRunDetection ? 'Running' : 'Click Detect'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-2 min-w-0">
                   <span className="text-xs text-text-tertiary truncate min-w-0">Current frame</span>
                   <span className="text-xs text-text-primary tabular-nums shrink-0">
-                    {liveRedactionLoading && visibleLiveRedactionDetections.length === 0
+                    {!hasRunDetection
+                      ? 'Not started'
+                      : liveRedactionLoading && visibleLiveRedactionDetections.length === 0
                       ? 'Scanning...'
                       : `${visibleLiveRedactionDetections.length} blur region${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
                   </span>
@@ -2599,29 +2775,14 @@ export default function VideoEditorPage() {
               </button>
               {exportMenuOpen && (
                 <div className="absolute right-0 top-full mt-1 py-1 min-w-[10rem] rounded-lg border border-border bg-surface shadow-lg z-50">
-                  <button
-                    type="button"
-                    disabled={exportRedactLoading}
-                    className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-card transition-colors flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
-                    onClick={() => exportRedacted()}
-                  >
-                    {exportRedactLoading ? (
-                      <>
-                        <span className="w-4 h-4 border-2 border-accent/60 border-t-accent rounded-full animate-spin shrink-0" aria-hidden />
-                        Exporting…
-                      </>
-                    ) : (
-                      'Redacted'
-                    )}
-                  </button>
                   {exportRedactError && (
-                    <p className="px-3 py-2 text-xs text-error border-t border-border">{exportRedactError}</p>
+                    <p className="px-3 py-2 text-xs text-error border-b border-border">{exportRedactError}</p>
                   )}
                   {exportRedactDownloadUrl && (
                     <a
                       href={exportRedactDownloadUrl}
                       download
-                      className="block w-full px-3 py-2 text-left text-sm text-accent hover:bg-card transition-colors flex items-center gap-2 border-t border-border"
+                      className="block w-full px-3 py-2 text-left text-sm text-accent hover:bg-card transition-colors flex items-center gap-2 border-b border-border"
                       onClick={() => setExportMenuOpen(false)}
                     >
                       <IconDownload className="w-4 h-4" />
@@ -2722,12 +2883,14 @@ export default function VideoEditorPage() {
                           height: `${detection.height * 100}%`,
                           borderColor: detection.kind === 'face' ? 'rgba(255,255,255,0.98)' : 'rgba(0,220,130,0.98)',
                           backgroundColor: detection.kind === 'face' ? 'rgba(255,255,255,0.06)' : 'rgba(0,220,130,0.10)',
+                          transition: 'left 120ms linear, top 120ms linear, width 120ms linear, height 120ms linear',
+                          willChange: 'left, top, width, height',
                         } satisfies React.CSSProperties
 
                         if (selectionId) {
                           return (
                             <button
-                              key={`live-hit-${selectionId}-${detection.id}`}
+                              key={`live-hit-${selectionId}`}
                               type="button"
                               className="absolute z-20 pointer-events-auto border-2 p-0 cursor-pointer rounded-sm shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
                               style={overlayStyle}
@@ -2743,7 +2906,7 @@ export default function VideoEditorPage() {
 
                         return (
                           <div
-                            key={`live-box-${detection.kind}-${detection.id}`}
+                            key={`live-box-${detection.id}`}
                             className="absolute z-20 pointer-events-none border-2 rounded-sm shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
                             style={overlayStyle}
                           />
@@ -3512,7 +3675,7 @@ export default function VideoEditorPage() {
                     {detectionLoading ? 'Loading…' : 'Detect'}
                   </button>
                   <p className="text-[10px] text-text-tertiary text-center max-w-[180px]">
-                    Loads faces & objects from job (e.g. {DEFAULT_DETECTION_JOB_ID})
+                    Loads faces and objects for the current video only.
                   </p>
                 </div>
                 </div>

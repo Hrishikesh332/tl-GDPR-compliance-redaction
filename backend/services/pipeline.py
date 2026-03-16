@@ -21,6 +21,8 @@ from utils.storage import (
     get_run_dir,
     save_unique_face_snaps,
     save_unique_object_snaps,
+    save_detection_metadata,
+    load_detection_metadata,
     load_faces_objects_from_disk,
     save_job_manifest,
     load_job_manifest,
@@ -259,17 +261,34 @@ def get_job(job_id):
 
 
 def get_job_id_by_video_id(video_id):
-    """Return the first job_id whose twelvelabs_video_id matches, or None."""
+    """Return the best matching job_id for a video, preferring the most recent run."""
     if not video_id:
         return None
+
+    def _candidate_key(job_id, source):
+        created_at = parse_iso_timestamp((source or {}).get("created_at"))
+        run_time = run_dir_mtime(job_id)
+        effective_time = created_at if created_at is not None else (run_time if run_time is not None else 0.0)
+        status = str((source or {}).get("status") or "")
+        status_rank = {
+            "ready": 3,
+            "processing": 2,
+            "failed": 1,
+        }.get(status, 0)
+        return (effective_time, status_rank, job_id)
+
+    candidates = {}
     with _lock:
         for jid, j in _jobs.items():
             if j.get("twelvelabs_video_id") == video_id:
-                return jid
+                candidates[jid] = dict(j)
     for jid in list_run_ids():
         manifest = load_job_manifest(jid)
         if manifest and manifest.get("twelvelabs_video_id") == video_id:
-            return jid
+            if jid not in candidates:
+                candidates[jid] = manifest
+    if candidates:
+        return max(candidates.items(), key=lambda item: _candidate_key(item[0], item[1]))[0]
     return recover_job_id_for_video(video_id)
 
 
@@ -457,6 +476,7 @@ def run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existin
         save_unique_object_snaps(run_dir, unique_objects)
 
         enrich_faces_with_descriptions(job_id, people_desc, unique_faces)
+        save_detection_metadata(run_dir, unique_faces, unique_objects)
 
         with _lock:
             _jobs[job_id]["local_status"] = "done"
@@ -564,6 +584,7 @@ def push_job_entities_to_twelvelabs(job_id):
     entities = twelvelabs_service.create_entities_from_face_snaps(unique_faces, run_dir)
     with _lock:
         _jobs[job_id]["entities"] = entities
+    save_detection_metadata(run_dir, unique_faces, job.get("unique_objects", []))
     logger.info("Job %s: pushed %d entities to TwelveLabs (user-requested)", job_id, len(entities))
     return entities
 
@@ -571,6 +592,10 @@ def push_job_entities_to_twelvelabs(job_id):
 def get_enriched_faces(job_id):
     job = get_job(job_id)
     if job:
+        if job.get("unique_faces") or job.get("unique_objects"):
+            run_dir = get_run_dir(job_id)
+            if load_detection_metadata(run_dir) is None:
+                save_detection_metadata(run_dir, job.get("unique_faces", []), job.get("unique_objects", []))
         return {
             "status": job["status"],
             "unique_faces": job.get("unique_faces", []),
@@ -582,6 +607,7 @@ def get_enriched_faces(job_id):
             "video_metadata": job.get("video_metadata"),
             "total_face_detections": job.get("total_face_detections", 0),
             "total_object_detections": job.get("total_object_detections", 0),
+            "error": job.get("error"),
         }
     # Fallback: load from disk when job is not in memory (e.g. after server restart)
     disk = load_faces_objects_from_disk(job_id)
@@ -597,6 +623,7 @@ def get_enriched_faces(job_id):
             "video_metadata": None,
             "total_face_detections": len(disk["unique_faces"]),
             "total_object_detections": len(disk["unique_objects"]),
+            "error": None,
         }
     return None
 

@@ -1,11 +1,13 @@
 import base64
 import json
+import math
 import os
 import re
 
 from config import SNAPS_DIR, OUTPUT_DIR
 
 JOB_MANIFEST_FILENAME = "job_manifest.json"
+DETECTION_METADATA_FILENAME = "detection_metadata.json"
 
 
 def ensure_dirs():
@@ -69,9 +71,11 @@ def save_unique_face_snaps(run_dir, unique_faces):
             continue
         name = face.get("name") or face["person_id"]
         safe_name = safe_filename(name)
-        path = os.path.join(faces_dir, f"{safe_name}.png")
+        filename = f"{safe_name}.png"
+        path = os.path.join(faces_dir, filename)
         with open(path, "wb") as f:
             f.write(base64.b64decode(b64))
+        face["snap_filename"] = filename
         face["snap_path"] = path
 
 
@@ -84,14 +88,115 @@ def save_unique_object_snaps(run_dir, unique_objects):
             continue
         oid = obj["object_id"]
         ident = safe_filename(obj.get("identification", "object"))
-        path = os.path.join(objects_dir, f"{oid}_{ident}.jpg")
+        filename = f"{oid}_{ident}.jpg"
+        path = os.path.join(objects_dir, filename)
         with open(path, "wb") as f:
             f.write(base64.b64decode(b64))
+        obj["snap_filename"] = filename
         obj["snap_path"] = path
 
 
 def get_output_path(filename):
     return os.path.join(OUTPUT_DIR, filename)
+
+
+def json_safe(value):
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {
+            str(key): json_safe(inner)
+            for key, inner in value.items()
+            if not callable(inner)
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(item) for item in value]
+    if hasattr(value, "tolist"):
+        return json_safe(value.tolist())
+    if hasattr(value, "item"):
+        try:
+            return json_safe(value.item())
+        except Exception:
+            pass
+    if isinstance(value, os.PathLike):
+        return os.fspath(value)
+    return str(value)
+
+
+def prepare_detection_metadata(records):
+    prepared = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        prepared.append(json_safe({
+            key: value
+            for key, value in record.items()
+            if key != "snap_base64"
+        }))
+    return prepared
+
+
+def save_detection_metadata(run_dir, unique_faces, unique_objects):
+    os.makedirs(run_dir, exist_ok=True)
+    payload = {
+        "version": 1,
+        "unique_faces": prepare_detection_metadata(unique_faces),
+        "unique_objects": prepare_detection_metadata(unique_objects),
+    }
+    path = os.path.join(run_dir, DETECTION_METADATA_FILENAME)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=True)
+    return path
+
+
+def load_detection_metadata(run_dir):
+    path = os.path.join(run_dir, DETECTION_METADATA_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def load_snap_base64_map(directory):
+    if not os.path.isdir(directory):
+        return {}
+
+    snapshots = {}
+    for fn in sorted(os.listdir(directory)):
+        if not fn.lower().endswith((".png", ".jpg", ".jpeg")):
+            continue
+        path = os.path.join(directory, fn)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "rb") as f:
+                snapshots[fn] = base64.b64encode(f.read()).decode("ascii")
+        except Exception:
+            continue
+    return snapshots
+
+
+def attach_snapshots(records, snapshots_by_filename):
+    enriched = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        item = dict(record)
+        snapshot_name = item.get("snap_filename")
+        if not snapshot_name and item.get("snap_path"):
+            snapshot_name = os.path.basename(str(item["snap_path"]))
+        if snapshot_name and snapshot_name in snapshots_by_filename:
+            item["snap_base64"] = snapshots_by_filename[snapshot_name]
+        enriched.append(item)
+    return enriched
 
 
 def load_faces_objects_from_disk(job_id):
@@ -105,6 +210,13 @@ def load_faces_objects_from_disk(job_id):
         return None
     faces_dir = os.path.join(run_dir, "faces")
     objects_dir = os.path.join(run_dir, "objects")
+    metadata = load_detection_metadata(run_dir)
+    if metadata is not None:
+        return {
+            "unique_faces": attach_snapshots(metadata.get("unique_faces", []), load_snap_base64_map(faces_dir)),
+            "unique_objects": attach_snapshots(metadata.get("unique_objects", []), load_snap_base64_map(objects_dir)),
+        }
+
     unique_faces = []
     unique_objects = []
 

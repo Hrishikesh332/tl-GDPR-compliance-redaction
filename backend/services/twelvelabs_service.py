@@ -1,6 +1,8 @@
 import json
+import inspect
 import logging
 import time
+from contextlib import ExitStack
 
 import requests
 from twelvelabs import TwelveLabs
@@ -266,18 +268,148 @@ def serialize_search_results(response):
     return results
 
 
-def search_segments(query=None, index_id=None, image_path=None, image_url=None):
+def dedupe_search_clips(clips):
+    deduped = {}
+    for clip in clips or []:
+        if not isinstance(clip, dict):
+            continue
+        key = (
+            clip.get("start"),
+            clip.get("end"),
+            clip.get("rank"),
+            clip.get("score"),
+            clip.get("thumbnail_url"),
+        )
+        deduped.setdefault(key, clip)
+
+    return sorted(
+        deduped.values(),
+        key=lambda clip: (
+            clip.get("rank") is None,
+            clip.get("rank") if clip.get("rank") is not None else float("inf"),
+            -(clip.get("score") or 0),
+            clip.get("start") or 0,
+            clip.get("end") or 0,
+        ),
+    )
+
+
+def merge_search_results(result_sets, operator="or"):
+    normalized_operator = operator if operator in {"and", "or"} else "or"
+    result_maps = []
+    for result_set in result_sets:
+        result_maps.append({
+            item.get("video_id"): item
+            for item in result_set or []
+            if isinstance(item, dict) and item.get("video_id")
+        })
+
+    if not result_maps:
+        return []
+
+    if normalized_operator == "and":
+        video_ids = set(result_maps[0].keys())
+        for result_map in result_maps[1:]:
+            video_ids &= set(result_map.keys())
+    else:
+        video_ids = set()
+        for result_map in result_maps:
+            video_ids |= set(result_map.keys())
+
+    merged = []
+    for video_id in video_ids:
+        scores = []
+        clips = []
+        for result_map in result_maps:
+            result = result_map.get(video_id)
+            if not result:
+                continue
+            if result.get("score") is not None:
+                scores.append(result["score"])
+            clips.extend(result.get("clips") or [])
+        merged.append({
+            "video_id": video_id,
+            "score": max(scores) if scores else None,
+            "clips": dedupe_search_clips(clips),
+        })
+
+    return sorted(
+        merged,
+        key=lambda item: (
+            -(item.get("score") or 0),
+            item.get("video_id") or "",
+        ),
+    )
+
+
+def search_query_supports_multi_media(client):
+    try:
+        params = inspect.signature(client.search.query).parameters
+    except (TypeError, ValueError):
+        return False
+    return "query_media_files" in params
+
+
+def run_search_query(client, kwargs, *, image_path=None, image_paths=None, image_url=None):
+    if image_url:
+        response = client.search.query(
+            **kwargs,
+            query_media_type="image",
+            query_media_url=image_url,
+        )
+        raw_list = list(response)
+        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
+        return serialize_search_results(iter(raw_list))
+
+    if image_paths:
+        if len(image_paths) == 1:
+            image_path = image_paths[0]
+
+        if image_path:
+            with open(image_path, "rb") as image_file:
+                response = client.search.query(
+                    **kwargs,
+                    query_media_type="image",
+                    query_media_file=image_file,
+                )
+            raw_list = list(response)
+            logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
+            return serialize_search_results(iter(raw_list))
+
+        with ExitStack() as stack:
+            media_files = [stack.enter_context(open(path, "rb")) for path in image_paths]
+            response = client.search.query(
+                **kwargs,
+                query_media_type="image",
+                query_media_files=media_files,
+            )
+            raw_list = list(response)
+        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
+        return serialize_search_results(iter(raw_list))
+
+    response = client.search.query(**kwargs)
+    raw_list = list(response)
+    logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
+    return serialize_search_results(iter(raw_list))
+
+
+def search_segments(query=None, index_id=None, image_paths=None, image_url=None, operator=None):
     client = get_client()
     idx = index_id or TWELVELABS_INDEX_ID
-    if not query and not image_path and not image_url:
+    normalized_image_paths = [path for path in (image_paths or []) if path]
+    query_input_count = int(bool(query)) + len(normalized_image_paths) + int(bool(image_url))
+    normalized_operator = operator if operator in {"and", "or"} else ("and" if query_input_count > 1 else None)
+
+    if not query and not normalized_image_paths and not image_url:
         raise ValueError("query text or image is required")
 
     logger.info(
-        "Searching index %s (text=%s, image_path=%s, image_url=%s)",
+        "Searching index %s (text=%s, image_count=%s, image_url=%s, operator=%s)",
         idx,
         bool(query),
-        bool(image_path),
+        len(normalized_image_paths),
         bool(image_url),
+        normalized_operator,
     )
 
     kwargs = {
@@ -289,32 +421,27 @@ def search_segments(query=None, index_id=None, image_path=None, image_url=None):
     }
     if query:
         kwargs["query_text"] = query
+    if normalized_operator and query_input_count > 1:
+        kwargs["operator"] = normalized_operator
 
     if image_url:
-        response = client.search.query(
-            **kwargs,
-            query_media_type="image",
-            query_media_url=image_url,
+        return run_search_query(client, kwargs, image_url=image_url)
+
+    if normalized_image_paths:
+        if len(normalized_image_paths) == 1 or search_query_supports_multi_media(client):
+            return run_search_query(client, kwargs, image_paths=normalized_image_paths)
+
+        logger.warning(
+            "Installed TwelveLabs SDK does not support query_media_files; falling back to per-image searches with operator=%s",
+            normalized_operator or "or",
         )
-        raw_list = list(response)
-        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
-        return serialize_search_results(iter(raw_list))
+        result_sets = [
+            run_search_query(client, kwargs, image_path=image_path)
+            for image_path in normalized_image_paths
+        ]
+        return merge_search_results(result_sets, operator=normalized_operator or "or")
 
-    if image_path:
-        with open(image_path, "rb") as image_file:
-            response = client.search.query(
-                **kwargs,
-                query_media_type="image",
-                query_media_file=image_file,
-            )
-        raw_list = list(response)
-        logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
-        return serialize_search_results(iter(raw_list))
-
-    response = client.search.query(**kwargs)
-    raw_list = list(response)
-    logger.info("Search raw API response (%d items): %s", len(raw_list), json.dumps(raw_response_to_loggable(raw_list), default=str, indent=2))
-    return serialize_search_results(iter(raw_list))
+    return run_search_query(client, kwargs)
 
 
 def find_person_time_ranges(video_id, person_description):
