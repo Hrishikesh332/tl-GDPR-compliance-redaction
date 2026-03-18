@@ -437,7 +437,7 @@ const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
 const LIVE_DETECTION_POLL_MS = 120
 const LIVE_DETECTION_HOLD_MS = 720
 const LIVE_IDENTIFIED_FACE_HOLD_MS = 1200
-const LIVE_FACE_PADDING = 0.36
+const LIVE_FACE_PADDING = 0.2
 const LIVE_OBJECT_PADDING = 0.08
 const LIVE_DETECTION_SMOOTHING = 0.34
 const LIVE_DETECTION_VELOCITY_BLEND = 0.58
@@ -942,10 +942,10 @@ function drawCanvasBlurRegion(
   let renderHeight = detection.height
 
   if (detection.kind === 'face') {
-    // Slight extra headroom keeps the face fully covered even when tracking is a touch late.
-    const expandX = detection.width * 0.06
-    const expandTop = detection.height * 0.09
-    const expandBottom = detection.height * 0.05
+    // Keep the face covered without letting the blur balloon too far beyond the detected head.
+    const expandX = detection.width * 0.03
+    const expandTop = detection.height * 0.05
+    const expandBottom = detection.height * 0.03
     renderX = Math.max(0, detection.x - expandX)
     renderY = Math.max(0, detection.y - expandTop)
     renderWidth = Math.min(1 - renderX, detection.width + expandX * 2)
@@ -1031,6 +1031,7 @@ export default function VideoEditorPage() {
   const [detectionError, setDetectionError] = useState<string | null>(null)
   const [detectionJobId, setDetectionJobId] = useState<string | null>(null)
   const [liveRedactionEnabled, setLiveRedactionEnabled] = useState(true)
+  const [liveBlurInfoExpanded, setLiveBlurInfoExpanded] = useState(false)
   const [liveRedactionDetections, setLiveRedactionDetections] = useState<LiveRedactionDetection[]>([])
   const [liveRedactionLoading, setLiveRedactionLoading] = useState(false)
   const [liveRedactionError, setLiveRedactionError] = useState<string | null>(null)
@@ -1822,6 +1823,10 @@ export default function VideoEditorPage() {
       apiDetections
         .filter((item) => item.kind === 'object' && item.objectClass && !excludedFromRedactionIds.includes(item.id))
         .map((item) => item.objectClass as string),
+    [apiDetections, excludedFromRedactionIds]
+  )
+  const selectedDetectionCount = useMemo(
+    () => apiDetections.filter((item) => !excludedFromRedactionIds.includes(item.id)).length,
     [apiDetections, excludedFromRedactionIds]
   )
 
@@ -2676,7 +2681,7 @@ export default function VideoEditorPage() {
     )
 
     const timer = window.setTimeout(() => {
-      requestLiveRedaction(videoRef.current?.currentTime ?? currentTime)
+      void requestLiveRedaction(videoRef.current?.currentTime ?? 0, { force: true })
     }, 0)
 
     return () => window.clearTimeout(timer)
@@ -2812,20 +2817,46 @@ export default function VideoEditorPage() {
             <div className="border-t border-border p-3 space-y-3 shrink-0 min-w-0 overflow-x-hidden overflow-y-auto max-h-[50vh]">
               <div className="flex items-center justify-between gap-2 min-w-0">
                 <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider truncate min-w-0">Live Blur</span>
-                <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    className="rounded border-border text-accent w-3.5 h-3.5"
-                    checked={liveRedactionEnabled}
-                    onChange={(e) => setLiveRedactionEnabled(e.target.checked)}
-                  />
-                  Enabled
-                </label>
+                <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${
+                  liveRedactionEnabled
+                    ? 'bg-accent/15 text-accent border border-accent/25'
+                    : 'bg-card text-text-tertiary border border-border'
+                }`}>
+                  {liveRedactionEnabled ? 'Enabled' : 'Disabled'}
+                </span>
               </div>
 
               <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-3 min-w-0 overflow-hidden">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setLiveRedactionEnabled(true)}
+                    className={`h-9 rounded-lg border text-xs font-semibold transition-colors ${
+                      liveRedactionEnabled
+                        ? 'border-accent bg-accent text-white shadow-[0_0_0_1px_rgba(0,220,130,0.2)]'
+                        : 'border-border bg-background text-text-secondary hover:bg-card'
+                    }`}
+                    aria-pressed={liveRedactionEnabled}
+                  >
+                    Live Blur On
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLiveRedactionEnabled(false)}
+                    className={`h-9 rounded-lg border text-xs font-semibold transition-colors ${
+                      !liveRedactionEnabled
+                        ? 'border-brand-charcoal bg-brand-charcoal text-white shadow-[0_0_0_1px_rgba(15,23,42,0.24)]'
+                        : 'border-border bg-background text-text-secondary hover:bg-card'
+                    }`}
+                    aria-pressed={!liveRedactionEnabled}
+                  >
+                    Live Blur Off
+                  </button>
+                </div>
                 <p className="text-xs text-text-secondary leading-relaxed break-words">
-                  Live blur now uses per-frame detection automatically. Use Detect only if you want the saved face and object list for manual include or exclude controls.
+                  {liveRedactionEnabled
+                    ? 'Live blur is previewing directly on the video. Detect selections now apply immediately to this preview and are also reused when you render the redacted download.'
+                    : 'Live blur preview is off. Your Detect blur and unblur choices are still preserved for render and download, and you can switch Live Blur back on anytime.'}
                 </p>
                 <div className="space-y-2 border-t border-border pt-3 min-w-0">
                   <span className="text-[11px] font-medium uppercase tracking-wider text-text-tertiary">Redaction</span>
@@ -2859,38 +2890,66 @@ export default function VideoEditorPage() {
               </div>
 
               <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-2 min-w-0 overflow-hidden">
-                <div className="flex items-center justify-between gap-2 min-w-0">
-                  <span className="text-xs text-text-tertiary truncate min-w-0">Status</span>
-                  <span className={`text-xs font-medium ${
-                    !liveRedactionReady
-                      ? 'text-text-tertiary'
-                      : liveRedactionLoading
-                        ? 'text-text-secondary'
-                        : 'text-accent'
-                  }`}>
-                    {!liveRedactionReady ? 'Paused' : liveRedactionLoading ? 'Scanning' : 'Running'}
+                <button
+                  type="button"
+                  onClick={() => setLiveBlurInfoExpanded((expanded) => !expanded)}
+                  className="w-full flex items-center justify-between gap-2 text-left"
+                  aria-expanded={liveBlurInfoExpanded}
+                >
+                  <span className="text-xs font-medium text-text-secondary">Live Blur Details</span>
+                  <span className="inline-flex items-center gap-1 text-[11px] text-text-tertiary">
+                    {liveBlurInfoExpanded ? 'Hide' : 'Show'}
+                    <IconChevronDown className={`w-4 h-4 transition-transform ${liveBlurInfoExpanded ? 'rotate-180' : ''}`} />
                   </span>
-                </div>
-                <div className="flex items-center justify-between gap-2 min-w-0">
-                  <span className="text-xs text-text-tertiary truncate min-w-0">Current frame</span>
-                  <span className="text-xs text-text-primary tabular-nums shrink-0">
-                    {!liveRedactionReady
-                      ? 'Paused'
-                      : liveRedactionLoading && visibleLiveRedactionDetections.length === 0
-                      ? 'Scanning...'
-                      : `${visibleLiveRedactionDetections.length} blur region${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between gap-2 min-w-0">
-                  <span className="text-xs text-text-tertiary truncate min-w-0">Export mode</span>
-                  <span className="text-xs text-text-primary shrink-0">Per-frame detection</span>
-                </div>
-                {hasRunDetection && (
-                  <div className="flex items-center justify-between gap-2 min-w-0">
-                    <span className="text-xs text-text-tertiary truncate min-w-0">People blurred</span>
-                    <span className="text-xs text-text-primary shrink-0">
-                      {selectedFacePersonIds.length > 0 ? selectedFacePersonIds.length : 'None selected'}
-                    </span>
+                </button>
+                {liveBlurInfoExpanded && (
+                  <div className="space-y-2 border-t border-border pt-2">
+                    <div className="flex items-center justify-between gap-2 min-w-0">
+                      <span className="text-xs text-text-tertiary truncate min-w-0">Status</span>
+                      <span className={`text-xs font-medium ${
+                        !liveRedactionReady
+                          ? 'text-text-tertiary'
+                          : liveRedactionLoading
+                            ? 'text-text-secondary'
+                            : 'text-accent'
+                      }`}>
+                        {!liveRedactionEnabled ? 'Disabled' : !liveRedactionReady ? 'Paused' : liveRedactionLoading ? 'Scanning' : 'Running'}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 min-w-0">
+                      <span className="text-xs text-text-tertiary truncate min-w-0">Current frame</span>
+                      <span className="text-xs text-text-primary tabular-nums shrink-0">
+                        {!liveRedactionEnabled
+                          ? 'Preview off'
+                          : !liveRedactionReady
+                          ? 'Paused'
+                          : liveRedactionLoading && visibleLiveRedactionDetections.length === 0
+                          ? 'Scanning...'
+                          : `${visibleLiveRedactionDetections.length} blur region${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2 min-w-0">
+                      <span className="text-xs text-text-tertiary truncate min-w-0">Export mode</span>
+                      <span className="text-xs text-text-primary shrink-0">
+                        {hasRunDetection ? 'Detect selection + tracking' : 'Per-frame detection'}
+                      </span>
+                    </div>
+                    {hasRunDetection && (
+                      <>
+                        <div className="flex items-center justify-between gap-2 min-w-0">
+                          <span className="text-xs text-text-tertiary truncate min-w-0">Items selected</span>
+                          <span className="text-xs text-text-primary shrink-0">
+                            {selectedDetectionCount > 0 ? selectedDetectionCount : 'None selected'}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between gap-2 min-w-0">
+                          <span className="text-xs text-text-tertiary truncate min-w-0">People blurred</span>
+                          <span className="text-xs text-text-primary shrink-0">
+                            {selectedFacePersonIds.length > 0 ? selectedFacePersonIds.length : 'None selected'}
+                          </span>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -2955,22 +3014,22 @@ export default function VideoEditorPage() {
                   )}
                   <button
                     type="button"
-                    className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-card transition-colors flex items-center gap-2 border-b border-border disabled:opacity-60 disabled:cursor-not-allowed"
+                    className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-card transition-colors flex items-center gap-2 border-b border-border whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
                     onClick={() => { void exportRedacted() }}
                     disabled={exportRedactLoading}
                   >
                     <IconDownload className="w-4 h-4" />
                     {exportRedactLoading
-                      ? 'Rendering redacted video...'
+                      ? 'Preparing redacted download...'
                       : exportRedactDownloadUrl
-                        ? 'Render redacted video again'
-                        : 'Render redacted video'}
+                        ? 'Redacted Download'
+                        : 'Redacted Download'}
                   </button>
                   {exportRedactDownloadUrl && (
                     <a
                       href={exportRedactDownloadUrl}
                       download={exportRedactFilename}
-                      className="block w-full px-3 py-2 text-left text-sm text-accent hover:bg-card transition-colors flex items-center gap-2 border-b border-border"
+                      className="block w-full px-3 py-2 text-left text-sm text-accent hover:bg-card transition-colors flex items-center gap-2 border-b border-border whitespace-nowrap"
                       onClick={() => setExportMenuOpen(false)}
                     >
                       <IconDownload className="w-4 h-4" />
@@ -3779,7 +3838,7 @@ export default function VideoEditorPage() {
                       className="w-full h-8 rounded-md bg-surface border border-border px-3 text-xs text-text-primary placeholder:text-text-tertiary"
                     />
                     <p className="mt-2 text-[10px] leading-relaxed text-text-tertiary">
-                      Faces start off unblurred by default. Use the eye toggle to turn on just the person you want, or add object classes for preview and export.
+                      Use Blur or Unblur to decide exactly which saved faces and objects should stay redacted for this video. With Live Blur on, the preview updates immediately, and the same selection carries into export.
                     </p>
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto">
@@ -3823,11 +3882,16 @@ export default function VideoEditorPage() {
                                 prev.includes(d.id) ? prev.filter((id) => id !== d.id) : [...prev, d.id]
                               )
                             }}
-                            className={`shrink-0 p-1.5 rounded-md transition-colors ${excluded ? 'text-text-tertiary hover:bg-card hover:text-accent' : 'text-accent hover:bg-accent-light'}`}
-                            title={excluded ? 'Blur this again' : 'Do not blur this'}
-                            aria-label={excluded ? 'Blur this again' : 'Do not blur this'}
+                            className={`shrink-0 inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border text-xs font-medium transition-colors ${
+                              excluded
+                                ? 'border-border bg-background text-text-secondary hover:border-accent/40 hover:text-accent'
+                                : 'border-accent/25 bg-accent-light text-accent hover:border-accent/40'
+                            }`}
+                            title={excluded ? 'Blur this item over the video again' : 'Stop blurring this item over the video'}
+                            aria-label={excluded ? 'Blur this item over the video again' : 'Stop blurring this item over the video'}
                           >
-                            {excluded ? <IconEyeOff className="w-4 h-4" /> : <IconEye className="w-4 h-4" />}
+                            {excluded ? <IconEyeOff className="w-3.5 h-3.5" /> : <IconEye className="w-3.5 h-3.5" />}
+                            <span>{excluded ? 'Blur' : 'Unblur'}</span>
                           </button>
                         </div>
                       )

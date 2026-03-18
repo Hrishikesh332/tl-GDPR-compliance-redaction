@@ -42,6 +42,10 @@ LIVE_TRACK_GLOBAL_MIN_POINTS = 8
 LIVE_TRACK_GLOBAL_MIN_CONFIDENCE = 0.18
 LIVE_TRACK_FACE_SEARCH_EXPAND = 1.75
 LIVE_TRACK_FACE_LOST_SEARCH_EXPAND = 2.45
+LIVE_TRACK_FACE_SEARCH_MOTION_BONUS = 0.55
+LIVE_TRACK_FACE_RELOCK_MAX_AREA_RATIO = 3.4
+LIVE_TRACK_FACE_RELOCK_MIN_IOU = 0.05
+LIVE_TRACK_FACE_RELOCK_MAX_CENTER_SHIFT = 1.15
 
 
 def normalize_bbox(bbox, frame_w, frame_h):
@@ -102,6 +106,64 @@ def detection_center_distance(box_a, box_b):
     bx = box_b["x"] + box_b["width"] / 2.0
     by = box_b["y"] + box_b["height"] / 2.0
     return float(np.hypot(ax - bx, ay - by))
+
+
+def raw_bbox_area(bbox):
+    if not bbox:
+        return 0.0
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def raw_bbox_iou(box_a, box_b):
+    if not box_a or not box_b:
+        return 0.0
+    ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
+    bx1, by1, bx2, by2 = [float(v) for v in box_b]
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    union = raw_bbox_area(box_a) + raw_bbox_area(box_b) - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def raw_bbox_center_distance(box_a, box_b):
+    if not box_a or not box_b:
+        return 0.0
+    ax1, ay1, ax2, ay2 = [float(v) for v in box_a]
+    bx1, by1, bx2, by2 = [float(v) for v in box_b]
+    return float(np.hypot(((ax1 + ax2) * 0.5) - ((bx1 + bx2) * 0.5), ((ay1 + ay2) * 0.5) - ((by1 + by2) * 0.5)))
+
+
+def should_accept_face_relock(candidate_bbox, reference_bbox, search_bbox):
+    if candidate_bbox is None:
+        return False
+
+    candidate_area = max(1.0, raw_bbox_area(candidate_bbox))
+    search_area = max(1.0, raw_bbox_area(search_bbox)) if search_bbox is not None else None
+    if reference_bbox is None:
+        if search_area is None:
+            return True
+        return candidate_area <= search_area * 0.82
+
+    reference_area = max(1.0, raw_bbox_area(reference_bbox))
+    area_ratio = max(candidate_area, reference_area) / min(candidate_area, reference_area)
+    iou = raw_bbox_iou(candidate_bbox, reference_bbox)
+    reference_diag = max(
+        1.0,
+        float(np.hypot(float(reference_bbox[2]) - float(reference_bbox[0]), float(reference_bbox[3]) - float(reference_bbox[1]))),
+    )
+    center_shift = raw_bbox_center_distance(candidate_bbox, reference_bbox) / reference_diag
+
+    if area_ratio > LIVE_TRACK_FACE_RELOCK_MAX_AREA_RATIO and iou < LIVE_TRACK_FACE_RELOCK_MIN_IOU:
+        return False
+    if center_shift > LIVE_TRACK_FACE_RELOCK_MAX_CENTER_SHIFT and iou < LIVE_TRACK_FACE_RELOCK_MIN_IOU:
+        return False
+    if search_area is not None and candidate_area > search_area * 0.82 and iou < LIVE_TRACK_FACE_RELOCK_MIN_IOU:
+        return False
+    return True
 
 
 def live_track_match_score(track_det, detection):
@@ -316,14 +378,15 @@ def build_tracked_live_detections(job_id, time_sec, frame, frame_w, frame_h, res
             search_anchor = updated_bbox or previous_frame_bbox
             if search_anchor is not None:
                 search_factor = LIVE_TRACK_FACE_SEARCH_EXPAND if updated_bbox is not None else LIVE_TRACK_FACE_LOST_SEARCH_EXPAND
-                search_factor += min(0.85, motion_strength * 7.5)
+                search_factor += min(LIVE_TRACK_FACE_SEARCH_MOTION_BONUS, motion_strength * 5.5)
+                search_bbox = expand_bbox(search_anchor, frame_w, frame_h, search_factor)
                 refined_bbox = detect_best_face_bbox(
                     frame,
-                    expand_bbox(search_anchor, frame_w, frame_h, search_factor),
+                    search_bbox,
                     preferred_bbox=updated_bbox or previous_frame_bbox,
                     allow_supplemental=(tracking_mode != "local" or motion_strength >= 0.025),
                 )
-                if refined_bbox is not None:
+                if refined_bbox is not None and should_accept_face_relock(refined_bbox, updated_bbox or previous_frame_bbox, search_bbox):
                     updated_bbox = refined_bbox
                     updated_small_bbox = frame_bbox_to_small_bbox(
                         updated_bbox,
