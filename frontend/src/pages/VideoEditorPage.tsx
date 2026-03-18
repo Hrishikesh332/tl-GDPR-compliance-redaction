@@ -468,6 +468,7 @@ const ENTITY_SEARCH_LANE_SEGMENT_ACTIVE = 'rgba(0, 220, 130, 0.16)'
 const ENTITY_SEARCH_LANE_SEGMENT_RING = 'rgba(0, 220, 130, 0.28)'
 const ENTITY_SEARCH_LANE_EDGE_LEFT = 'rgba(0, 220, 130, 0.55)'
 const ENTITY_SEARCH_LANE_EDGE_RIGHT = 'rgba(0, 220, 130, 0.35)'
+const FACE_LANE_DEBUG_CACHE_KEY = 'video_redaction_face_lane_debug_cache_v1'
 const LIVE_REDACTION_OBJECT_CLASSES = [
   'backpack',
   'bicycle',
@@ -493,6 +494,49 @@ type DetectionItem = {
   snapBase64?: string
   personId?: string
   objectClass?: string
+  timeRanges?: DetectionTimeRange[]
+  appearances?: DetectionAppearance[]
+  entityId?: string | null
+}
+
+type DetectionTimeRange = {
+  start_sec?: number
+  end_sec?: number
+  start?: number
+  end?: number
+}
+
+type DetectionAppearance = {
+  frame_idx?: number
+  timestamp?: number
+  bbox?: number[]
+}
+
+type FaceTimelineSegment = {
+  start: number
+  end: number
+}
+
+type FaceTimelineLaneSource = 'appearances' | 'marengo'
+
+type FaceTimelineLane = {
+  personId: string
+  item: DetectionItem
+  active: boolean
+  segments: FaceTimelineSegment[]
+  source: FaceTimelineLaneSource
+}
+
+type FaceLaneDebugCacheEntry = {
+  personId: string
+  label: string
+  entityId?: string | null
+  storedAtMs: number
+  localTimeRanges?: DetectionTimeRange[]
+  localAppearances?: DetectionAppearance[]
+  localSegments?: FaceTimelineSegment[]
+  marengoTimeRanges?: DetectionTimeRange[]
+  marengoSegments?: FaceTimelineSegment[]
 }
 
 type LiveRedactionDetection = {
@@ -927,6 +971,140 @@ function fmtShort(sec: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
+function asFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+function normalizeFaceTimelineSegment(range: DetectionTimeRange): FaceTimelineSegment | null {
+  const start = asFiniteNumber(range.start_sec ?? range.start)
+  const endValue = asFiniteNumber(range.end_sec ?? range.end)
+  if (start === null) return null
+  const end = endValue === null ? start : Math.max(start, endValue)
+  return {
+    start: Math.max(0, start),
+    end: Math.max(start, end),
+  }
+}
+
+function mergeFaceTimelineSegments(
+  segments: FaceTimelineSegment[],
+  gapSec = 0.45,
+  minDurationSec = 0.55,
+): FaceTimelineSegment[] {
+  if (!segments.length) return []
+
+  const sorted = [...segments]
+    .filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end))
+    .sort((a, b) => a.start - b.start)
+
+  if (!sorted.length) return []
+
+  const merged: FaceTimelineSegment[] = [sorted[0]]
+  for (const segment of sorted.slice(1)) {
+    const previous = merged[merged.length - 1]
+    if (segment.start <= previous.end + gapSec) {
+      previous.end = Math.max(previous.end, segment.end)
+      continue
+    }
+    merged.push({ ...segment })
+  }
+
+  return merged.map((segment) => {
+    if (segment.end - segment.start >= minDurationSec) return segment
+    const center = (segment.start + segment.end) / 2
+    const half = minDurationSec / 2
+    return {
+      start: Math.max(0, center - half),
+      end: Math.max(center + half, segment.start + minDurationSec),
+    }
+  })
+}
+
+function buildFaceTimelineSegmentsFromAppearances(appearances?: DetectionAppearance[]): FaceTimelineSegment[] {
+  const timestamps = (appearances || [])
+    .map((appearance) => asFiniteNumber(appearance.timestamp))
+    .filter((value): value is number => value !== null)
+    .sort((a, b) => a - b)
+
+  if (!timestamps.length) return []
+
+  return mergeFaceTimelineSegments(
+    timestamps.map((timestamp) => ({
+      start: Math.max(0, timestamp - 0.18),
+      end: timestamp + 0.28,
+    })),
+    0.7,
+    0.7,
+  )
+}
+
+function buildFaceTimelineSegments(
+  item: DetectionItem,
+  marengoRanges?: DetectionTimeRange[],
+): FaceTimelineSegment[] {
+  // Sidebar face `time_ranges` come from descriptive analysis and are not
+  // reliably tied to a clustered face identity. Only trust entity-search
+  // ranges when we have a matching entity; otherwise stay on clustered
+  // appearance timestamps for this person.
+  const preferredRanges = marengoRanges && marengoRanges.length > 0 ? marengoRanges : []
+  const rangedSegments = mergeFaceTimelineSegments(
+    preferredRanges
+      .map((range) => normalizeFaceTimelineSegment(range))
+      .filter((segment): segment is FaceTimelineSegment => segment !== null),
+  )
+
+  if (rangedSegments.length > 0) return rangedSegments
+  return buildFaceTimelineSegmentsFromAppearances(item.appearances)
+}
+
+function loadFaceLaneDebugCache(): Record<string, Record<string, FaceLaneDebugCacheEntry>> {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(FACE_LANE_DEBUG_CACHE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as Record<string, Record<string, FaceLaneDebugCacheEntry>>
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveFaceLaneDebugCache(cache: Record<string, Record<string, FaceLaneDebugCacheEntry>>) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(FACE_LANE_DEBUG_CACHE_KEY, JSON.stringify(cache))
+  } catch {
+    /* ignore cache persistence failures */
+  }
+}
+
+function updateFaceLaneDebugCacheEntry(
+  videoId: string,
+  personId: string,
+  patch: Partial<FaceLaneDebugCacheEntry>,
+) {
+  if (!videoId || !personId) return
+  const cache = loadFaceLaneDebugCache()
+  const videoCache = cache[videoId] || {}
+  const existing = videoCache[personId]
+  cache[videoId] = {
+    ...videoCache,
+    [personId]: {
+      ...existing,
+      label: patch.label ?? existing?.label ?? personId,
+      ...patch,
+      personId,
+      storedAtMs: Date.now(),
+    },
+  }
+  saveFaceLaneDebugCache(cache)
+}
+
 function drawCanvasBlurRegion(
   ctx: CanvasRenderingContext2D,
   video: HTMLVideoElement,
@@ -1005,6 +1183,12 @@ export default function VideoEditorPage() {
   const { videoId } = useParams<{ videoId: string }>()
   const { getVideo } = useVideoCache()
   const cached = videoId ? getVideo(videoId) : undefined
+  const [videoInfo, setVideoInfo] = useState<{
+    video_id?: string
+    system_metadata?: { filename?: string }
+    hls?: { video_url?: string | null; thumbnail_urls?: string[] | string | null; status?: string | null } | null
+    overview?: { about?: string; topics?: string[]; categories?: string[] }
+  } | null>(null)
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const liveBlurCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -1027,6 +1211,8 @@ export default function VideoEditorPage() {
   const [hasRunDetection, setHasRunDetection] = useState(false)
   const [detectionFilter, setDetectionFilter] = useState('')
   const [apiDetections, setApiDetections] = useState<DetectionItem[]>([])
+  const [personLaneIds, setPersonLaneIds] = useState<string[]>([])
+  const [faceLaneEntityRangesByPersonId, setFaceLaneEntityRangesByPersonId] = useState<Record<string, DetectionTimeRange[]>>({})
   const [detectionLoading, setDetectionLoading] = useState(false)
   const [detectionError, setDetectionError] = useState<string | null>(null)
   const [detectionJobId, setDetectionJobId] = useState<string | null>(null)
@@ -1086,6 +1272,7 @@ export default function VideoEditorPage() {
   const liveBlurAnimationFrameRef = useRef<number | null>(null)
   const liveBlurVideoFrameCallbackRef = useRef<number | null>(null)
   const visibleLiveRedactionDetectionsRef = useRef<LiveRedactionDetection[]>([])
+  const requestedFaceLaneEntityIdsRef = useRef<Record<string, boolean>>({})
 
   const getPlaybackAnchorTime = useCallback(() => videoRef.current?.currentTime ?? currentTime, [currentTime])
   const updateVideoViewport = useCallback(() => {
@@ -1136,8 +1323,8 @@ export default function VideoEditorPage() {
   drawStateRef.current = { drawStart, drawCurrent }
   const trackerSettingsRef = useRef<{ trackerShape: 'rectangle' | 'ellipse' | 'circle'; trackerEffect: 'blur' | 'pixelate' | 'solid'; trackerReason: string; addTrackingRegion: (r: Omit<TrackingRegion, 'id'>) => void } | null>(null)
 
-  const streamUrl = cached?.stream_url
-  const title = cached?.metadata?.filename || videoId || 'Untitled'
+  const streamUrl = cached?.stream_url || videoInfo?.hls?.video_url || undefined
+  const title = cached?.metadata?.filename || videoInfo?.system_metadata?.filename || videoId || 'Untitled'
 
   /* ---- HLS: play m3u8 streams in Chrome/Firefox (TwelveLabs returns HLS) ---- */
   const effectiveStreamUrl = exportRedactDownloadUrl || streamUrl
@@ -1146,9 +1333,12 @@ export default function VideoEditorPage() {
   const liveRedactionActive = liveRedactionReady
 
   useEffect(() => {
+    setVideoInfo(null)
     setDetectionJobId(null)
     setHasRunDetection(false)
     setApiDetections([])
+    setPersonLaneIds([])
+    setFaceLaneEntityRangesByPersonId({})
     setExcludedFromRedactionIds([])
     setDetectionLoading(false)
     setDetectionError(null)
@@ -1161,7 +1351,8 @@ export default function VideoEditorPage() {
     liveRedactionPendingTimeRef.current = null
     liveRedactionRequestIdRef.current = 0
     liveRedactionLastResolvedTimeRef.current = null
-  }, [videoId, streamUrl])
+    requestedFaceLaneEntityIdsRef.current = {}
+  }, [videoId])
 
   useEffect(() => {
     setSummaryText(null)
@@ -1198,8 +1389,14 @@ export default function VideoEditorPage() {
     let cancelled = false
     fetch(`${API_BASE}/api/videos/${encodeURIComponent(videoId)}`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((info: { overview?: { about?: string; topics?: string[]; categories?: string[] } } | null) => {
-        if (cancelled || !info?.overview) return
+      .then((info: {
+        system_metadata?: { filename?: string }
+        hls?: { video_url?: string | null; thumbnail_urls?: string[] | string | null; status?: string | null } | null
+        overview?: { about?: string; topics?: string[]; categories?: string[] }
+      } | null) => {
+        if (cancelled || !info) return
+        setVideoInfo(info)
+        if (!info.overview) return
         const o = info.overview
         setSummaryTags({
           about: o.about,
@@ -1689,12 +1886,13 @@ export default function VideoEditorPage() {
     setDetectionError(null)
     setDetectionLoading(true)
     try {
-      const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?ensure=true&exact=true`)
+      const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?ensure=true&exact=true&force=true`)
       const data = await r.json().catch(() => ({})) as {
         job_id?: string
         status?: string
         local_status?: string
         created?: boolean
+        forced?: boolean
         error?: string
       }
       const jobId = r.ok && data.job_id ? String(data.job_id) : ''
@@ -1761,7 +1959,14 @@ export default function VideoEditorPage() {
       const faceColor = '#F59E0B'
       const objectColors = ['#3B82F6', '#EF4444', '#10B981', '#8B5CF6']
       if (facesRes.ok && Array.isArray(facesJson.unique_faces)) {
-        facesJson.unique_faces.forEach((f: { person_id?: string; description?: string; snap_base64?: string }, i: number) => {
+        facesJson.unique_faces.forEach((f: {
+          person_id?: string
+          description?: string
+          snap_base64?: string
+          time_ranges?: DetectionTimeRange[]
+          appearances?: DetectionAppearance[]
+          entity_id?: string | null
+        }, i: number) => {
           const personId = (f.person_id || `person_${i}`).toString().trim()
           const name = (f.description || personId || `Person ${i}`).toString().trim()
           items.push({
@@ -1772,6 +1977,9 @@ export default function VideoEditorPage() {
             color: faceColor,
             snapBase64: f.snap_base64,
             personId,
+            timeRanges: Array.isArray(f.time_ranges) ? f.time_ranges : [],
+            appearances: Array.isArray(f.appearances) ? f.appearances : [],
+            entityId: typeof f.entity_id === 'string' && f.entity_id.trim() ? f.entity_id : null,
           })
         })
       }
@@ -1802,7 +2010,7 @@ export default function VideoEditorPage() {
         setDetectionError(null)
       }
       setApiDetections(items)
-      setExcludedFromRedactionIds(items.filter((item) => item.kind === 'face').map((item) => item.id))
+      setExcludedFromRedactionIds(items.map((item) => item.id))
       setHasRunDetection(true)
     } catch (e) {
       setDetectionError(e instanceof Error ? e.message : 'Detection request failed')
@@ -1829,6 +2037,139 @@ export default function VideoEditorPage() {
     () => apiDetections.filter((item) => !excludedFromRedactionIds.includes(item.id)).length,
     [apiDetections, excludedFromRedactionIds]
   )
+  const faceDetectionItemsByPersonId = useMemo(() => {
+    const map: Record<string, DetectionItem> = {}
+    for (const item of apiDetections) {
+      if (item.kind === 'face' && item.personId) {
+        map[item.personId] = item
+      }
+    }
+    return map
+  }, [apiDetections])
+
+  useEffect(() => {
+    const validPersonIds = new Set(
+      apiDetections
+        .filter((item) => item.kind === 'face' && item.personId)
+        .map((item) => item.personId as string),
+    )
+    const cachedVideoEntries = videoId ? (loadFaceLaneDebugCache()[videoId] || {}) : {}
+    const cachedEntityRangesByPersonId: Record<string, DetectionTimeRange[]> = {}
+    const nextRequested: Record<string, boolean> = {}
+
+    for (const item of apiDetections) {
+      if (item.kind !== 'face' || !item.personId) continue
+      const cachedEntry = cachedVideoEntries[item.personId]
+      if (
+        cachedEntry?.marengoTimeRanges &&
+        cachedEntry.marengoTimeRanges.length > 0 &&
+        !!item.entityId &&
+        !!cachedEntry.entityId &&
+        cachedEntry.entityId === item.entityId
+      ) {
+        cachedEntityRangesByPersonId[item.personId] = cachedEntry.marengoTimeRanges
+        nextRequested[item.personId] = true
+      }
+    }
+
+    setPersonLaneIds((previous) => previous.filter((personId) => validPersonIds.has(personId)))
+    setFaceLaneEntityRangesByPersonId(
+      Object.fromEntries(
+        Object.entries(cachedEntityRangesByPersonId)
+          .filter(([personId, ranges]) => validPersonIds.has(personId) && Array.isArray(ranges) && ranges.length > 0),
+      ),
+    )
+
+    for (const personId of Object.keys(requestedFaceLaneEntityIdsRef.current)) {
+      if (validPersonIds.has(personId)) {
+        nextRequested[personId] = true
+      }
+    }
+    requestedFaceLaneEntityIdsRef.current = nextRequested
+  }, [apiDetections, videoId])
+
+  useEffect(() => {
+    if (!videoId) return
+    for (const item of apiDetections) {
+      if (item.kind !== 'face' || !item.personId) continue
+      updateFaceLaneDebugCacheEntry(videoId, item.personId, {
+        label: item.label,
+        entityId: item.entityId ?? null,
+        localTimeRanges: item.timeRanges || [],
+        localAppearances: item.appearances || [],
+        localSegments: buildFaceTimelineSegments(item),
+      })
+    }
+  }, [apiDetections, videoId])
+
+  const ensureFaceTimelineLane = useCallback((personId?: string | null) => {
+    if (!personId) return
+    setPersonLaneIds((previous) => (
+      previous.includes(personId) ? previous : [...previous, personId]
+    ))
+  }, [])
+
+  useEffect(() => {
+    if (!videoId || !hasRunDetection || personLaneIds.length === 0) return
+
+    const controllers: AbortController[] = []
+    let cancelled = false
+
+    for (const personId of personLaneIds) {
+      const item = faceDetectionItemsByPersonId[personId]
+      if (!item?.entityId || requestedFaceLaneEntityIdsRef.current[personId]) continue
+
+      requestedFaceLaneEntityIdsRef.current[personId] = true
+      const controller = new AbortController()
+      controllers.push(controller)
+
+      fetch(`${API_BASE}/api/entities/${encodeURIComponent(item.entityId)}/time-ranges`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ video_id: videoId }),
+        signal: controller.signal,
+      })
+        .then(async (res) => {
+          const data = await res.json().catch(() => ({})) as { time_ranges?: DetectionTimeRange[] }
+          if (!res.ok || cancelled) return
+          if (!Array.isArray(data.time_ranges) || data.time_ranges.length === 0) return
+          setFaceLaneEntityRangesByPersonId((previous) => ({
+            ...previous,
+            [personId]: data.time_ranges as DetectionTimeRange[],
+          }))
+          updateFaceLaneDebugCacheEntry(videoId, personId, {
+            label: item.label,
+            entityId: item.entityId ?? null,
+            marengoTimeRanges: data.time_ranges as DetectionTimeRange[],
+            marengoSegments: buildFaceTimelineSegments(item, data.time_ranges as DetectionTimeRange[]),
+          })
+        })
+        .catch(() => {
+          /* local timeline lane remains available even when entity search is unavailable */
+        })
+    }
+
+    return () => {
+      cancelled = true
+      controllers.forEach((controller) => controller.abort())
+    }
+  }, [faceDetectionItemsByPersonId, hasRunDetection, personLaneIds, videoId])
+
+  const personTimelineLanes = useMemo((): FaceTimelineLane[] => (
+    personLaneIds.flatMap((personId) => {
+      const item = faceDetectionItemsByPersonId[personId]
+      if (!item) return []
+
+      const marengoRanges = faceLaneEntityRangesByPersonId[personId]
+      return [{
+        personId,
+        item,
+        active: !excludedFromRedactionIds.includes(item.id),
+        segments: buildFaceTimelineSegments(item, marengoRanges),
+        source: marengoRanges && marengoRanges.length > 0 ? 'marengo' : 'appearances',
+      }]
+    })
+  ), [excludedFromRedactionIds, faceDetectionItemsByPersonId, faceLaneEntityRangesByPersonId, personLaneIds])
 
   const resolveRedactionJobId = useCallback(async () => {
     if (detectionJobId) return detectionJobId
@@ -2588,6 +2929,43 @@ export default function VideoEditorPage() {
       maxHeight: '100%',
     }
   }, [playerAspectRatio, videoStageSize.height, videoStageSize.width])
+  useEffect(() => {
+    if (isPlaying) return
+
+    const canvas = liveBlurCanvasRef.current
+    const video = videoRef.current
+    if (!canvas || !video) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    const width = Math.max(0, overlayViewport.width)
+    const height = Math.max(0, overlayViewport.height)
+    ctx.clearRect(0, 0, width, height)
+
+    if (
+      !liveRedactionActive ||
+      width <= 0 ||
+      height <= 0 ||
+      video.readyState < 2 ||
+      visibleLiveRedactionDetections.length === 0
+    ) {
+      return
+    }
+
+    const playbackTime = video.currentTime ?? currentTime
+    for (const detection of visibleLiveRedactionDetections.map((entry) => predictLiveDetection(entry, playbackTime))) {
+      drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
+    }
+  }, [
+    blurIntensity,
+    currentTime,
+    isPlaying,
+    liveRedactionActive,
+    overlayViewport.height,
+    overlayViewport.width,
+    redactionStyle,
+    visibleLiveRedactionDetections,
+  ])
   useLayoutEffect(() => {
     const canvas = liveBlurCanvasRef.current
     if (!canvas || overlayViewport.width <= 0 || overlayViewport.height <= 0) return
@@ -2681,21 +3059,29 @@ export default function VideoEditorPage() {
     )
 
     const timer = window.setTimeout(() => {
-      void requestLiveRedaction(videoRef.current?.currentTime ?? 0, { force: true })
+      syncLiveRedactionFrame({ force: true, clearDetections: true, resetTracking: true })
     }, 0)
 
     return () => window.clearTimeout(timer)
-  }, [excludedFromRedactionIds, hasRunDetection, liveRedactionActive, requestLiveRedaction])
+  }, [excludedFromRedactionIds, hasRunDetection, liveRedactionActive, syncLiveRedactionFrame])
+
+  const toggleDetectionSelectionById = useCallback((selectionId: string, personId?: string | null) => {
+    const isExcluded = excludedFromRedactionIds.includes(selectionId)
+    if (isExcluded && personId) {
+      ensureFaceTimelineLane(personId)
+    }
+    setExcludedFromRedactionIds((previous) => (
+      previous.includes(selectionId)
+        ? previous.filter((id) => id !== selectionId)
+        : [...previous, selectionId]
+    ))
+  }, [ensureFaceTimelineLane, excludedFromRedactionIds])
 
   const toggleLiveDetectionSelection = useCallback((detection: LiveRedactionDetection) => {
     const selectionId = getSelectionIdForLiveDetection(detection)
     if (!selectionId) return
-    setExcludedFromRedactionIds((previous) =>
-      previous.includes(selectionId)
-        ? previous.filter((id) => id !== selectionId)
-        : [...previous, selectionId]
-    )
-  }, [])
+    toggleDetectionSelectionById(selectionId, detection.kind === 'face' ? detection.personId : null)
+  }, [toggleDetectionSelectionById])
 
   const previewResolvedRegions = useMemo(() => {
     return trackingRegions.flatMap((region) => {
@@ -3448,6 +3834,111 @@ export default function VideoEditorPage() {
                     </div>
                   )}
 
+                  {personTimelineLanes.map((lane) => {
+                    const accentColor = lane.item.color || '#F59E0B'
+                    const clampedSegments = lane.segments.map((segment) => ({
+                      start: Math.max(0, duration > 0 ? Math.min(duration, segment.start) : segment.start),
+                      end: Math.max(0, duration > 0 ? Math.min(duration, segment.end) : segment.end),
+                    })).filter((segment) => segment.end >= segment.start)
+                    const activeSegmentIndex = clampedSegments.findIndex(
+                      (segment) => currentTime >= segment.start && currentTime <= segment.end,
+                    )
+
+                    return (
+                      <div
+                        key={`face-lane-${lane.personId}`}
+                        className={`h-[52px] shrink-0 relative border-b border-border ${lane.active ? '' : 'opacity-70'}`}
+                      >
+                        <div
+                          className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                          style={{
+                            border: `1px solid ${lane.active ? `${accentColor}42` : 'rgba(148,163,184,0.22)'}`,
+                            background: lane.active
+                              ? `linear-gradient(90deg, ${accentColor}14 0%, rgba(255,255,255,0.02) 48%, ${accentColor}10 100%)`
+                              : 'linear-gradient(90deg, rgba(148,163,184,0.08) 0%, rgba(148,163,184,0.04) 100%)',
+                          }}
+                        >
+                          <div className="absolute inset-0 pointer-events-none bg-gradient-to-b from-white/[0.03] via-transparent to-black/[0.08]" />
+                          <div
+                            className="absolute inset-x-3 bottom-[9px] h-px"
+                            style={{ backgroundColor: lane.active ? `${accentColor}30` : 'rgba(148,163,184,0.18)' }}
+                          />
+                          <div className="absolute left-3 top-2 right-3 z-[4] flex items-center justify-between gap-2 pointer-events-none">
+                            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/22 px-2 py-1 shadow-[0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-sm">
+                              <div className="h-6 w-6 shrink-0 overflow-hidden rounded-full border border-white/12 bg-white/10">
+                                {lane.item.snapBase64 ? (
+                                  <img
+                                    src={`data:image/png;base64,${lane.item.snapBase64}`}
+                                    alt=""
+                                    className="h-full w-full object-cover"
+                                  />
+                                ) : (
+                                  <div className="flex h-full w-full items-center justify-center text-[10px] font-semibold text-white/82">
+                                    {lane.item.label.charAt(0).toUpperCase()}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                            <span className={`rounded-full border px-2 py-1 text-[9px] font-medium uppercase tracking-[0.12em] ${
+                              lane.active
+                                ? 'border-white/10 bg-black/24 text-white/78'
+                                : 'border-border bg-background/70 text-text-tertiary'
+                            }`}>
+                              {lane.active ? 'Blur on' : 'Blur off'}
+                            </span>
+                          </div>
+                          {clampedSegments.length > 0 ? clampedSegments.map((segment, index) => {
+                            const startPct = duration > 0 ? (segment.start / duration) * 100 : 0
+                            const endPct = duration > 0 ? (segment.end / duration) * 100 : 0
+                            const widthPct = Math.max(1.8, endPct - startPct)
+                            const isActive = activeSegmentIndex === index
+                            return (
+                              <button
+                                key={`face-lane-segment-${lane.personId}-${segment.start}-${segment.end}-${index}`}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  seekToTime(segment.start)
+                                }}
+                                className="absolute inset-y-0 z-[3] bg-transparent"
+                                style={{
+                                  left: `${Math.max(0, Math.min(100, startPct))}%`,
+                                  width: `${Math.max(widthPct, 2)}%`,
+                                }}
+                                title={`${fmtShort(segment.start)} - ${fmtShort(segment.end)}`}
+                              >
+                                <span
+                                  className="absolute inset-y-2 rounded-full transition-all"
+                                  style={{
+                                    left: 0,
+                                    right: 0,
+                                    backgroundColor: isActive ? `${accentColor}34` : `${accentColor}1f`,
+                                    boxShadow: isActive ? `0 0 0 1px ${accentColor}55` : undefined,
+                                    opacity: isActive ? 1 : lane.active ? 0.94 : 0.58,
+                                  }}
+                                />
+                              </button>
+                            )
+                          }) : (
+                            <div className="absolute inset-0 z-[1] flex items-center justify-center pt-2">
+                              <span className="rounded-full border border-white/10 bg-black/24 px-2.5 py-1 text-[10px] font-medium text-white/68">
+                                Waiting for saved face ranges
+                              </span>
+                            </div>
+                          )}
+                          <div
+                            className="absolute left-0 top-0 bottom-0 w-1.5"
+                            style={{ backgroundColor: lane.active ? `${accentColor}cc` : 'rgba(148,163,184,0.44)' }}
+                          />
+                          <div
+                            className="absolute right-0 top-0 bottom-0 w-1.5"
+                            style={{ backgroundColor: lane.active ? `${accentColor}70` : 'rgba(148,163,184,0.22)' }}
+                          />
+                        </div>
+                      </div>
+                    )
+                  })}
+
                   {SHOW_AUDIO_WAVEFORM && (
                     <div className={`h-[48px] shrink-0 relative border-b border-border ${trackMuted.audio ? 'opacity-40' : ''}`}>
                       <div className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden border border-highlight/25 bg-gradient-to-r from-highlight/[0.14] via-surface to-highlight/[0.14] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
@@ -3878,9 +4369,7 @@ export default function VideoEditorPage() {
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation()
-                              setExcludedFromRedactionIds((prev) =>
-                                prev.includes(d.id) ? prev.filter((id) => id !== d.id) : [...prev, d.id]
-                              )
+                              toggleDetectionSelectionById(d.id, d.kind === 'face' ? d.personId : null)
                             }}
                             className={`shrink-0 inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border text-xs font-medium transition-colors ${
                               excluded

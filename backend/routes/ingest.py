@@ -98,10 +98,11 @@ def job_by_video(video_id):
     """Return the best matching job_id for this video (used by the editor Detect flow)."""
     ensure = request.args.get("ensure", "false").lower() in ("true", "1", "yes")
     exact = request.args.get("exact", "false").lower() in ("true", "1", "yes")
+    force = request.args.get("force", "false").lower() in ("true", "1", "yes")
     job_id = get_exact_job_id_by_video_id(video_id) if exact or ensure else get_job_id_by_video_id(video_id)
     created = False
-    if not job_id and ensure:
-        job_id = ensure_job_for_video(video_id)
+    if ensure and (force or not job_id):
+        job_id = ensure_job_for_video(video_id, force=force)
         created = bool(job_id)
     if not job_id:
         return jsonify({"error": "no job found for this video"}), 404
@@ -112,6 +113,7 @@ def job_by_video(video_id):
         "status": job.get("status"),
         "local_status": job.get("local_status"),
         "created": created,
+        "forced": force,
     }), status_code
 
 

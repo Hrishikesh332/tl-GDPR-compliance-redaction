@@ -388,10 +388,11 @@ def get_exact_job_id_by_video_id(video_id):
     return None
 
 
-def ensure_job_for_video(video_id, interval_sec=None):
-    job_id = get_exact_job_id_by_video_id(video_id)
-    if job_id:
-        return job_id
+def ensure_job_for_video(video_id, interval_sec=None, force=False):
+    if not force:
+        job_id = get_exact_job_id_by_video_id(video_id)
+        if job_id:
+            return job_id
 
     try:
         info = twelvelabs_service.get_video_info(video_id)
@@ -406,7 +407,12 @@ def ensure_job_for_video(video_id, interval_sec=None):
     target_meta = info.get("system_metadata") or {}
     video_filename = target_meta.get("filename") or os.path.basename(video_path)
 
-    logger.info("Creating local processing job for video %s using source %s", video_id, video_path)
+    logger.info(
+        "Creating %slocal processing job for video %s using source %s",
+        "fresh " if force else "",
+        video_id,
+        video_path,
+    )
     return start_ingestion(
         video_path=video_path,
         video_filename=video_filename,
