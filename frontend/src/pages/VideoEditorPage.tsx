@@ -145,6 +145,18 @@ function buildWaveformPath(samples: number[], width: number, height: number, pad
   return `M ${topPoints.join(' L ')} L ${bottomPoints.join(' L ')} Z`
 }
 
+function getSearchRankBucketWeight(rank: number): number {
+  if (!Number.isFinite(rank) || rank <= 0) return 0.3
+
+  const bucketIndex = Math.floor((rank - 1) / 10)
+  const bucketWeight = Math.max(0.22, 1 - bucketIndex * 0.16)
+  const rankInBucket = (rank - 1) % 10
+  const withinBucketProgress = 1 - (rankInBucket / 9)
+  const withinBucketWeight = 0.94 + withinBucketProgress * 0.06
+
+  return Math.max(0.22, Math.min(1, bucketWeight * withinBucketWeight))
+}
+
 function getSearchClipImportance(
   clip: { rank?: number; score?: number },
   maxRank: number,
@@ -153,12 +165,11 @@ function getSearchClipImportance(
   const scoreWeight = Math.max(0.7, Math.min(1, 0.78 + score * 2.2))
 
   if (clip.rank != null && maxRank > 0) {
-    const rankProgress = maxRank <= 1 ? 1 : 1 - ((clip.rank - 1) / (maxRank - 1))
-    const rankWeight = 0.16 + 0.84 * Math.pow(Math.max(0, rankProgress), 1.85)
+    const rankWeight = getSearchRankBucketWeight(clip.rank)
     return Math.max(0.12, Math.min(1, rankWeight * scoreWeight))
   }
 
-  return Math.max(0.18, Math.min(1, scoreWeight))
+  return Math.max(0.18, Math.min(0.42, scoreWeight * (maxRank > 0 ? 0.55 : 1)))
 }
 
 function buildSearchWaveformSamples(
