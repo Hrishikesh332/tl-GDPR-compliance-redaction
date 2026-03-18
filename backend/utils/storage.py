@@ -184,7 +184,73 @@ def load_snap_base64_map(directory):
     return snapshots
 
 
-def attach_snapshots(records, snapshots_by_filename):
+def _find_snapshot_by_candidates(snapshots_by_filename, candidates):
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if candidate in snapshots_by_filename:
+            return candidate
+
+    normalized_candidates = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        base, ext = os.path.splitext(candidate)
+        if ext:
+            normalized_candidates.append(candidate)
+        else:
+            normalized_candidates.extend([f"{candidate}.png", f"{candidate}.jpg", f"{candidate}.jpeg"])
+
+    for candidate in normalized_candidates:
+        if candidate in snapshots_by_filename:
+            return candidate
+    return None
+
+
+def infer_face_snapshot_name(item, snapshots_by_filename):
+    candidates = []
+    person_id = str(item.get("person_id") or "").strip()
+    name = str(item.get("name") or "").strip()
+    if person_id:
+        candidates.append(safe_filename(person_id))
+    if name:
+        candidates.append(safe_filename(name))
+
+    match = _find_snapshot_by_candidates(snapshots_by_filename, candidates)
+    if match:
+        return match
+
+    for filename in sorted(snapshots_by_filename):
+        stem, _ = os.path.splitext(filename)
+        if stem == person_id or stem == safe_filename(person_id) or stem == safe_filename(name):
+            return filename
+    return None
+
+
+def infer_object_snapshot_name(item, snapshots_by_filename):
+    object_id = str(item.get("object_id") or "").strip()
+    identification = str(item.get("identification") or "").strip()
+    safe_identification = safe_filename(identification or "object")
+
+    candidates = []
+    if object_id and safe_identification:
+        candidates.append(f"{object_id}_{safe_identification}")
+    if object_id:
+        candidates.append(object_id)
+
+    match = _find_snapshot_by_candidates(snapshots_by_filename, candidates)
+    if match:
+        return match
+
+    if object_id:
+        prefix = f"{object_id}_"
+        for filename in sorted(snapshots_by_filename):
+            if filename.startswith(prefix):
+                return filename
+    return None
+
+
+def attach_snapshots(records, snapshots_by_filename, infer_filename=None):
     enriched = []
     for record in records or []:
         if not isinstance(record, dict):
@@ -193,6 +259,10 @@ def attach_snapshots(records, snapshots_by_filename):
         snapshot_name = item.get("snap_filename")
         if not snapshot_name and item.get("snap_path"):
             snapshot_name = os.path.basename(str(item["snap_path"]))
+        if not snapshot_name and infer_filename is not None:
+            snapshot_name = infer_filename(item, snapshots_by_filename)
+            if snapshot_name and "snap_filename" not in item:
+                item["snap_filename"] = snapshot_name
         if snapshot_name and snapshot_name in snapshots_by_filename:
             item["snap_base64"] = snapshots_by_filename[snapshot_name]
         enriched.append(item)
@@ -213,8 +283,16 @@ def load_faces_objects_from_disk(job_id):
     metadata = load_detection_metadata(run_dir)
     if metadata is not None:
         return {
-            "unique_faces": attach_snapshots(metadata.get("unique_faces", []), load_snap_base64_map(faces_dir)),
-            "unique_objects": attach_snapshots(metadata.get("unique_objects", []), load_snap_base64_map(objects_dir)),
+            "unique_faces": attach_snapshots(
+                metadata.get("unique_faces", []),
+                load_snap_base64_map(faces_dir),
+                infer_filename=infer_face_snapshot_name,
+            ),
+            "unique_objects": attach_snapshots(
+                metadata.get("unique_objects", []),
+                load_snap_base64_map(objects_dir),
+                infer_filename=infer_object_snapshot_name,
+            ),
         }
 
     unique_faces = []

@@ -5,7 +5,14 @@ import tempfile
 from flask import Blueprint, request, jsonify
 
 from config import OUTPUT_DIR
-from services.pipeline import start_ingestion, get_job, list_jobs, push_job_entities_to_twelvelabs, get_job_id_by_video_id
+from services.pipeline import (
+    start_ingestion,
+    get_job,
+    list_jobs,
+    push_job_entities_to_twelvelabs,
+    get_job_id_by_video_id,
+    ensure_job_for_video,
+)
 from services import twelvelabs_service
 
 logger = logging.getLogger("video_redaction.routes.index")
@@ -88,10 +95,22 @@ def jobs():
 @index_bp.route("/jobs/by-video/<video_id>", methods=["GET"])
 def job_by_video(video_id):
     """Return the best matching job_id for this video (used by the editor Detect flow)."""
+    ensure = request.args.get("ensure", "false").lower() in ("true", "1", "yes")
     job_id = get_job_id_by_video_id(video_id)
+    created = False
+    if not job_id and ensure:
+        job_id = ensure_job_for_video(video_id)
+        created = bool(job_id)
     if not job_id:
         return jsonify({"error": "no job found for this video"}), 404
-    return jsonify({"job_id": job_id})
+    job = get_job(job_id) or {}
+    status_code = 202 if created else 200
+    return jsonify({
+        "job_id": job_id,
+        "status": job.get("status"),
+        "local_status": job.get("local_status"),
+        "created": created,
+    }), status_code
 
 
 @index_bp.route("/jobs/<job_id>/push-entities", methods=["POST"])

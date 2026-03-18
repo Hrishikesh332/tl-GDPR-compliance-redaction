@@ -10,6 +10,7 @@ from config import (
     OUTPUT_DIR, KEYFRAME_INTERVAL_SEC, OBJECT_CONF_THRESHOLD,
     DEFAULT_BLUR_STRENGTH, DEFAULT_DETECT_EVERY_N,
 )
+from services import twelvelabs_service
 from services.detection import detect_faces, detect_objects
 from services.clustering import cluster_faces, cluster_objects
 from services.redactor import redact_video
@@ -92,6 +93,70 @@ def infer_video_path_for_job(job_id, target_meta=None):
         score = abs(stat.st_mtime - run_mtime) if run_mtime is not None else 0.0
         if os.path.basename(path).startswith("input_"):
             score -= 45.0
+
+        if target_width or target_height or target_duration:
+            try:
+                meta = get_video_metadata(path)
+                if target_width and meta.get("width"):
+                    score += abs(meta["width"] - target_width) * 1.5
+                if target_height and meta.get("height"):
+                    score += abs(meta["height"] - target_height) * 1.5
+                if target_duration and meta.get("duration_sec"):
+                    score += abs(meta["duration_sec"] - target_duration) * 30.0
+            except Exception:
+                score += 1e6
+
+        if score < best_score:
+            best_score = score
+            best_path = path
+
+    return best_path
+
+
+def infer_video_path_for_video(video_id, info=None):
+    if not video_id:
+        return None
+
+    if info is None:
+        try:
+            info = twelvelabs_service.get_video_info(video_id)
+        except Exception as e:
+            logger.warning("Could not retrieve video info for %s while inferring local path: %s", video_id, e)
+            info = {}
+
+    target_meta = info.get("system_metadata") or {}
+    target_filename = str(target_meta.get("filename") or "").strip().lower()
+    target_time = parse_iso_timestamp(info.get("indexed_at")) or parse_iso_timestamp(info.get("created_at"))
+
+    candidates = candidate_source_videos()
+    if not candidates:
+        return None
+
+    target_width = target_meta.get("width")
+    target_height = target_meta.get("height")
+    target_duration = target_meta.get("duration") or target_meta.get("duration_sec")
+
+    best_path = None
+    best_score = float("inf")
+
+    for path in candidates:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+
+        basename = os.path.basename(path).lower()
+        score = abs(stat.st_mtime - target_time) if target_time is not None else 0.0
+
+        if basename.startswith("index_"):
+            score -= 60.0
+        elif basename.startswith("upload_"):
+            score -= 45.0
+        elif basename.startswith("input_"):
+            score -= 30.0
+
+        if target_filename and basename == target_filename:
+            score -= 240.0
 
         if target_width or target_height or target_duration:
             try:
@@ -292,6 +357,34 @@ def get_job_id_by_video_id(video_id):
     return recover_job_id_for_video(video_id)
 
 
+def ensure_job_for_video(video_id, interval_sec=None):
+    job_id = get_job_id_by_video_id(video_id)
+    if job_id:
+        return job_id
+
+    try:
+        info = twelvelabs_service.get_video_info(video_id)
+    except Exception as e:
+        logger.warning("Could not retrieve video info for %s while ensuring job: %s", video_id, e)
+        info = {}
+
+    video_path = infer_video_path_for_video(video_id, info=info)
+    if not video_path or not os.path.isfile(video_path):
+        return None
+
+    target_meta = info.get("system_metadata") or {}
+    video_filename = target_meta.get("filename") or os.path.basename(video_path)
+
+    logger.info("Creating local processing job for video %s using source %s", video_id, video_path)
+    return start_ingestion(
+        video_path=video_path,
+        video_filename=video_filename,
+        interval_sec=interval_sec,
+        skip_indexing=True,
+        existing_video_id=video_id,
+    )
+
+
 def list_jobs():
     with _lock:
         return [
@@ -315,6 +408,7 @@ def start_ingestion(video_path, video_filename=None, interval_sec=None, skip_ind
             "video_path": video_path,
             "video_filename": video_filename,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "twelvelabs_video_id": existing_video_id,
             "twelvelabs_status": "pending",
             "local_status": "pending",
             "error": None,

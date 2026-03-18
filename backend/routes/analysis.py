@@ -3,19 +3,45 @@ import json
 import logging
 import os
 import tempfile
+import threading
 
 import cv2
 import numpy as np
 from flask import Blueprint, request, jsonify
 
 from config import OUTPUT_DIR
+from services.redactor import (
+    bbox_corners,
+    corners_to_bbox,
+    detect_best_face_bbox,
+    expand_bbox,
+    frame_bbox_to_small_bbox,
+    optical_flow_bbox_update,
+    seed_tracking_points,
+    small_bbox_to_frame_bbox,
+    translate_bbox,
+)
 from services.pipeline import get_job, get_enriched_faces
 from services import twelvelabs_service
-from utils.video import extract_frame_at_time, extract_frames_at_timestamps
+from utils.video import extract_frame_at_time, extract_frames_at_timestamps, small_frame_for_tracking
 
 logger = logging.getLogger("video_redaction.routes.analysis")
 
 analysis_bp = Blueprint("analysis", __name__)
+
+_live_track_state = {}
+_live_track_lock = threading.Lock()
+
+LIVE_TRACK_MAX_GAP_SEC = 0.85
+LIVE_TRACK_KEEP_CONFIDENCE = 0.12
+LIVE_TRACK_DECAY = 0.94
+LIVE_TRACK_BLEND_ALPHA = 0.62
+LIVE_TRACK_FRAME_MAX_DIM = 640
+LIVE_TRACK_GLOBAL_MAX_CORNERS = 240
+LIVE_TRACK_GLOBAL_MIN_POINTS = 8
+LIVE_TRACK_GLOBAL_MIN_CONFIDENCE = 0.18
+LIVE_TRACK_FACE_SEARCH_EXPAND = 1.75
+LIVE_TRACK_FACE_LOST_SEARCH_EXPAND = 2.45
 
 
 def normalize_bbox(bbox, frame_w, frame_h):
@@ -34,6 +60,26 @@ def normalize_bbox(bbox, frame_w, frame_h):
         "width": round((x2 - x1) / frame_w, 6),
         "height": round((y2 - y1) / frame_h, 6),
     }
+
+
+def denormalize_bbox(box, frame_w, frame_h):
+    if not box or frame_w <= 0 or frame_h <= 0:
+        return None
+    try:
+        x = float(box.get("x", 0.0))
+        y = float(box.get("y", 0.0))
+        width = float(box.get("width", 0.0))
+        height = float(box.get("height", 0.0))
+    except (TypeError, ValueError):
+        return None
+
+    x1 = max(0, min(int(round(x * frame_w)), frame_w))
+    y1 = max(0, min(int(round(y * frame_h)), frame_h))
+    x2 = max(0, min(int(round((x + width) * frame_w)), frame_w))
+    y2 = max(0, min(int(round((y + height) * frame_h)), frame_h))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
 
 
 def detection_iou(box_a, box_b):
@@ -56,6 +102,338 @@ def detection_center_distance(box_a, box_b):
     bx = box_b["x"] + box_b["width"] / 2.0
     by = box_b["y"] + box_b["height"] / 2.0
     return float(np.hypot(ax - bx, ay - by))
+
+
+def live_track_match_score(track_det, detection):
+    if track_det["kind"] != detection["kind"]:
+        return None
+
+    if track_det["kind"] == "face":
+        track_person_id = track_det.get("personId")
+        detection_person_id = detection.get("personId")
+        if track_person_id and detection_person_id and track_person_id != detection_person_id:
+            return None
+    elif track_det.get("label") != detection.get("label"):
+        return None
+
+    iou = detection_iou(track_det, detection)
+    distance = detection_center_distance(track_det, detection)
+    motion_strength = max(0.0, float(track_det.get("motionStrength", 0.0) or 0.0))
+    max_distance = (0.16 if detection["kind"] == "face" else 0.22) + min(0.24, motion_strength * 3.0)
+    if track_det.get("trackingMode") == "global":
+        max_distance += 0.05
+    if iou < 0.04 and distance > max_distance:
+        return None
+
+    track_area = max(1e-6, float(track_det["width"]) * float(track_det["height"]))
+    det_area = max(1e-6, float(detection["width"]) * float(detection["height"]))
+    size_ratio = max(track_area, det_area) / min(track_area, det_area)
+    if size_ratio > 3.0 and iou < 0.08:
+        return None
+
+    same_identity_bonus = 0.0
+    if track_det["kind"] == "face" and track_det.get("personId") and detection.get("personId"):
+        same_identity_bonus = 4.0
+    if track_det["kind"] == "object" and track_det.get("objectClass") and detection.get("objectClass"):
+        same_identity_bonus = 2.0
+
+    return (
+        same_identity_bonus
+        + iou * 5.0
+        - distance * 1.2
+        - (size_ratio - 1.0) * 0.2
+        + min(0.28, motion_strength * 0.9)
+    )
+
+
+def blend_detection_boxes(track_det, detection):
+    motion_strength = max(0.0, float(track_det.get("motionStrength", 0.0) or 0.0))
+    alpha = min(
+        0.86,
+        LIVE_TRACK_BLEND_ALPHA
+        + min(0.18, motion_strength * 1.6)
+        + (0.08 if track_det.get("trackingMode") == "global" else 0.0),
+    )
+    return {
+        **detection,
+        "x": round(float(track_det["x"]) * (1 - alpha) + float(detection["x"]) * alpha, 6),
+        "y": round(float(track_det["y"]) * (1 - alpha) + float(detection["y"]) * alpha, 6),
+        "width": round(float(track_det["width"]) * (1 - alpha) + float(detection["width"]) * alpha, 6),
+        "height": round(float(track_det["height"]) * (1 - alpha) + float(detection["height"]) * alpha, 6),
+        "confidence": round(max(float(track_det.get("confidence", 0.0)), float(detection.get("confidence", 0.0))), 4),
+    }
+
+
+def estimate_global_live_motion(prev_gray, gray):
+    if prev_gray is None or gray is None:
+        return None
+
+    points = cv2.goodFeaturesToTrack(
+        prev_gray,
+        maxCorners=LIVE_TRACK_GLOBAL_MAX_CORNERS,
+        qualityLevel=0.01,
+        minDistance=7,
+        blockSize=7,
+    )
+    if points is None or len(points) < LIVE_TRACK_GLOBAL_MIN_POINTS:
+        return None
+
+    next_points, status, _ = cv2.calcOpticalFlowPyrLK(
+        prev_gray,
+        gray,
+        points,
+        None,
+        winSize=(31, 31),
+        maxLevel=4,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 24, 0.02),
+    )
+    if next_points is None or status is None:
+        return None
+
+    good_old = points[status.flatten() == 1]
+    good_new = next_points[status.flatten() == 1]
+    if len(good_old) < LIVE_TRACK_GLOBAL_MIN_POINTS or len(good_new) < LIVE_TRACK_GLOBAL_MIN_POINTS:
+        return None
+
+    matrix = None
+    inlier_ratio = 0.0
+    residual = None
+    if len(good_old) >= 10:
+        matrix, inliers = cv2.estimateAffinePartial2D(
+            good_old.reshape(-1, 1, 2),
+            good_new.reshape(-1, 1, 2),
+            method=cv2.RANSAC,
+            ransacReprojThreshold=4.0,
+        )
+        if matrix is not None:
+            transformed = cv2.transform(good_old.reshape(-1, 1, 2), matrix).reshape(-1, 2)
+            residual = float(np.median(np.linalg.norm(transformed - good_new.reshape(-1, 2), axis=1)))
+            if inliers is not None and len(inliers) > 0:
+                inlier_ratio = float(np.mean(inliers))
+
+    if matrix is None:
+        diff = (good_new - good_old).reshape(-1, 2)
+        delta = np.median(diff, axis=0)
+        dx = float(delta[0])
+        dy = float(delta[1])
+        residual = float(np.median(np.linalg.norm(diff - delta, axis=1)))
+    else:
+        dx = float(matrix[0, 2])
+        dy = float(matrix[1, 2])
+
+    frame_diag = max(1.0, float(np.hypot(gray.shape[1], gray.shape[0])))
+    motion_strength = float(np.hypot(dx, dy) / frame_diag)
+    feature_ratio = min(1.0, len(good_old) / LIVE_TRACK_GLOBAL_MAX_CORNERS)
+    residual_score = 1.0 - min(1.0, (residual or 0.0) / 12.0)
+    confidence = max(0.0, min(1.0, feature_ratio * 0.45 + inlier_ratio * 0.35 + residual_score * 0.2))
+
+    return {
+        "matrix": matrix,
+        "dx": dx,
+        "dy": dy,
+        "confidence": confidence,
+        "motion_strength": motion_strength,
+    }
+
+
+def apply_live_motion_to_bbox(bbox, motion, frame_w, frame_h):
+    if bbox is None or motion is None:
+        return None
+
+    matrix = motion.get("matrix")
+    if matrix is not None:
+        return corners_to_bbox(cv2.transform(bbox_corners(bbox), matrix), frame_w, frame_h)
+
+    return translate_bbox(
+        bbox,
+        float(motion.get("dx", 0.0)),
+        float(motion.get("dy", 0.0)),
+        frame_w,
+        frame_h,
+    )
+
+
+def build_tracked_live_detections(job_id, time_sec, frame, frame_w, frame_h, reset_tracking=False):
+    small_frame, scale_back = small_frame_for_tracking(frame, max_dim=LIVE_TRACK_FRAME_MAX_DIM)
+    gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+    previous_state = None
+
+    with _live_track_lock:
+        previous_state = _live_track_state.get(job_id)
+        if reset_tracking:
+            _live_track_state.pop(job_id, None)
+            previous_state = None
+
+    if previous_state is None:
+        return [], gray_small, scale_back, 0
+
+    previous_time = float(previous_state.get("time_sec", 0.0))
+    time_delta = float(time_sec) - previous_time
+    if time_delta <= 0.0 or time_delta > LIVE_TRACK_MAX_GAP_SEC:
+        return [], gray_small, scale_back, int(previous_state.get("next_track_id", 0))
+
+    previous_gray = previous_state.get("gray_small")
+    previous_tracks = previous_state.get("tracks") or []
+    global_motion = estimate_global_live_motion(previous_gray, gray_small) if previous_gray is not None else None
+    tracked = []
+
+    for track in previous_tracks:
+        previous_small_bbox = track.get("small_bbox")
+        previous_points = track.get("points")
+        previous_frame_bbox = track.get("frame_bbox")
+        if previous_small_bbox is None:
+            continue
+
+        tracking_mode = "local"
+        motion_strength = 0.0
+        updated_small_bbox = None
+        updated_points = None
+        if previous_points is not None:
+            updated_small_bbox, updated_points = optical_flow_bbox_update(
+                previous_gray,
+                gray_small,
+                previous_points,
+                previous_small_bbox,
+                small_frame.shape[1],
+                small_frame.shape[0],
+            )
+        if updated_small_bbox is None and global_motion and float(global_motion.get("confidence", 0.0)) >= LIVE_TRACK_GLOBAL_MIN_CONFIDENCE:
+            updated_small_bbox = apply_live_motion_to_bbox(
+                previous_small_bbox,
+                global_motion,
+                small_frame.shape[1],
+                small_frame.shape[0],
+            )
+            updated_points = seed_tracking_points(gray_small, updated_small_bbox) if updated_small_bbox is not None else None
+            tracking_mode = "global"
+            motion_strength = float(global_motion.get("motion_strength", 0.0) or 0.0)
+
+        if tracking_mode == "local" and global_motion:
+            motion_strength = float(global_motion.get("motion_strength", 0.0) or 0.0)
+
+        updated_bbox = small_bbox_to_frame_bbox(updated_small_bbox, scale_back, frame_w, frame_h) if updated_small_bbox is not None else previous_frame_bbox
+        if track["kind"] == "face":
+            search_anchor = updated_bbox or previous_frame_bbox
+            if search_anchor is not None:
+                search_factor = LIVE_TRACK_FACE_SEARCH_EXPAND if updated_bbox is not None else LIVE_TRACK_FACE_LOST_SEARCH_EXPAND
+                search_factor += min(0.85, motion_strength * 7.5)
+                refined_bbox = detect_best_face_bbox(
+                    frame,
+                    expand_bbox(search_anchor, frame_w, frame_h, search_factor),
+                    preferred_bbox=updated_bbox or previous_frame_bbox,
+                    allow_supplemental=(tracking_mode != "local" or motion_strength >= 0.025),
+                )
+                if refined_bbox is not None:
+                    updated_bbox = refined_bbox
+                    updated_small_bbox = frame_bbox_to_small_bbox(
+                        updated_bbox,
+                        scale_back,
+                        small_frame.shape[1],
+                        small_frame.shape[0],
+                    )
+                    if updated_small_bbox is not None:
+                        updated_points = seed_tracking_points(gray_small, updated_small_bbox)
+        if updated_bbox is None:
+            continue
+        if updated_small_bbox is None:
+            updated_small_bbox = frame_bbox_to_small_bbox(
+                updated_bbox,
+                scale_back,
+                small_frame.shape[1],
+                small_frame.shape[0],
+            )
+        normalized = normalize_bbox(updated_bbox, frame_w, frame_h)
+        if normalized is None:
+            continue
+
+        tracked.append({
+            "kind": track["kind"],
+            "label": track["label"],
+            "personId": track.get("personId"),
+            "objectClass": track.get("objectClass"),
+            "confidence": round(max(LIVE_TRACK_KEEP_CONFIDENCE, float(track.get("confidence", 0.0)) * LIVE_TRACK_DECAY), 4),
+            "trackId": track["track_id"],
+            "trackingMode": tracking_mode,
+            "motionStrength": round(motion_strength, 6),
+            **normalized,
+        })
+
+    return tracked, gray_small, scale_back, int(previous_state.get("next_track_id", 0))
+
+
+def merge_live_tracked_detections(job_id, detections, tracked_detections, gray_small, scale_back, frame_w, frame_h, time_sec):
+    pairs = []
+    used_detections = set()
+    used_tracks = set()
+
+    for track_idx, track_det in enumerate(tracked_detections):
+        for det_idx, detection in enumerate(detections):
+            score = live_track_match_score(track_det, detection)
+            if score is None:
+                continue
+            pairs.append((score, track_idx, det_idx))
+
+    pairs.sort(key=lambda item: item[0], reverse=True)
+    merged = []
+    next_track_id = 0
+    with _live_track_lock:
+        previous_state = _live_track_state.get(job_id)
+        next_track_id = int((previous_state or {}).get("next_track_id", 0))
+
+    for _, track_idx, det_idx in pairs:
+        if track_idx in used_tracks or det_idx in used_detections:
+            continue
+        used_tracks.add(track_idx)
+        used_detections.add(det_idx)
+        merged.append({
+            **blend_detection_boxes(tracked_detections[track_idx], detections[det_idx]),
+            "trackId": tracked_detections[track_idx]["trackId"],
+        })
+
+    for det_idx, detection in enumerate(detections):
+        if det_idx in used_detections:
+            continue
+        merged.append({
+            **detection,
+            "trackId": f"{job_id}:{next_track_id}",
+        })
+        next_track_id += 1
+
+    for track_idx, track_det in enumerate(tracked_detections):
+        if track_idx in used_tracks:
+            continue
+        if float(track_det.get("confidence", 0.0)) < LIVE_TRACK_KEEP_CONFIDENCE:
+            continue
+        merged.append(track_det)
+
+    next_tracks = []
+    for detection in merged:
+        bbox = denormalize_bbox(detection, frame_w, frame_h)
+        if bbox is None:
+            continue
+        small_bbox = frame_bbox_to_small_bbox(bbox, scale_back, gray_small.shape[1], gray_small.shape[0])
+        points = seed_tracking_points(gray_small, small_bbox) if small_bbox is not None else None
+        next_tracks.append({
+            "track_id": detection["trackId"],
+            "kind": detection["kind"],
+            "label": detection["label"],
+            "personId": detection.get("personId"),
+            "objectClass": detection.get("objectClass"),
+            "confidence": float(detection.get("confidence", 0.0)),
+            "frame_bbox": bbox,
+            "small_bbox": small_bbox,
+            "points": points,
+        })
+
+    with _live_track_lock:
+        _live_track_state[job_id] = {
+            "time_sec": float(time_sec),
+            "gray_small": gray_small,
+            "tracks": next_tracks,
+            "next_track_id": next_track_id,
+        }
+
+    return merged
 
 
 def merge_temporal_detections(detections, requested_time):
@@ -264,16 +642,17 @@ def live_redaction_detect():
     if not job:
         return jsonify({"error": "job not found"}), 404
 
-    if job["status"] not in ("ready",):
+    if not job.get("video_path"):
         return jsonify({
-            "error": "job is not ready for live redaction detection",
-            "status": job["status"],
+            "error": "job has no local source video available for live redaction",
+            "status": job.get("status"),
         }), 409
 
     try:
         time_sec = float(data.get("time_sec", request.form.get("time_sec", 0.0)) or 0.0)
     except (TypeError, ValueError):
         time_sec = 0.0
+    reset_tracking = str(data.get("reset_tracking", request.form.get("reset_tracking", "false"))).lower() in ("true", "1", "yes")
 
     include_faces = str(data.get("include_faces", request.form.get("include_faces", "true"))).lower() not in ("false", "0", "no")
     include_objects = str(data.get("include_objects", request.form.get("include_objects", "true"))).lower() not in ("false", "0", "no")
@@ -290,6 +669,11 @@ def live_redaction_detect():
     if not isinstance(person_ids, list):
         person_ids = []
     person_ids = [str(item).strip() for item in person_ids if str(item).strip()]
+    if person_ids and job.get("status") not in ("ready",):
+        return jsonify({
+            "error": "saved face identities are still being prepared for this video",
+            "status": job.get("status"),
+        }), 409
 
     object_classes = data.get("object_classes")
     if object_classes is None:
@@ -313,7 +697,10 @@ def live_redaction_detect():
     except (TypeError, ValueError):
         face_confidence = 0.28
 
-    sample_offsets = (-0.12, -0.06, 0.0, 0.06, 0.12) if person_ids else (-0.10, 0.0, 0.10)
+    # Use the same denser temporal sampling for all live detection requests so
+    # the frontend receives a steadier signal, even before a saved detection job
+    # has been loaded in the editor.
+    sample_offsets = (-0.12, -0.06, 0.0, 0.06, 0.12)
     sample_times = []
     for offset in sample_offsets:
         ts = max(0.0, time_sec + offset)
@@ -406,6 +793,24 @@ def live_redaction_detect():
         object_detection_error = get_object_detection_error()
 
     detections = merge_temporal_detections(detections, time_sec)
+    tracked_detections, gray_small, scale_back, _ = build_tracked_live_detections(
+        job_id,
+        time_sec,
+        frame,
+        frame_w,
+        frame_h,
+        reset_tracking=reset_tracking,
+    )
+    detections = merge_live_tracked_detections(
+        job_id,
+        detections,
+        tracked_detections,
+        gray_small,
+        scale_back,
+        frame_w,
+        frame_h,
+        time_sec,
+    )
 
     return jsonify({
         "status": "ready",

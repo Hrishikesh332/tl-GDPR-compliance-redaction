@@ -338,6 +338,58 @@ type SearchSessionResult = {
   results: SearchVideoResult[]
 }
 
+function getEntityMonogram(name: string): string {
+  const trimmed = name.trim()
+  return trimmed ? trimmed.charAt(0).toUpperCase() : '?'
+}
+
+function SearchEntityChip({
+  entity,
+  variant = 'sidebar',
+  showPrefix = false,
+}: {
+  entity: SearchSessionEntity
+  variant?: 'sidebar' | 'timeline'
+  showPrefix?: boolean
+}) {
+  const isTimeline = variant === 'timeline'
+  const label = showPrefix ? `Entity: ${entity.name}` : entity.name
+
+  return (
+    <div
+      className={isTimeline
+        ? 'inline-flex max-w-[12rem] items-center gap-1.5 rounded-full border border-white/12 bg-black/28 px-1.5 py-1 shadow-[0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-sm'
+        : 'inline-flex items-center gap-2 rounded-full border border-border bg-card px-2.5 py-1.5'}
+      style={isTimeline ? { opacity: 0.84 } : undefined}
+    >
+      <div
+        className={isTimeline
+          ? 'h-5 w-5 shrink-0 overflow-hidden rounded-full border border-white/12 bg-white/10'
+          : 'h-8 w-8 shrink-0 overflow-hidden rounded-full border border-border bg-surface'}
+      >
+        {entity.previewUrl ? (
+          <img
+            src={entity.previewUrl}
+            alt={entity.name}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <div
+            className={isTimeline
+              ? 'flex h-full w-full items-center justify-center text-[9px] font-semibold text-white/78'
+              : 'flex h-full w-full items-center justify-center text-[11px] font-medium text-text-tertiary'}
+          >
+            {getEntityMonogram(entity.name)}
+          </div>
+        )}
+      </div>
+      <span className={isTimeline ? 'truncate text-[10px] font-medium text-white/88' : 'text-xs text-text-primary'}>
+        {label}
+      </span>
+    </div>
+  )
+}
+
 type VideoViewport = {
   left: number
   top: number
@@ -378,22 +430,27 @@ const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
   { id: 'captions', label: 'Analyze/Transcript', iconUrl: analyzeIconUrl },
 ]
 
-const LIVE_DETECTION_POLL_MS = 200
-const LIVE_DETECTION_HOLD_MS = 520
+const LIVE_DETECTION_POLL_MS = 120
+const LIVE_DETECTION_HOLD_MS = 720
 const LIVE_IDENTIFIED_FACE_HOLD_MS = 1200
 const LIVE_FACE_PADDING = 0.36
 const LIVE_OBJECT_PADDING = 0.08
-const LIVE_DETECTION_SMOOTHING = 0.42
+const LIVE_DETECTION_SMOOTHING = 0.34
 const LIVE_DETECTION_VELOCITY_BLEND = 0.58
+const LIVE_GENERIC_STICKY_ALPHA = 0.22
+const LIVE_GENERIC_MAJOR_SHIFT_ALPHA = 0.72
+const LIVE_GENERIC_MINOR_SHIFT_DISTANCE = 0.028
+const LIVE_GENERIC_MAJOR_SHIFT_DISTANCE = 0.16
+const LIVE_GENERIC_MAJOR_SHIFT_SIZE_RATIO = 0.5
 const LIVE_FACE_STICKY_ALPHA = 0.18
 const LIVE_FACE_MAJOR_SHIFT_ALPHA = 0.82
 const LIVE_FACE_MINOR_SHIFT_DISTANCE = 0.035
 const LIVE_FACE_MAJOR_SHIFT_DISTANCE = 0.18
 const LIVE_FACE_MAJOR_SHIFT_SIZE_RATIO = 0.45
-const LIVE_FACE_MAX_VELOCITY = 0.95
-const LIVE_OBJECT_MAX_VELOCITY = 1.3
-const LIVE_SIZE_MAX_VELOCITY = 1.1
-const LIVE_PREDICTION_MAX_LEAD_SEC = 0.28
+const LIVE_FACE_MAX_VELOCITY = 1.45
+const LIVE_OBJECT_MAX_VELOCITY = 1.8
+const LIVE_SIZE_MAX_VELOCITY = 1.3
+const LIVE_PREDICTION_MAX_LEAD_SEC = 0.26
 const LIVE_PREDICTION_MAX_LAG_SEC = 0.08
 // Hide the audio waveform so the lower lane can focus on entity-search matches.
 const SHOW_AUDIO_WAVEFORM = false
@@ -436,6 +493,7 @@ type DetectionItem = {
 
 type LiveRedactionDetection = {
   id: string
+  trackId?: string | null
   kind: 'face' | 'object'
   label: string
   confidence: number
@@ -500,8 +558,10 @@ function liveDetectionCenterDistance(a: LiveRedactionDetection, b: LiveRedaction
 }
 
 function liveDetectionTrackKey(detection: LiveRedactionDetection): string | null {
+  if (detection.trackId) return `track:${detection.trackId}`
   if (detection.kind === 'face' && detection.personId) return `face:${detection.personId}`
-  if (detection.kind === 'object' && detection.objectClass) return `object:${detection.objectClass}`
+  // Object class is a selection group, not a stable track identity. Multiple
+  // objects can share the same label, so matching them by class causes jumps.
   return null
 }
 
@@ -517,6 +577,10 @@ function liveDetectionSizeChangeRatio(a: LiveRedactionDetection, b: LiveRedactio
     Math.abs(b.width - a.width) / widthBase,
     Math.abs(b.height - a.height) / heightBase,
   )
+}
+
+function liveDetectionMotionMagnitude(detection: LiveRedactionDetection): number {
+  return Math.hypot(detection.velocityX ?? 0, detection.velocityY ?? 0)
 }
 
 function getLiveDetectionHoldMs(detection: LiveRedactionDetection): number {
@@ -612,6 +676,48 @@ function predictLiveDetection(
   }
 }
 
+function getLiveDetectionMatchScore(
+  previousDetection: LiveRedactionDetection,
+  anchorDetection: LiveRedactionDetection,
+  candidateDetection: LiveRedactionDetection,
+): number | null {
+  if (candidateDetection.kind !== previousDetection.kind) return null
+
+  const previousTrackKey = liveDetectionTrackKey(previousDetection)
+  const candidateTrackKey = liveDetectionTrackKey(candidateDetection)
+  if (previousTrackKey && candidateTrackKey && previousTrackKey !== candidateTrackKey) return null
+  if (candidateDetection.kind === 'object' && candidateDetection.label !== previousDetection.label) return null
+  if (
+    candidateDetection.kind === 'face' &&
+    previousTrackKey === null &&
+    previousDetection.label !== 'Face' &&
+    candidateDetection.label !== 'Face' &&
+    candidateDetection.label !== previousDetection.label
+  ) {
+    return null
+  }
+
+  const iou = liveDetectionIou(anchorDetection, candidateDetection)
+  const distance = liveDetectionCenterDistance(anchorDetection, candidateDetection)
+  const sizeChangeRatio = liveDetectionSizeChangeRatio(anchorDetection, candidateDetection)
+  const motionAllowance = Math.min(
+    previousTrackKey ? 0.14 : 0.08,
+    liveDetectionMotionMagnitude(previousDetection) * 0.09,
+  )
+  const maxDistance = (previousTrackKey ? 0.34 : (candidateDetection.kind === 'face' ? 0.15 : 0.18)) + motionAllowance
+
+  if (iou < 0.04 && distance > maxDistance) return null
+  if (sizeChangeRatio > 1.15 && distance > 0.09 && iou < 0.08) return null
+
+  return (
+    (previousTrackKey && previousTrackKey === candidateTrackKey ? 10 : 0)
+    + iou * 5.2
+    - distance * 1.35
+    - sizeChangeRatio * 0.35
+    + Math.min(1, Math.max(0, candidateDetection.confidence || 0)) * 0.15
+  )
+}
+
 function stabilizeLiveDetections(
   previous: LiveRedactionDetection[],
   incoming: LiveRedactionDetection[],
@@ -628,43 +734,38 @@ function stabilizeLiveDetections(
     velocityHeight: 0,
   }))
   const next: LiveRedactionDetection[] = []
-  const used = new Set<number>()
+  const predictedPrevious = previous.map((detection) => predictLiveDetection(detection, sourceTime))
+  const candidatePairs: Array<{ previousIdx: number; candidateIdx: number; score: number }> = []
+  const assignedPrevious = new Set<number>()
+  const usedCandidates = new Set<number>()
+  const assignedCandidateByPrevious = new Map<number, number>()
 
-  for (const previousDetection of previous) {
-    let bestIdx = -1
-    let bestScore = -1e9
-    const previousTrackKey = liveDetectionTrackKey(previousDetection)
-
-    for (let idx = 0; idx < prepared.length; idx += 1) {
-      if (used.has(idx) || prepared[idx].kind !== previousDetection.kind) continue
-      const candidateTrackKey = liveDetectionTrackKey(prepared[idx])
-      if (previousTrackKey && candidateTrackKey && previousTrackKey !== candidateTrackKey) continue
-      if (prepared[idx].kind === 'object' && prepared[idx].label !== previousDetection.label) continue
-      if (
-        prepared[idx].kind === 'face' &&
-        previousTrackKey === null &&
-        previousDetection.label !== 'Face' &&
-        prepared[idx].label !== 'Face' &&
-        prepared[idx].label !== previousDetection.label
-      ) {
-        continue
-      }
-      const iou = liveDetectionIou(previousDetection, prepared[idx])
-      const distance = liveDetectionCenterDistance(previousDetection, prepared[idx])
-      const maxDistance = previousTrackKey ? 0.3 : (prepared[idx].kind === 'face' ? 0.16 : 0.22)
-      if (iou < 0.05 && distance > maxDistance) continue
-      const score = (previousTrackKey && previousTrackKey === candidateTrackKey ? 8 : 0) + iou * 4 - distance
-      if (score > bestScore) {
-        bestScore = score
-        bestIdx = idx
-      }
+  for (let previousIdx = 0; previousIdx < previous.length; previousIdx += 1) {
+    for (let candidateIdx = 0; candidateIdx < prepared.length; candidateIdx += 1) {
+      const score = getLiveDetectionMatchScore(previous[previousIdx], predictedPrevious[previousIdx], prepared[candidateIdx])
+      if (score === null) continue
+      candidatePairs.push({ previousIdx, candidateIdx, score })
     }
+  }
 
-    if (bestIdx >= 0) {
-      used.add(bestIdx)
-      const matchedDetection = prepared[bestIdx]
-      const distance = liveDetectionCenterDistance(previousDetection, matchedDetection)
-      const sizeChangeRatio = liveDetectionSizeChangeRatio(previousDetection, matchedDetection)
+  candidatePairs.sort((a, b) => b.score - a.score)
+
+  for (const pair of candidatePairs) {
+    if (assignedPrevious.has(pair.previousIdx) || usedCandidates.has(pair.candidateIdx)) continue
+    assignedPrevious.add(pair.previousIdx)
+    usedCandidates.add(pair.candidateIdx)
+    assignedCandidateByPrevious.set(pair.previousIdx, pair.candidateIdx)
+  }
+
+  for (let previousIdx = 0; previousIdx < previous.length; previousIdx += 1) {
+    const previousDetection = previous[previousIdx]
+    const anchorDetection = predictedPrevious[previousIdx]
+    const matchedIdx = assignedCandidateByPrevious.get(previousIdx)
+
+    if (matchedIdx !== undefined) {
+      const matchedDetection = prepared[matchedIdx]
+      const distance = liveDetectionCenterDistance(anchorDetection, matchedDetection)
+      const sizeChangeRatio = liveDetectionSizeChangeRatio(anchorDetection, matchedDetection)
       const trackKey = liveDetectionTrackKey(previousDetection)
 
       let alpha = LIVE_DETECTION_SMOOTHING
@@ -674,12 +775,18 @@ function stabilizeLiveDetections(
           : distance >= LIVE_FACE_MAJOR_SHIFT_DISTANCE || sizeChangeRatio >= LIVE_FACE_MAJOR_SHIFT_SIZE_RATIO
             ? LIVE_FACE_MAJOR_SHIFT_ALPHA
             : LIVE_DETECTION_SMOOTHING
+      } else {
+        alpha = distance <= LIVE_GENERIC_MINOR_SHIFT_DISTANCE && sizeChangeRatio <= 0.16
+          ? LIVE_GENERIC_STICKY_ALPHA
+          : distance >= LIVE_GENERIC_MAJOR_SHIFT_DISTANCE || sizeChangeRatio >= LIVE_GENERIC_MAJOR_SHIFT_SIZE_RATIO
+            ? LIVE_GENERIC_MAJOR_SHIFT_ALPHA
+            : LIVE_DETECTION_SMOOTHING
       }
 
       next.push({
         ...withLiveDetectionVelocity(
           previousDetection,
-          smoothLiveDetection(previousDetection, matchedDetection, alpha),
+          smoothLiveDetection(anchorDetection, matchedDetection, alpha),
         ),
         id: previousDetection.id,
       })
@@ -698,7 +805,7 @@ function stabilizeLiveDetections(
   }
 
   for (let idx = 0; idx < prepared.length; idx += 1) {
-    if (!used.has(idx)) {
+    if (!usedCandidates.has(idx)) {
       next.push({
         ...prepared[idx],
         id: getStableLiveDetectionId(prepared[idx]),
@@ -857,10 +964,6 @@ function drawCanvasBlurRegion(
   const accentColor = isFace ? '#ff5252' : '#00dc82'
   const outerLineWidth = Math.max(4, Math.round(Math.min(dw, dh) * 0.05))
   const innerLineWidth = Math.max(2, Math.round(outerLineWidth * 0.45))
-  const label = isFace ? (detection.label === 'Face' ? 'FACE' : detection.label.toUpperCase()) : detection.label.toUpperCase()
-  const labelFontSize = Math.max(11, Math.min(18, Math.round(Math.min(dw, dh) * 0.16)))
-  const labelPaddingX = 8
-  const labelPaddingY = 5
 
   ctx.save()
   ctx.fillStyle = isFace ? 'rgba(255, 82, 82, 0.10)' : 'rgba(0, 220, 130, 0.10)'
@@ -871,17 +974,6 @@ function drawCanvasBlurRegion(
   ctx.lineWidth = innerLineWidth
   ctx.strokeStyle = accentColor
   ctx.strokeRect(dx, dy, dw, dh)
-
-  ctx.font = `700 ${labelFontSize}px ui-sans-serif, system-ui, -apple-system, sans-serif`
-  const labelMetrics = ctx.measureText(label)
-  const labelWidth = Math.min(dw, labelMetrics.width + labelPaddingX * 2)
-  const labelHeight = labelFontSize + labelPaddingY * 2
-  const labelX = dx
-  const labelY = Math.max(0, dy - labelHeight)
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.92)'
-  ctx.fillRect(labelX, labelY, labelWidth, labelHeight)
-  ctx.fillStyle = accentColor
-  ctx.fillText(label, labelX + labelPaddingX, labelY + labelHeight - labelPaddingY - 1)
   ctx.restore()
 }
 
@@ -1029,7 +1121,7 @@ export default function VideoEditorPage() {
   const effectiveStreamUrl = exportRedactDownloadUrl || streamUrl
   const useHls = effectiveStreamUrl && isHlsUrl(effectiveStreamUrl) && Hls.isSupported()
   const liveRedactionReady = liveRedactionEnabled && !!streamUrl && !exportRedactDownloadUrl
-  const liveRedactionActive = liveRedactionReady && hasRunDetection
+  const liveRedactionActive = liveRedactionReady
 
   useEffect(() => {
     setDetectionJobId(null)
@@ -1572,7 +1664,7 @@ export default function VideoEditorPage() {
     setDetectionError(null)
     setDetectionLoading(true)
     try {
-      const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}`)
+      const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?ensure=true`)
       const data = await r.json().catch(() => ({}))
       const jobId = r.ok && data.job_id ? String(data.job_id) : ''
 
@@ -1690,7 +1782,7 @@ export default function VideoEditorPage() {
       throw new Error('Video not loaded.')
     }
 
-    const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}`)
+    const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?ensure=true`)
     if (!r.ok) {
       const err = await r.json().catch(() => ({}))
       throw new Error((err as { error?: string }).error || 'No local processing job found for this video.')
@@ -1703,7 +1795,7 @@ export default function VideoEditorPage() {
     return data.job_id as string
   }, [detectionJobId, videoId])
 
-  const requestLiveRedaction = useCallback(async (requestedTime: number, options?: { force?: boolean }) => {
+  const requestLiveRedaction = useCallback(async (requestedTime: number, options?: { force?: boolean; resetTracking?: boolean }) => {
     if (!liveRedactionActive || !effectiveStreamUrl) return
     if (!Number.isFinite(requestedTime) || requestedTime < 0) return
 
@@ -1729,6 +1821,7 @@ export default function VideoEditorPage() {
         body: JSON.stringify({
           job_id: jobId,
           time_sec: requestedTime,
+          reset_tracking: !!options?.resetTracking,
           include_faces: !hasRunDetection || selectedFacePersonIds.length > 0,
           include_objects: !hasRunDetection || selectedObjectClasses.length > 0,
           person_ids: hasRunDetection ? selectedFacePersonIds : undefined,
@@ -1783,11 +1876,30 @@ export default function VideoEditorPage() {
     }
   }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionActive, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
 
-  const syncPausedFrameRedaction = useCallback((force = false) => {
+  const syncLiveRedactionFrame = useCallback((options?: { force?: boolean; clearDetections?: boolean; resetTracking?: boolean; time?: number }) => {
+    if (!liveRedactionActive || !effectiveStreamUrl) return
+
     const video = videoRef.current
-    if (!video || !video.paused) return
-    requestLiveRedaction(video.currentTime ?? currentTime, force ? { force: true } : undefined)
-  }, [currentTime, requestLiveRedaction])
+    const targetTime = options?.time ?? video?.currentTime ?? currentTime
+    if (!Number.isFinite(targetTime) || targetTime < 0) return
+
+    liveRedactionLastResolvedTimeRef.current = null
+
+    // When the user jumps around the timeline, ignore stale in-flight results
+    // so the overlay always re-locks to the newly requested frame.
+    if (liveRedactionInFlightRef.current) {
+      liveRedactionRequestIdRef.current += 1
+    }
+
+    if (options?.clearDetections) {
+      setLiveRedactionDetections([])
+    }
+
+    requestLiveRedaction(targetTime, {
+      force: !!options?.force,
+      resetTracking: !!options?.resetTracking,
+    })
+  }, [currentTime, effectiveStreamUrl, liveRedactionActive, requestLiveRedaction])
 
   const buildCustomRegionPayload = useCallback((regions: TrackingRegion[]) => (
     regions.map((r) => ({
@@ -1871,13 +1983,17 @@ export default function VideoEditorPage() {
   useEffect(() => {
     if (!liveRedactionActive || !effectiveStreamUrl || !isPlaying) return
 
+    const pollMs = playbackRate > 1
+      ? Math.max(90, Math.round(LIVE_DETECTION_POLL_MS / playbackRate))
+      : LIVE_DETECTION_POLL_MS
+
     requestLiveRedaction(videoRef.current?.currentTime ?? 0)
     const intervalId = window.setInterval(() => {
       requestLiveRedaction(videoRef.current?.currentTime ?? 0)
-    }, LIVE_DETECTION_POLL_MS)
+    }, pollMs)
 
     return () => window.clearInterval(intervalId)
-  }, [effectiveStreamUrl, isPlaying, liveRedactionActive, requestLiveRedaction])
+  }, [effectiveStreamUrl, isPlaying, liveRedactionActive, playbackRate, requestLiveRedaction])
 
   useEffect(() => {
     if (!trackingRegions.length) {
@@ -1958,19 +2074,19 @@ export default function VideoEditorPage() {
         </blockquote>
       ),
       h1: ({ children }: { children?: React.ReactNode }) => (
-        <h1 className="text-sm font-semibold mt-2 mb-1">{withTimestampLinks(children, seekToTime)}</h1>
+        <h1 className="text-base font-semibold mt-2 mb-1">{withTimestampLinks(children, seekToTime)}</h1>
       ),
       h2: ({ children }: { children?: React.ReactNode }) => (
-        <h2 className="text-xs font-semibold mt-2 mb-1">{withTimestampLinks(children, seekToTime)}</h2>
+        <h2 className="text-sm font-semibold mt-2 mb-1">{withTimestampLinks(children, seekToTime)}</h2>
       ),
       h3: ({ children }: { children?: React.ReactNode }) => (
-        <h3 className="text-xs font-medium mt-1.5 mb-0.5">{withTimestampLinks(children, seekToTime)}</h3>
+        <h3 className="text-sm font-medium mt-1.5 mb-0.5">{withTimestampLinks(children, seekToTime)}</h3>
       ),
       code: ({ children, className }: { children?: React.ReactNode; className?: string }) => (
-        <code className={className ?? 'bg-surface px-1 py-0.5 rounded text-[11px]'}>{children}</code>
+        <code className={className ?? 'bg-surface px-1 py-0.5 rounded text-xs'}>{children}</code>
       ),
       pre: ({ children }: { children?: React.ReactNode }) => (
-        <pre className="bg-surface rounded p-2 my-1.5 overflow-x-auto text-[11px] whitespace-pre-wrap break-words">
+        <pre className="bg-surface rounded p-2 my-1.5 overflow-x-auto text-xs whitespace-pre-wrap break-words">
           {children}
         </pre>
       ),
@@ -1984,7 +2100,7 @@ export default function VideoEditorPage() {
   )
 
   const markdownWrapClass =
-    'text-xs text-text-secondary leading-relaxed [&_*]:text-inherit [&_*]:text-xs [&_code]:bg-surface [&_code]:px-1 [&_code]:rounded [&_pre]:overflow-x-auto'
+    'text-sm text-text-secondary leading-relaxed [&_*]:text-inherit [&_*]:text-sm [&_code]:bg-surface [&_code]:px-1 [&_code]:rounded [&_code]:text-xs [&_pre]:overflow-x-auto [&_pre]:text-xs'
 
   useEffect(() => {
     if (!exportMenuOpen) return
@@ -2345,6 +2461,11 @@ export default function VideoEditorPage() {
     () => (searchSessionResult?.entities || []).filter((entity) => entity?.id && entity?.name),
     [searchSessionResult]
   )
+  const visibleTimelineSearchEntities = useMemo(
+    () => searchEntities.slice(0, 3),
+    [searchEntities]
+  )
+  const hiddenTimelineSearchEntityCount = Math.max(0, searchEntities.length - visibleTimelineSearchEntities.length)
   const visibleLiveRedactionDetections = useMemo(() => {
     const now = Date.now()
     return liveRedactionDetections.filter((detection) => {
@@ -2650,7 +2771,7 @@ export default function VideoEditorPage() {
 
               <div className="rounded-lg border border-border bg-card px-3 py-2.5 space-y-3 min-w-0 overflow-hidden">
                 <p className="text-xs text-text-secondary leading-relaxed break-words">
-                  Live blur now uses per-frame detection only. Click a blurred face or object in the player to include or exclude it from redaction.
+                  Live blur now uses per-frame detection automatically. Use Detect only if you want the saved face and object list for manual include or exclude controls.
                 </p>
                 <div className="space-y-2 border-t border-border pt-3 min-w-0">
                   <span className="text-[11px] font-medium uppercase tracking-wider text-text-tertiary">Redaction</span>
@@ -2689,18 +2810,18 @@ export default function VideoEditorPage() {
                   <span className={`text-xs font-medium ${
                     !liveRedactionReady
                       ? 'text-text-tertiary'
-                      : hasRunDetection
-                        ? 'text-accent'
-                        : 'text-text-secondary'
+                      : liveRedactionLoading
+                        ? 'text-text-secondary'
+                        : 'text-accent'
                   }`}>
-                    {!liveRedactionReady ? 'Paused' : hasRunDetection ? 'Running' : 'Click Detect'}
+                    {!liveRedactionReady ? 'Paused' : liveRedactionLoading ? 'Scanning' : 'Running'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between gap-2 min-w-0">
                   <span className="text-xs text-text-tertiary truncate min-w-0">Current frame</span>
                   <span className="text-xs text-text-primary tabular-nums shrink-0">
-                    {!hasRunDetection
-                      ? 'Not started'
+                    {!liveRedactionReady
+                      ? 'Paused'
                       : liveRedactionLoading && visibleLiveRedactionDetections.length === 0
                       ? 'Scanning...'
                       : `${visibleLiveRedactionDetections.length} blur region${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
@@ -2831,15 +2952,13 @@ export default function VideoEditorPage() {
                     onPlay={() => setIsPlaying(true)}
                     onPause={() => {
                       setIsPlaying(false)
-                      window.setTimeout(() => syncPausedFrameRedaction(true), 0)
+                      window.setTimeout(() => syncLiveRedactionFrame({ force: true }), 0)
                     }}
                     onSeeked={() => {
                       const video = videoRef.current
                       if (!video) return
                       setCurrentTime(video.currentTime)
-                      if (video.paused) {
-                        syncPausedFrameRedaction(true)
-                      }
+                      syncLiveRedactionFrame({ force: true, clearDetections: true, resetTracking: true, time: video.currentTime })
                     }}
                     onEnded={() => setIsPlaying(false)}
                     onClick={() => togglePlay()}
@@ -2874,8 +2993,9 @@ export default function VideoEditorPage() {
                         ref={liveBlurCanvasRef}
                         className="absolute inset-0 w-full h-full pointer-events-none"
                       />
-                      {visibleLiveRedactionDetections.map((detection) => {
+                      {!isPlaying && hasRunDetection && visibleLiveRedactionDetections.map((detection) => {
                         const selectionId = hasRunDetection ? getSelectionIdForLiveDetection(detection) : null
+                        if (!selectionId) return null
                         const overlayStyle = {
                           left: `${detection.x * 100}%`,
                           top: `${detection.y * 100}%`,
@@ -2887,28 +3007,18 @@ export default function VideoEditorPage() {
                           willChange: 'left, top, width, height',
                         } satisfies React.CSSProperties
 
-                        if (selectionId) {
-                          return (
-                            <button
-                              key={`live-hit-${selectionId}`}
-                              type="button"
-                              className="absolute z-20 pointer-events-auto border-2 p-0 cursor-pointer rounded-sm shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
-                              style={overlayStyle}
-                              onClick={(event) => {
-                                event.stopPropagation()
-                                toggleLiveDetectionSelection(detection)
-                              }}
-                              aria-label={`Toggle blur for ${detection.label}`}
-                              title={`Toggle blur for ${detection.label}`}
-                            />
-                          )
-                        }
-
                         return (
-                          <div
-                            key={`live-box-${detection.id}`}
-                            className="absolute z-20 pointer-events-none border-2 rounded-sm shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
+                          <button
+                            key={`live-hit-${selectionId}`}
+                            type="button"
+                            className="absolute z-20 pointer-events-auto border-2 p-0 cursor-pointer rounded-sm shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
                             style={overlayStyle}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              toggleLiveDetectionSelection(detection)
+                            }}
+                            aria-label={`Toggle blur for ${detection.label}`}
+                            title={`Toggle blur for ${detection.label}`}
                           />
                         )
                       })}
@@ -3121,6 +3231,25 @@ export default function VideoEditorPage() {
                           className="absolute inset-x-3 bottom-[9px] h-px"
                           style={{ backgroundColor: ENTITY_SEARCH_LANE_BASELINE }}
                         />
+                        {visibleTimelineSearchEntities.length > 0 && (
+                          <div className="absolute left-3 top-2 right-3 z-[4] flex items-center gap-1.5 overflow-hidden pointer-events-none">
+                            {visibleTimelineSearchEntities.map((entity) => (
+                              <SearchEntityChip
+                                key={`timeline-search-entity-${entity.id}`}
+                                entity={entity}
+                                variant="timeline"
+                              />
+                            ))}
+                            {hiddenTimelineSearchEntityCount > 0 && (
+                              <div
+                                className="inline-flex items-center rounded-full border border-white/10 bg-black/22 px-2 py-1 text-[10px] font-medium text-white/72 shadow-[0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-sm"
+                                style={{ opacity: 0.8 }}
+                              >
+                                +{hiddenTimelineSearchEntityCount} more
+                              </div>
+                            )}
+                          </div>
+                        )}
                         {searchLaneBars.length > 0 ? (
                           <>
                             <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
@@ -3278,7 +3407,7 @@ export default function VideoEditorPage() {
                         onClick={() => setOverviewTagsExpanded((e) => !e)}
                         className="w-full px-3 pt-3 pb-2 flex items-center justify-between text-left hover:bg-surface/50 transition-colors rounded-t-lg"
                       >
-                        <span className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider">Overview</span>
+                        <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Overview</span>
                         <span className="text-text-tertiary transition-transform shrink-0" style={{ transform: overviewTagsExpanded ? 'rotate(90deg)' : 'rotate(0deg)' }}>
                           <IconChevronRight className="w-4 h-4" />
                         </span>
@@ -3287,22 +3416,22 @@ export default function VideoEditorPage() {
                         <div className="px-3 pb-3 pt-0 space-y-3">
                           {summaryTags.about && (
                             <div className="space-y-1.5">
-                              <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1.5">
+                              <p className="text-xs font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1.5">
                                 <IconAbout className="w-3.5 h-3.5 opacity-70" />
                                 About
                               </p>
-                              <p className="text-xs text-text-secondary leading-relaxed">{summaryTags.about}</p>
+                              <p className="text-sm text-text-secondary leading-relaxed">{summaryTags.about}</p>
                             </div>
                           )}
                           {summaryTags.topics && summaryTags.topics.length > 0 && (
                             <div className="space-y-1.5">
-                              <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1.5">
+                              <p className="text-xs font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1.5">
                                 <IconTopics className="w-3.5 h-3.5 opacity-70" />
                                 Topics
                               </p>
                               <div className="flex flex-wrap gap-1.5">
                                 {summaryTags.topics.map((tag) => (
-                                  <span key={tag} className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-accent/15 text-accent border border-accent/30">
+                                  <span key={tag} className="inline-flex items-center px-2 py-1 rounded-md text-sm font-medium bg-accent/15 text-accent border border-accent/30">
                                     {tag}
                                   </span>
                                 ))}
@@ -3311,13 +3440,13 @@ export default function VideoEditorPage() {
                           )}
                           {summaryTags.categories && summaryTags.categories.length > 0 && (
                             <div className="space-y-1.5">
-                              <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1.5">
+                              <p className="text-xs font-medium text-text-tertiary uppercase tracking-wider flex items-center gap-1.5">
                                 <IconCategories className="w-3.5 h-3.5 opacity-70" />
                                 Categories
                               </p>
                               <div className="flex flex-wrap gap-1.5">
                                 {summaryTags.categories.map((tag) => (
-                                  <span key={tag} className="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-card border border-border text-text-secondary">
+                                  <span key={tag} className="inline-flex items-center px-2 py-1 rounded-md text-sm font-medium bg-card border border-border text-text-secondary">
                                     {tag}
                                   </span>
                                 ))}
@@ -3335,16 +3464,16 @@ export default function VideoEditorPage() {
                       <div className="rounded-lg border border-border bg-card overflow-hidden">
                         {summaryLoading ? (
                           <div className="px-3 py-2.5">
-                            <p className="text-xs text-text-tertiary">Generating overview…</p>
+                            <p className="text-sm text-text-tertiary">Generating overview…</p>
                           </div>
                         ) : (
                           <div className="px-3 py-2.5 space-y-2">
-                            <p className="text-xs text-text-tertiary">Generate a short overview of this video.</p>
+                            <p className="text-sm text-text-tertiary">Generate a short overview of this video.</p>
                             <button
                               type="button"
                               onClick={runGenerateSummary}
                               disabled={!videoId}
-                              className="w-full h-8 rounded-md text-xs font-medium bg-accent text-white border border-accent hover:bg-accent-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="w-full h-8 rounded-md text-sm font-medium bg-accent text-white border border-accent hover:bg-accent-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               Generate overview
                             </button>
@@ -3358,12 +3487,12 @@ export default function VideoEditorPage() {
                   <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                     <div className="flex-1 overflow-y-auto p-3 space-y-3">
                       {analyzeMessages.length === 0 && !analyzeLoading && (
-                        <p className="text-xs text-text-tertiary">Ask a question about this video below.</p>
+                        <p className="text-sm text-text-tertiary">Ask a question about this video below.</p>
                       )}
                       {analyzeMessages.map((msg) => (
                         <div key={msg.id} className={msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
                           <div
-                            className={`max-w-[92%] rounded-lg px-3 py-2 text-xs ${
+                            className={`max-w-[92%] rounded-lg px-3 py-2 text-sm ${
                               msg.role === 'user'
                                 ? 'bg-accent text-white'
                                 : 'bg-card border border-border text-text-secondary'
@@ -3381,7 +3510,7 @@ export default function VideoEditorPage() {
                       ))}
                       {analyzeLoading && (
                         <div className="flex justify-start">
-                          <div className="rounded-lg px-3 py-2 bg-card border border-border text-text-tertiary text-xs">
+                          <div className="rounded-lg px-3 py-2 bg-card border border-border text-text-tertiary text-sm">
                             Analyzing…
                           </div>
                         </div>
@@ -3389,7 +3518,7 @@ export default function VideoEditorPage() {
                       <div ref={analyzeChatEndRef} />
                     </div>
                     {analyzeError && (
-                      <p className="px-3 text-xs text-error shrink-0">{analyzeError}</p>
+                      <p className="px-3 text-sm text-error shrink-0">{analyzeError}</p>
                     )}
                     <div className="p-3 border-t border-border shrink-0">
                       <div className="flex gap-1.5">
@@ -3401,13 +3530,13 @@ export default function VideoEditorPage() {
                           onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && runAnalyze()}
                           placeholder="Ask about this video..."
                           disabled={!videoId}
-                          className="flex-1 h-9 rounded-md bg-surface border border-border px-3 text-xs text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent disabled:opacity-60 disabled:cursor-not-allowed"
+                          className="flex-1 h-9 rounded-md bg-surface border border-border px-3 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent disabled:opacity-60 disabled:cursor-not-allowed"
                         />
                         <div className="relative shrink-0">
                           <button
                             type="button"
                             onClick={() => setAnalyzeSuggestionsOpen((open) => !open)}
-                            className="h-9 px-2 inline-flex items-center gap-1 rounded-md bg-surface border border-border text-[11px] font-medium text-text-secondary hover:bg-card hover:text-text-primary transition-colors"
+                            className="h-9 px-2.5 inline-flex items-center gap-1 rounded-md bg-surface border border-border text-xs font-medium text-text-secondary hover:bg-card hover:text-text-primary transition-colors"
                             aria-haspopup="true"
                             aria-expanded={analyzeSuggestionsOpen}
                           >
@@ -3424,7 +3553,7 @@ export default function VideoEditorPage() {
                                     setAnalyzeQuery(suggestion)
                                     setAnalyzeSuggestionsOpen(false)
                                   }}
-                                  className="w-full px-3 py-1.5 text-left text-[11px] text-text-secondary hover:bg-card hover:text-text-primary transition-colors"
+                                  className="w-full px-3 py-1.5 text-left text-sm text-text-secondary hover:bg-card hover:text-text-primary transition-colors"
                                 >
                                   {suggestion}
                                 </button>
@@ -3466,25 +3595,10 @@ export default function VideoEditorPage() {
                             <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider">Entity</p>
                             <div className="mt-2 flex flex-wrap gap-2">
                               {searchEntities.map((entity) => (
-                                <div
+                                <SearchEntityChip
                                   key={entity.id}
-                                  className="inline-flex items-center gap-2 rounded-full border border-border bg-card px-2.5 py-1.5"
-                                >
-                                  <div className="h-8 w-8 shrink-0 overflow-hidden rounded-full border border-border bg-surface">
-                                    {entity.previewUrl ? (
-                                      <img
-                                        src={entity.previewUrl}
-                                        alt={entity.name}
-                                        className="h-full w-full object-cover"
-                                      />
-                                    ) : (
-                                      <div className="flex h-full w-full items-center justify-center text-[11px] font-medium text-text-tertiary">
-                                        {entity.name.trim().charAt(0).toUpperCase()}
-                                      </div>
-                                    )}
-                                  </div>
-                                  <span className="text-xs text-text-primary">{entity.name}</span>
-                                </div>
+                                  entity={entity}
+                                />
                               ))}
                             </div>
                           </div>
@@ -3675,7 +3789,7 @@ export default function VideoEditorPage() {
                     {detectionLoading ? 'Loading…' : 'Detect'}
                   </button>
                   <p className="text-[10px] text-text-tertiary text-center max-w-[180px]">
-                    Loads faces and objects for the current video only.
+                    Loads the saved faces and objects for this video. Live Blur works without this step.
                   </p>
                 </div>
                 </div>
