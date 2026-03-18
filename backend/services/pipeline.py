@@ -326,7 +326,7 @@ def get_job(job_id):
 
 
 def get_job_id_by_video_id(video_id):
-    """Return the best matching job_id for a video, preferring the most recent run."""
+    """Return the best explicitly-mapped job_id for a video, preferring the most recent run."""
     if not video_id:
         return None
 
@@ -354,11 +354,42 @@ def get_job_id_by_video_id(video_id):
                 candidates[jid] = manifest
     if candidates:
         return max(candidates.items(), key=lambda item: _candidate_key(item[0], item[1]))[0]
-    return recover_job_id_for_video(video_id)
+    return None
+
+
+def get_exact_job_id_by_video_id(video_id):
+    """Return a job_id only when the mapping to this video_id is explicit."""
+    if not video_id:
+        return None
+
+    def _candidate_key(job_id, source):
+        created_at = parse_iso_timestamp((source or {}).get("created_at"))
+        run_time = run_dir_mtime(job_id)
+        effective_time = created_at if created_at is not None else (run_time if run_time is not None else 0.0)
+        status = str((source or {}).get("status") or "")
+        status_rank = {
+            "ready": 3,
+            "processing": 2,
+            "failed": 1,
+        }.get(status, 0)
+        return (effective_time, status_rank, job_id)
+
+    candidates = {}
+    with _lock:
+        for jid, j in _jobs.items():
+            if j.get("twelvelabs_video_id") == video_id:
+                candidates[jid] = dict(j)
+    for jid in list_run_ids():
+        manifest = load_job_manifest(jid)
+        if manifest and manifest.get("twelvelabs_video_id") == video_id and jid not in candidates:
+            candidates[jid] = manifest
+    if candidates:
+        return max(candidates.items(), key=lambda item: _candidate_key(item[0], item[1]))[0]
+    return None
 
 
 def ensure_job_for_video(video_id, interval_sec=None):
-    job_id = get_job_id_by_video_id(video_id)
+    job_id = get_exact_job_id_by_video_id(video_id)
     if job_id:
         return job_id
 

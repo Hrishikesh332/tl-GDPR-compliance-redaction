@@ -15,6 +15,10 @@ const ANALYZE_SUGGESTIONS: string[] = [
   'Which faces should be anonymized?',
 ]
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
 function isHlsUrl(url: string): boolean {
   return /\.m3u8(\?|$)/i.test(url) || url.includes('m3u8')
 }
@@ -932,14 +936,30 @@ function drawCanvasBlurRegion(
   style: 'blur' | 'black',
   blurStrength: number,
 ) {
-  const sx = detection.x * video.videoWidth
-  const sy = detection.y * video.videoHeight
-  const sw = detection.width * video.videoWidth
-  const sh = detection.height * video.videoHeight
-  const dx = detection.x * destWidth
-  const dy = detection.y * destHeight
-  const dw = detection.width * destWidth
-  const dh = detection.height * destHeight
+  let renderX = detection.x
+  let renderY = detection.y
+  let renderWidth = detection.width
+  let renderHeight = detection.height
+
+  if (detection.kind === 'face') {
+    // Slight extra headroom keeps the face fully covered even when tracking is a touch late.
+    const expandX = detection.width * 0.06
+    const expandTop = detection.height * 0.09
+    const expandBottom = detection.height * 0.05
+    renderX = Math.max(0, detection.x - expandX)
+    renderY = Math.max(0, detection.y - expandTop)
+    renderWidth = Math.min(1 - renderX, detection.width + expandX * 2)
+    renderHeight = Math.min(1 - renderY, detection.height + expandTop + expandBottom)
+  }
+
+  const sx = renderX * video.videoWidth
+  const sy = renderY * video.videoHeight
+  const sw = renderWidth * video.videoWidth
+  const sh = renderHeight * video.videoHeight
+  const dx = renderX * destWidth
+  const dy = renderY * destHeight
+  const dw = renderWidth * destWidth
+  const dh = renderHeight * destHeight
 
   if (sw <= 1 || sh <= 1 || dw <= 1 || dh <= 1) return
 
@@ -1025,6 +1045,7 @@ export default function VideoEditorPage() {
   const [exportRedactLoading, setExportRedactLoading] = useState(false)
   const [exportRedactError, setExportRedactError] = useState<string | null>(null)
   const [exportRedactDownloadUrl, setExportRedactDownloadUrl] = useState<string | null>(null)
+  const [exportRedactFilename, setExportRedactFilename] = useState('redacted-video.mp4')
   const [trackingPreviewByRegion, setTrackingPreviewByRegion] = useState<Record<string, TrackingPreviewSample[]>>({})
   const [trackingPreviewLoading, setTrackingPreviewLoading] = useState(false)
   const [trackingPreviewError, setTrackingPreviewError] = useState<string | null>(null)
@@ -1133,10 +1154,13 @@ export default function VideoEditorPage() {
     setLiveRedactionDetections([])
     setLiveRedactionLoading(false)
     setLiveRedactionError(null)
+    setExportRedactError(null)
+    setExportRedactDownloadUrl(null)
+    setExportRedactFilename('redacted-video.mp4')
     liveRedactionPendingTimeRef.current = null
     liveRedactionRequestIdRef.current = 0
     liveRedactionLastResolvedTimeRef.current = null
-  }, [videoId, effectiveStreamUrl])
+  }, [videoId, streamUrl])
 
   useEffect(() => {
     setSummaryText(null)
@@ -1664,8 +1688,14 @@ export default function VideoEditorPage() {
     setDetectionError(null)
     setDetectionLoading(true)
     try {
-      const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?ensure=true`)
-      const data = await r.json().catch(() => ({}))
+      const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?ensure=true&exact=true`)
+      const data = await r.json().catch(() => ({})) as {
+        job_id?: string
+        status?: string
+        local_status?: string
+        created?: boolean
+        error?: string
+      }
       const jobId = r.ok && data.job_id ? String(data.job_id) : ''
 
       if (!jobId) {
@@ -1673,11 +1703,30 @@ export default function VideoEditorPage() {
         setApiDetections([])
         setExcludedFromRedactionIds([])
         setHasRunDetection(false)
-        setDetectionError('No local detection job was found for this video yet. Process this video from the dashboard first.')
+        setDetectionError(data.error || 'No local detection job was found for this video yet.')
         return
       }
 
       setDetectionJobId(jobId)
+      if (data.created || data.status !== 'ready') {
+        const startedAt = Date.now()
+        while (Date.now() - startedAt < 180000) {
+          const statusRes = await fetch(`${API_BASE}/api/index/${encodeURIComponent(jobId)}`)
+          const statusJson = await statusRes.json().catch(() => ({})) as {
+            status?: string
+            error?: string
+          }
+          if (!statusRes.ok) {
+            throw new Error(statusJson.error || 'Could not check detection status for this video.')
+          }
+          if (statusJson.status === 'ready') break
+          if (statusJson.status === 'failed') {
+            throw new Error(statusJson.error || 'Detection pipeline failed for this video.')
+          }
+          await delay(1500)
+        }
+      }
+
       const [facesRes, objectsRes] = await Promise.all([
         fetch(`${API_BASE}/api/faces/${encodeURIComponent(jobId)}`),
         fetch(`${API_BASE}/api/objects/${encodeURIComponent(jobId)}`),
@@ -1782,7 +1831,7 @@ export default function VideoEditorPage() {
       throw new Error('Video not loaded.')
     }
 
-    const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?ensure=true`)
+    const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?ensure=true&exact=true`)
     if (!r.ok) {
       const err = await r.json().catch(() => ({}))
       throw new Error((err as { error?: string }).error || 'No local processing job found for this video.')
@@ -1919,6 +1968,7 @@ export default function VideoEditorPage() {
   const exportRedacted = useCallback(async () => {
     setExportRedactError(null)
     setExportRedactDownloadUrl(null)
+    setExportRedactFilename('redacted-video.mp4')
     setExportRedactLoading(true)
     try {
       const jobId = await resolveRedactionJobId()
@@ -1954,9 +2004,13 @@ export default function VideoEditorPage() {
         const err = await res.json().catch(() => ({}))
         throw new Error((err as { error?: string }).error || res.statusText)
       }
-      const result = (await res.json()) as { download_url?: string }
+      const result = (await res.json()) as { download_url?: string; output_path?: string }
       if (result.download_url) {
         setExportRedactDownloadUrl(result.download_url.startsWith('http') ? result.download_url : `${API_BASE}${result.download_url}`)
+      }
+      if (result.output_path) {
+        const fileName = result.output_path.split('/').pop() || 'redacted-video.mp4'
+        setExportRedactFilename(fileName)
       }
       // Keep menu open so user can click "Download redacted video"
     } catch (e) {
@@ -2899,10 +2953,23 @@ export default function VideoEditorPage() {
                   {exportRedactError && (
                     <p className="px-3 py-2 text-xs text-error border-b border-border">{exportRedactError}</p>
                   )}
+                  <button
+                    type="button"
+                    className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-card transition-colors flex items-center gap-2 border-b border-border disabled:opacity-60 disabled:cursor-not-allowed"
+                    onClick={() => { void exportRedacted() }}
+                    disabled={exportRedactLoading}
+                  >
+                    <IconDownload className="w-4 h-4" />
+                    {exportRedactLoading
+                      ? 'Rendering redacted video...'
+                      : exportRedactDownloadUrl
+                        ? 'Render redacted video again'
+                        : 'Render redacted video'}
+                  </button>
                   {exportRedactDownloadUrl && (
                     <a
                       href={exportRedactDownloadUrl}
-                      download
+                      download={exportRedactFilename}
                       className="block w-full px-3 py-2 text-left text-sm text-accent hover:bg-card transition-colors flex items-center gap-2 border-b border-border"
                       onClick={() => setExportMenuOpen(false)}
                     >
@@ -2910,13 +2977,6 @@ export default function VideoEditorPage() {
                       Download redacted video
                     </a>
                   )}
-                  <button
-                    type="button"
-                    className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-card transition-colors flex items-center gap-2"
-                    onClick={() => { setExportMenuOpen(false); /* TODO: download */ }}
-                  >
-                    Download
-                  </button>
                   <button
                     type="button"
                     className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-card transition-colors flex items-center gap-2"

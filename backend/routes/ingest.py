@@ -10,6 +10,7 @@ from services.pipeline import (
     get_job,
     list_jobs,
     push_job_entities_to_twelvelabs,
+    get_exact_job_id_by_video_id,
     get_job_id_by_video_id,
     ensure_job_for_video,
 )
@@ -96,7 +97,8 @@ def jobs():
 def job_by_video(video_id):
     """Return the best matching job_id for this video (used by the editor Detect flow)."""
     ensure = request.args.get("ensure", "false").lower() in ("true", "1", "yes")
-    job_id = get_job_id_by_video_id(video_id)
+    exact = request.args.get("exact", "false").lower() in ("true", "1", "yes")
+    job_id = get_exact_job_id_by_video_id(video_id) if exact or ensure else get_job_id_by_video_id(video_id)
     created = False
     if not job_id and ensure:
         job_id = ensure_job_for_video(video_id)
