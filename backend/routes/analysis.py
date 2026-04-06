@@ -786,8 +786,9 @@ def live_redaction_detect():
         if person_ids:
             from services.detection import identify_faces_in_frame
 
+            enriched = get_enriched_faces(job_id) or {}
             selected_faces = [
-                face for face in (job.get("unique_faces") or [])
+                face for face in (job.get("unique_faces") or enriched.get("unique_faces") or [])
                 if str(face.get("person_id") or "").strip() in person_ids and face.get("encoding") is not None
             ]
             for sample_time in sample_times:

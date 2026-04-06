@@ -847,7 +847,11 @@ def redact_video(
             if auto_face_mode:
                 face_boxes = [tuple(b["bbox"]) for b in detect_face_boxes(frame)]
             else:
-                face_boxes = match_faces_in_frame(frame, face_encodings) if face_encodings else []
+                face_boxes = match_faces_in_frame(
+                    frame,
+                    face_encodings,
+                    tolerance=face_tolerance if face_tolerance is not None else 0.35,
+                ) if face_encodings else []
             obj_boxes = match_objects(frame, object_classes, conf_threshold=obj_conf) if object_classes else []
             all_boxes = face_boxes + obj_boxes
             detection_frames_processed += 1

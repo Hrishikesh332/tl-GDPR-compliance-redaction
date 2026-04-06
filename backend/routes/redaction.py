@@ -4,7 +4,7 @@ import logging
 from flask import Blueprint, request, jsonify
 
 from services.detection import ObjectDetectionUnavailable
-from services.pipeline import run_redaction, preview_redaction_tracks, get_job
+from services.pipeline import run_redaction, preview_redaction_tracks, get_job, get_enriched_faces
 
 logger = logging.getLogger("video_redaction.routes.redaction")
 
@@ -60,7 +60,8 @@ def redact():
                 face_encodings = []
 
     if person_ids and not face_encodings:
-        unique_faces = job.get("unique_faces", [])
+        enriched = get_enriched_faces(job_id) or {}
+        unique_faces = job.get("unique_faces") or enriched.get("unique_faces", [])
         face_encodings = []
         matched_names = []
         for face in unique_faces:

@@ -476,21 +476,11 @@ def detect_objects(img_bgr, conf_threshold=0.25, forensic_only=True, strict=True
 
 def match_faces_in_frame(frame_bgr, target_encodings, tolerance=0.35):
     """Match faces in a frame against target encodings.
-    Uses res10 + InsightFace supplemental for detection, ArcFace for comparison.
+    Uses the same InsightFace-first detection pipeline as the rest of the
+    product so person-specific blur stays aligned with generic face blur.
     """
     if not target_encodings:
         return []
-
-    res10_boxes = detect_faces_res10(frame_bgr, confidence_threshold=0.4)
-
-    embeddings, unmatched_insight = get_embeddings_for_boxes(frame_bgr, res10_boxes)
-
-    all_boxes = [(x1, y1, x2, y2) for (x1, y1, x2, y2, _) in res10_boxes]
-    all_embeddings = list(embeddings)
-
-    for extra in unmatched_insight:
-        all_boxes.append(tuple(extra["bbox"]))
-        all_embeddings.append(extra["embedding"])
 
     target_vecs = []
     for t in target_encodings:
@@ -499,14 +489,15 @@ def match_faces_in_frame(frame_bgr, target_encodings, tolerance=0.35):
         target_vecs.append(v / norm if norm > 0 else v)
 
     matched = []
-    for i, (x1, y1, x2, y2) in enumerate(all_boxes):
-        enc = all_embeddings[i]
+    for det in detect_faces(frame_bgr, with_encodings=True):
+        enc = det.get("encoding")
         if enc is None:
             continue
         enc_arr = np.array(enc, dtype=np.float32)
         for t_enc in target_vecs:
             sim = float(np.dot(enc_arr, t_enc))
             if sim >= (1.0 - tolerance):
+                x1, y1, x2, y2 = [int(v) for v in det.get("bbox", [])]
                 matched.append((x1, y1, x2, y2))
                 break
 
