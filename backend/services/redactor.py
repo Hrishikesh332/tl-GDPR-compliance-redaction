@@ -23,28 +23,82 @@ from utils.video import small_frame_for_tracking, reencode_mp4_to_h264
 
 logger = logging.getLogger("video_redaction.redactor")
 
+FACE_REDACTION_PAD_X_RATIO = 0.14
+FACE_REDACTION_PAD_TOP_RATIO = 0.24
+FACE_REDACTION_PAD_BOTTOM_RATIO = 0.12
+_NO_TRACKER_FACTORY = object()
+_TRACKER_FACTORY_CACHE = {}
+_TRACKER_FACTORY_LOGGED = set()
+_TRACKER_UNAVAILABLE_WARNING_EMITTED = False
 
-def create_tracker(scale_adaptive=False):
-    """Create a tracker. If scale_adaptive=True, use CSRT for better resize with motion (when available).
-    Returns None if no tracker is available (e.g. opencv-contrib not installed)."""
-    # Try CSRT (scale-adaptive), then KCF, then MOSSE (lightweight fallback)
+
+def tracker_factory_candidates(scale_adaptive=False):
+    """Return tracker constructors ordered by preference for this OpenCV build."""
+    legacy = getattr(cv2, "legacy", None)
     to_try = []
     if scale_adaptive:
-        to_try.append(("CSRT.legacy", lambda: cv2.legacy.TrackerCSRT_create()))
-        to_try.append(("CSRT", lambda: cv2.TrackerCSRT_create()))
-    to_try.append(("KCF.legacy", lambda: cv2.legacy.TrackerKCF_create()))
-    to_try.append(("KCF", lambda: cv2.TrackerKCF_create()))
-    to_try.append(("MOSSE.legacy", lambda: cv2.legacy.TrackerMOSSE_create()))
-    to_try.append(("MOSSE", lambda: cv2.TrackerMOSSE_create()))
-    for name, create in to_try:
+        if legacy is not None and hasattr(legacy, "TrackerCSRT_create"):
+            to_try.append(("CSRT.legacy", legacy.TrackerCSRT_create))
+        if hasattr(cv2, "TrackerCSRT_create"):
+            to_try.append(("CSRT", cv2.TrackerCSRT_create))
+    if legacy is not None and hasattr(legacy, "TrackerKCF_create"):
+        to_try.append(("KCF.legacy", legacy.TrackerKCF_create))
+    if hasattr(cv2, "TrackerKCF_create"):
+        to_try.append(("KCF", cv2.TrackerKCF_create))
+    if legacy is not None and hasattr(legacy, "TrackerMOSSE_create"):
+        to_try.append(("MOSSE.legacy", legacy.TrackerMOSSE_create))
+    if hasattr(cv2, "TrackerMOSSE_create"):
+        to_try.append(("MOSSE", cv2.TrackerMOSSE_create))
+    # MIL is available in more OpenCV builds than CSRT/KCF/MOSSE and is still
+    # better than repeatedly falling back to purely static tracking.
+    if legacy is not None and hasattr(legacy, "TrackerMIL_create"):
+        to_try.append(("MIL.legacy", legacy.TrackerMIL_create))
+    if hasattr(cv2, "TrackerMIL_create"):
+        to_try.append(("MIL", cv2.TrackerMIL_create))
+    return to_try
+
+
+def resolve_tracker_factory(scale_adaptive=False):
+    key = bool(scale_adaptive)
+    cached = _TRACKER_FACTORY_CACHE.get(key)
+    if cached is not None:
+        return None if cached is _NO_TRACKER_FACTORY else cached
+
+    for name, create in tracker_factory_candidates(scale_adaptive=scale_adaptive):
         try:
             t = create()
             if t is not None:
-                logger.info("Using tracker: %s for motion tracking", name)
-                return t
+                _TRACKER_FACTORY_CACHE[key] = (name, create)
+                if name not in _TRACKER_FACTORY_LOGGED:
+                    logger.info("Using tracker: %s for motion tracking", name)
+                    _TRACKER_FACTORY_LOGGED.add(name)
+                return name, create
         except (AttributeError, cv2.error, Exception):
             continue
-    logger.warning("No OpenCV tracker available (install opencv-contrib-python). Manual regions will fall back to optical-flow/static tracking.")
+
+    global _TRACKER_UNAVAILABLE_WARNING_EMITTED
+    _TRACKER_FACTORY_CACHE[key] = _NO_TRACKER_FACTORY
+    if not _TRACKER_UNAVAILABLE_WARNING_EMITTED:
+        logger.warning(
+            "No preferred OpenCV tracker was available. Tracking will fall back to optical-flow/static tracking."
+        )
+        _TRACKER_UNAVAILABLE_WARNING_EMITTED = True
+    return None
+
+
+def create_tracker(scale_adaptive=False):
+    """Create a tracker instance using the best constructor available in this OpenCV build."""
+    resolved = resolve_tracker_factory(scale_adaptive=scale_adaptive)
+    if resolved is None:
+        return None
+
+    _name, create = resolved
+    try:
+        return create()
+    except (AttributeError, cv2.error, Exception):
+        # If a cached constructor later becomes unusable, clear it so future calls
+        # can probe lower-priority trackers instead of retrying the same one forever.
+        _TRACKER_FACTORY_CACHE.pop(bool(scale_adaptive), None)
     return None
 
 
@@ -83,6 +137,31 @@ def expand_bbox(bbox, frame_w, frame_h, factor):
     if x2 <= x1 or y2 <= y1:
         return bbox
     return (x1, y1, x2, y2)
+
+
+def expand_face_redaction_bbox(
+    bbox,
+    frame_w,
+    frame_h,
+    pad_x_ratio=FACE_REDACTION_PAD_X_RATIO,
+    pad_top_ratio=FACE_REDACTION_PAD_TOP_RATIO,
+    pad_bottom_ratio=FACE_REDACTION_PAD_BOTTOM_RATIO,
+):
+    if not bbox:
+        return bbox
+
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    expanded = (
+        max(0, int(round(x1 - box_w * pad_x_ratio))),
+        max(0, int(round(y1 - box_h * pad_top_ratio))),
+        min(frame_w, int(round(x2 + box_w * pad_x_ratio))),
+        min(frame_h, int(round(y2 + box_h * pad_bottom_ratio))),
+    )
+    if expanded[2] <= expanded[0] or expanded[3] <= expanded[1]:
+        return bbox
+    return expanded
 
 
 def bbox_area(bbox):
@@ -390,8 +469,19 @@ def tracker_roi_to_frame_bbox(x, y, tw, th, scale_back, frame_w, frame_h, min_si
     return (x1, y1, x2, y2)
 
 
+def normalize_object_class_name(value):
+    return str(value or "").strip().lower()
+
+
 def match_objects(frame_bgr, target_classes, conf_threshold=0.25):
     if not target_classes:
+        return []
+    normalized_targets = {
+        normalize_object_class_name(name)
+        for name in target_classes
+        if normalize_object_class_name(name)
+    }
+    if not normalized_targets:
         return []
     from services.detection import get_obj_model
     model = get_obj_model()
@@ -403,7 +493,7 @@ def match_objects(frame_bgr, target_classes, conf_threshold=0.25):
         for box in r.boxes:
             cls_id = int(box.cls[0])
             name = model.names[cls_id]
-            if name in target_classes:
+            if normalize_object_class_name(name) in normalized_targets:
                 matched.append(tuple(box.xyxy[0].tolist()))
     return matched
 
@@ -437,10 +527,194 @@ def bbox_to_normalized_region(bbox, frame_w, frame_h):
     }
 
 
+def initialize_auto_redaction_track(small_frame, gray_small, bbox, scale_back, kind):
+    tracker = None
+    try:
+        tracker = create_initialized_tracker(small_frame, bbox, scale_back, scale_adaptive=True)
+    except (cv2.error, AttributeError, Exception):
+        tracker = None
+
+    small_bbox = frame_bbox_to_small_bbox(
+        bbox,
+        scale_back,
+        small_frame.shape[1],
+        small_frame.shape[0],
+    )
+    return {
+        "kind": kind,
+        "tracker": tracker,
+        "last_bbox": bbox,
+        "smoothed_bbox": bbox,
+        "small_bbox": small_bbox,
+        "points": seed_tracking_points(gray_small, small_bbox) if small_bbox is not None else None,
+        "fail_count": 0,
+    }
+
+
+def update_auto_redaction_track(
+    track,
+    frame,
+    small_frame,
+    gray_small,
+    prev_gray_small,
+    scale_back,
+    frame_w,
+    frame_h,
+    periodic_reinit=False,
+    reinit_after_fails=5,
+):
+    tracker = track.get("tracker")
+    kind = str(track.get("kind") or "object").strip().lower()
+    last_bbox = track.get("last_bbox")
+    prev_smoothed = track.get("smoothed_bbox") or last_bbox
+    prev_small_bbox = track.get("small_bbox")
+    prev_points = track.get("points")
+    fail_count = int(track.get("fail_count", 0) or 0)
+    small_h, small_w = small_frame.shape[:2]
+
+    tracker_bbox = None
+    tracker_ok = False
+    optical_bbox = None
+    optical_points = None
+    optical_ok = False
+
+    if tracker is not None and periodic_reinit and last_bbox:
+        try:
+            refreshed_tracker = create_initialized_tracker(
+                small_frame,
+                expand_bbox(last_bbox, frame_w, frame_h, TRACKER_REINIT_BBOX_EXPAND_FACTOR),
+                scale_back,
+                scale_adaptive=True,
+            )
+            if refreshed_tracker is not None:
+                tracker = refreshed_tracker
+                fail_count = 0
+        except (cv2.error, AttributeError, Exception):
+            pass
+
+    if tracker is not None:
+        ok, roi = tracker.update(small_frame)
+        if ok and roi is not None:
+            try:
+                x, y, tw, th = (int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3]))
+                if tw > 0 and th > 0:
+                    tracker_bbox = tracker_roi_to_frame_bbox(x, y, tw, th, scale_back, frame_w, frame_h)
+                    tracker_ok = tracker_bbox is not None
+            except (IndexError, TypeError, ValueError):
+                tracker_ok = False
+
+    if prev_gray_small is not None and prev_small_bbox is not None and prev_points is not None:
+        optical_small_bbox, optical_points = optical_flow_bbox_update(
+            prev_gray_small,
+            gray_small,
+            prev_points,
+            prev_small_bbox,
+            small_w,
+            small_h,
+        )
+        if optical_small_bbox is not None:
+            optical_bbox = small_bbox_to_frame_bbox(optical_small_bbox, scale_back, frame_w, frame_h)
+            optical_ok = optical_bbox is not None
+
+    if tracker is not None and optical_ok and (not tracker_ok or bbox_iou(tracker_bbox, optical_bbox) < 0.3):
+        try:
+            refreshed_tracker = create_initialized_tracker(
+                small_frame,
+                expand_bbox(optical_bbox, frame_w, frame_h, TRACKER_REINIT_BBOX_EXPAND_FACTOR),
+                scale_back,
+                scale_adaptive=True,
+            )
+            if refreshed_tracker is not None:
+                tracker = refreshed_tracker
+                fail_count = 0
+        except (cv2.error, AttributeError, Exception):
+            pass
+
+    resolved_bbox = optical_bbox if optical_ok else (tracker_bbox if tracker_ok else last_bbox)
+    face_detected = False
+
+    if kind == "face" and resolved_bbox is not None:
+        search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+        refined_bbox = detect_best_face_bbox(
+            frame,
+            expand_bbox(resolved_bbox, frame_w, frame_h, search_factor),
+            preferred_bbox=resolved_bbox,
+            allow_supplemental=(not tracker_ok or fail_count > 0),
+        )
+        if refined_bbox is not None:
+            resolved_bbox = refined_bbox
+            face_detected = True
+            if tracker is not None and (
+                periodic_reinit
+                or not tracker_ok
+                or bbox_iou(tracker_bbox, resolved_bbox) < 0.45
+            ):
+                try:
+                    refreshed_tracker = create_initialized_tracker(
+                        small_frame,
+                        expand_bbox(resolved_bbox, frame_w, frame_h, TRACKER_REINIT_BBOX_EXPAND_FACTOR),
+                        scale_back,
+                        scale_adaptive=True,
+                    )
+                    if refreshed_tracker is not None:
+                        tracker = refreshed_tracker
+                        fail_count = 0
+                except (cv2.error, AttributeError, Exception):
+                    pass
+
+    resolved_small_bbox = None
+    if resolved_bbox is not None:
+        resolved_small_bbox = frame_bbox_to_small_bbox(resolved_bbox, scale_back, small_w, small_h)
+
+    if optical_points is not None and resolved_small_bbox is not None:
+        filtered_points = []
+        x1s, y1s, x2s, y2s = resolved_small_bbox
+        for pt in optical_points.reshape(-1, 2):
+            if x1s <= pt[0] <= x2s and y1s <= pt[1] <= y2s:
+                filtered_points.append(pt)
+        if len(filtered_points) >= 6:
+            next_points = np.array(filtered_points, dtype=np.float32).reshape(-1, 1, 2)
+        else:
+            next_points = seed_tracking_points(gray_small, resolved_small_bbox)
+    else:
+        next_points = seed_tracking_points(gray_small, resolved_small_bbox) if resolved_small_bbox is not None else None
+
+    display_bbox = smooth_bbox(resolved_bbox, prev_smoothed, TRACKER_SMOOTHING_ALPHA, frame_w, frame_h) if resolved_bbox is not None else prev_smoothed
+    tracking_success = tracker_ok or optical_ok or face_detected
+
+    if not tracking_success and tracker is not None and fail_count >= reinit_after_fails and last_bbox:
+        try:
+            reinit_factor = TRACKER_REINIT_BBOX_EXPAND_FACTOR if kind != "face" else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+            refreshed_tracker = create_initialized_tracker(
+                small_frame,
+                expand_bbox(last_bbox, frame_w, frame_h, reinit_factor),
+                scale_back,
+                scale_adaptive=True,
+            )
+            if refreshed_tracker is not None:
+                tracker = refreshed_tracker
+                fail_count = 0
+        except (cv2.error, AttributeError, Exception):
+            pass
+
+    final_bbox = display_bbox or last_bbox
+    final_small_bbox = frame_bbox_to_small_bbox(final_bbox, scale_back, small_w, small_h) if final_bbox is not None else None
+    return {
+        **track,
+        "tracker": tracker,
+        "last_bbox": final_bbox,
+        "smoothed_bbox": final_bbox,
+        "small_bbox": final_small_bbox if final_small_bbox is not None else resolved_small_bbox,
+        "points": next_points if final_small_bbox is not None else None,
+        "fail_count": 0 if tracking_success else fail_count + 1,
+    }, final_bbox
+
+
 def redact_video(
     input_path,
     output_path,
     face_encodings=None,
+    face_targets=None,
     object_classes=None,
     face_tolerance=None,
     obj_conf=0.25,
@@ -455,6 +729,7 @@ def redact_video(
     preview_only=False,
 ):
     face_encodings = face_encodings or []
+    face_targets = face_targets or []
     object_classes = object_classes or set()
     temporal_ranges = temporal_ranges or []
     custom_regions = custom_regions or []
@@ -483,8 +758,8 @@ def redact_video(
 
     detect_every_n = max(1, min(detect_every_n, 10))
 
-    logger.info("Redact: %dx%d, %.1f fps, ~%d frames, detect_every=%d, targets: %d faces, %d obj_classes, %d custom (tracked)",
-                w, h, fps, total, detect_every_n, len(face_encodings), len(object_classes), len(custom_regions))
+    logger.info("Redact: %dx%d, %.1f fps, ~%d frames, detect_every=%d, targets: %d face targets, %d face encodings, %d obj_classes, %d custom (tracked)",
+                w, h, fps, total, detect_every_n, len(face_targets), len(face_encodings), len(object_classes), len(custom_regions))
     if custom_regions:
         logger.info("OpenCV version: %s (trackers require opencv-contrib-python)", cv2.__version__)
         for i, reg in enumerate(custom_regions[:3]):
@@ -521,8 +796,9 @@ def redact_video(
     trackers = []
     frame_idx = 0
     detection_frames_processed = 0
-
-    last_detected_boxes = []
+    auto_prev_small_gray = None
+    AUTO_TRACKER_REINIT_INTERVAL = 20
+    AUTO_TRACKER_REINIT_AFTER_FAILS = 5
 
     # Motion tracking for manual (drawn) regions: tracker per region, init on frame 0, update every frame.
     # Each entry: (tracker or None for static fallback, effect, static_bbox, last_bbox from tracker or None).
@@ -578,9 +854,20 @@ def redact_video(
                 for r in temporal_ranges
             )
 
-        if custom_regions:
+        run_detection = (
+            frame_idx % detect_every_n == 0
+            and in_temporal_range
+            and (auto_face_mode or face_targets or face_encodings or object_classes)
+        )
+
+        small = None
+        gray_small = None
+        scale_back_actual = None
+        if custom_regions or trackers or run_detection:
             small, scale_back_actual = small_frame_for_tracking(frame, TRACKER_MAX_DIM)
             gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+        if custom_regions:
             periodic_reinit = (frame_idx % CUSTOM_TRACKER_REINIT_INTERVAL == 0)
             just_started = set()
 
@@ -836,31 +1123,72 @@ def redact_video(
                     })
                 next_sample_sec += sample_step
 
-        run_detection = (
-            frame_idx % detect_every_n == 0
-            and in_temporal_range
-            and (auto_face_mode or face_encodings or object_classes)
-        )
-
         if run_detection:
-            from services.detection import match_faces_in_frame, detect_face_boxes
+            from services.detection import match_faces_in_frame, detect_face_boxes, localize_known_faces_in_frame
             if auto_face_mode:
-                face_boxes = [tuple(b["bbox"]) for b in detect_face_boxes(frame)]
+                face_boxes = [
+                    expand_face_redaction_bbox(tuple(b["bbox"]), w, h)
+                    for b in detect_face_boxes(frame)
+                ]
+            elif face_targets:
+                face_boxes = [
+                    expand_face_redaction_bbox(tuple(face["bbox"]), w, h)
+                    for face in localize_known_faces_in_frame(
+                        frame,
+                        face_targets,
+                        time_sec=current_sec,
+                        tolerance=face_tolerance if face_tolerance is not None else 0.35,
+                    )
+                ]
             else:
-                face_boxes = match_faces_in_frame(
-                    frame,
-                    face_encodings,
-                    tolerance=face_tolerance if face_tolerance is not None else 0.35,
-                ) if face_encodings else []
+                face_boxes = [
+                    expand_face_redaction_bbox(tuple(box), w, h)
+                    for box in (
+                        match_faces_in_frame(
+                            frame,
+                            face_encodings,
+                            tolerance=face_tolerance if face_tolerance is not None else 0.35,
+                        ) if face_encodings else []
+                    )
+                ]
             obj_boxes = match_objects(frame, object_classes, conf_threshold=obj_conf) if object_classes else []
-            all_boxes = face_boxes + obj_boxes
+            detected_tracks = ([("face", box) for box in face_boxes] + [("object", box) for box in obj_boxes])
             detection_frames_processed += 1
 
-            # Apply blur directly on each detection for this frame only.
-            # Motion tracking via trackers is temporarily disabled.
-            for box in all_boxes:
+            for _, box in detected_tracks:
                 x1, y1, x2, y2 = [int(v) for v in box]
                 apply_redaction(frame, (x1, y1, x2, y2), redaction_style, blur_strength)
+            trackers = [
+                initialize_auto_redaction_track(small, gray_small, box, scale_back_actual, kind)
+                for kind, box in detected_tracks
+            ] if small is not None and gray_small is not None and scale_back_actual is not None else []
+            auto_prev_small_gray = gray_small
+        elif trackers and in_temporal_range and small is not None and gray_small is not None and scale_back_actual is not None:
+            periodic_reinit = (frame_idx % AUTO_TRACKER_REINIT_INTERVAL == 0)
+            next_trackers = []
+            for track in trackers:
+                updated_track, display_bbox = update_auto_redaction_track(
+                    track,
+                    frame,
+                    small,
+                    gray_small,
+                    auto_prev_small_gray,
+                    scale_back_actual,
+                    w,
+                    h,
+                    periodic_reinit=periodic_reinit,
+                    reinit_after_fails=AUTO_TRACKER_REINIT_AFTER_FAILS,
+                )
+                if display_bbox is not None:
+                    apply_redaction(frame, display_bbox, redaction_style, blur_strength)
+                if updated_track.get("last_bbox") is not None:
+                    next_trackers.append(updated_track)
+            trackers = next_trackers
+            auto_prev_small_gray = gray_small
+        else:
+            if not in_temporal_range:
+                trackers = []
+            auto_prev_small_gray = gray_small if trackers else None
 
         if writer is not None:
             writer.write(frame)

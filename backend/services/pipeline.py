@@ -16,7 +16,7 @@ from services.clustering import cluster_faces, cluster_objects
 from services.redactor import redact_video
 from utils.video import (
     extract_keyframes, extract_frames_at_timestamps,
-    get_video_metadata, timestamps_from_time_ranges,
+    get_video_metadata, merge_overlapping_ranges, timestamps_from_time_ranges,
 )
 from utils.storage import (
     get_run_dir,
@@ -190,6 +190,9 @@ def build_manifest(job_id, job=None, overrides=None):
         "video_metadata": source.get("video_metadata", manifest.get("video_metadata")),
         "twelvelabs_status": source.get("twelvelabs_status", manifest.get("twelvelabs_status")),
         "local_status": source.get("local_status", manifest.get("local_status")),
+        "twelvelabs_people": source.get("twelvelabs_people", manifest.get("twelvelabs_people")),
+        "twelvelabs_objects": source.get("twelvelabs_objects", manifest.get("twelvelabs_objects")),
+        "twelvelabs_scene_summary": source.get("twelvelabs_scene_summary", manifest.get("twelvelabs_scene_summary")),
     })
     if overrides:
         manifest.update(overrides)
@@ -234,6 +237,9 @@ def load_job_from_disk(job_id):
         "twelvelabs_status": (manifest or {}).get("twelvelabs_status", "done"),
         "local_status": (manifest or {}).get("local_status", "done"),
         "video_metadata": (manifest or {}).get("video_metadata"),
+        "twelvelabs_people": (manifest or {}).get("twelvelabs_people"),
+        "twelvelabs_objects": (manifest or {}).get("twelvelabs_objects"),
+        "twelvelabs_scene_summary": (manifest or {}).get("twelvelabs_scene_summary"),
         "unique_faces": disk["unique_faces"] if disk else [],
         "unique_objects": disk["unique_objects"] if disk else [],
         "total_face_detections": len(disk["unique_faces"]) if disk else 0,
@@ -668,6 +674,168 @@ def collect_timestamps_from_analysis(people_desc, objects_desc):
     return timestamps_from_time_ranges(all_ranges)
 
 
+def normalize_analysis_time_ranges(time_ranges):
+    normalized = []
+    for time_range in time_ranges or []:
+        if not isinstance(time_range, dict):
+            continue
+        try:
+            start = float(time_range.get("start_sec", time_range.get("start")))
+            end = float(time_range.get("end_sec", time_range.get("end")))
+        except (TypeError, ValueError):
+            continue
+        if end < start:
+            start, end = end, start
+        normalized.append((start, end))
+    return normalized
+
+
+def collect_temporal_ranges_from_face_targets(face_targets):
+    ranges = []
+    for face in face_targets or []:
+        if not isinstance(face, dict):
+            continue
+
+        face_ranges = normalize_analysis_time_ranges(face.get("time_ranges", []))
+        for start, end in face_ranges:
+            ranges.append((max(0.0, start - 0.35), max(0.0, end + 0.6)))
+
+        if face_ranges:
+            continue
+
+        for appearance in face.get("appearances", []) or []:
+            if not isinstance(appearance, dict):
+                continue
+            try:
+                timestamp = float(appearance.get("timestamp"))
+            except (TypeError, ValueError):
+                continue
+            ranges.append((max(0.0, timestamp - 1.0), max(0.0, timestamp + 1.35)))
+
+    return [
+        {"start": start, "end": end}
+        for start, end in merge_overlapping_ranges(ranges)
+    ]
+
+
+def extract_face_appearance_timestamps(face):
+    timestamps = []
+    for appearance in face.get("appearances", []) or []:
+        if not isinstance(appearance, dict):
+            continue
+        try:
+            timestamp = float(appearance.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        timestamps.append(timestamp)
+    if timestamps:
+        return timestamps
+
+    try:
+        timestamp = float(face.get("timestamp"))
+    except (TypeError, ValueError):
+        return []
+    return [timestamp]
+
+
+def face_description_overlap_score(face, desc_entry):
+    timestamps = extract_face_appearance_timestamps(face)
+    time_ranges = normalize_analysis_time_ranges(desc_entry.get("time_ranges", []))
+    if not timestamps or not time_ranges:
+        return 0.0
+
+    padded_ranges = [(start - 0.45, end + 0.45) for start, end in time_ranges]
+    inside_count = 0
+    hit_ranges = 0
+    for start, end in padded_ranges:
+        range_hit = False
+        for timestamp in timestamps:
+            if start <= timestamp <= end:
+                inside_count += 1
+                range_hit = True
+        if range_hit:
+            hit_ranges += 1
+
+    if inside_count <= 0:
+        return 0.0
+
+    coverage = inside_count / max(len(timestamps), 1)
+    range_coverage = hit_ranges / max(len(time_ranges), 1)
+    return inside_count * 4.0 + coverage * 2.5 + range_coverage
+
+
+def match_people_descriptions_to_faces(faces, people_desc):
+    if not isinstance(people_desc, list) or not faces:
+        return {}
+
+    scored_pairs = []
+    for face_index, face in enumerate(faces):
+        for desc_index, desc_entry in enumerate(people_desc):
+            if not isinstance(desc_entry, dict):
+                continue
+            score = face_description_overlap_score(face, desc_entry)
+            if score > 0:
+                scored_pairs.append((score, face_index, desc_index))
+
+    scored_pairs.sort(key=lambda item: (-item[0], item[2], item[1]))
+
+    assignments = {}
+    used_faces = set()
+    used_desc = set()
+    for score, face_index, desc_index in scored_pairs:
+        if face_index in used_faces or desc_index in used_desc:
+            continue
+        assignments[face_index] = desc_index
+        used_faces.add(face_index)
+        used_desc.add(desc_index)
+
+    remaining_desc_indexes = [
+        index
+        for index, desc_entry in enumerate(people_desc)
+        if isinstance(desc_entry, dict) and index not in used_desc
+    ]
+    for face_index, _face in enumerate(faces):
+        if face_index in assignments or not remaining_desc_indexes:
+            continue
+        assignments[face_index] = remaining_desc_indexes.pop(0)
+
+    return assignments
+
+
+def normalize_face_tags(desc_entry):
+    should_anonymize = bool(desc_entry.get("should_anonymize"))
+    is_official = bool(desc_entry.get("is_official"))
+    tags = []
+    seen = set()
+
+    for raw_tag in desc_entry.get("tags", []) or []:
+        tag = str(raw_tag or "").strip()
+        if not tag:
+            continue
+        normalized_key = tag.lower()
+        normalized_tag = tag
+        if normalized_key == "anonymized":
+            if not should_anonymize or is_official:
+                continue
+            normalized_tag = "Anonymized"
+        elif normalized_key == "official":
+            if not is_official:
+                continue
+            normalized_tag = "Official"
+        if normalized_key in seen:
+            continue
+        tags.append(normalized_tag)
+        seen.add(normalized_key)
+
+    if should_anonymize and not is_official and "anonymized" not in seen:
+        tags.insert(0, "Anonymized")
+        seen.add("anonymized")
+    if is_official and "official" not in seen:
+        tags.append("Official")
+
+    return tags, should_anonymize and not is_official, is_official
+
+
 def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
     faces = unique_faces
     if faces is None:
@@ -681,20 +849,37 @@ def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
         return
 
     if isinstance(people_desc, list):
+        assignments = match_people_descriptions_to_faces(faces, people_desc)
         for i, face in enumerate(faces):
-            if i < len(people_desc):
-                desc_entry = people_desc[i]
-                if isinstance(desc_entry, dict):
-                    face["description"] = desc_entry.get("description", "")
-                    face["time_ranges"] = desc_entry.get("time_ranges", [])
-                    raw_name = desc_entry.get("name") or desc_entry.get("person_name") or ""
-                    if raw_name:
-                        face["name"] = raw_name
-                        face["person_id"] = raw_name
+            desc_index = assignments.get(i)
+            if desc_index is None or desc_index >= len(people_desc):
+                continue
+            desc_entry = people_desc[desc_index]
+            if not isinstance(desc_entry, dict):
+                continue
+            face["description"] = desc_entry.get("description", "")
+            face["time_ranges"] = desc_entry.get("time_ranges", [])
+            face["priority_rank"] = desc_index
+            tags, should_anonymize, is_official = normalize_face_tags(desc_entry)
+            face["tags"] = tags
+            face["should_anonymize"] = should_anonymize
+            face["is_official"] = is_official
+            raw_name = desc_entry.get("name") or desc_entry.get("person_name") or ""
+            if raw_name:
+                face["name"] = raw_name
+                face["person_id"] = raw_name
 
     for i, face in enumerate(faces):
         if not face.get("name"):
             face["name"] = face.get("person_id", f"person_{i}")
+        if "priority_rank" not in face:
+            face["priority_rank"] = len(people_desc) + i if isinstance(people_desc, list) else i
+        if "tags" not in face:
+            face["tags"] = []
+        if "should_anonymize" not in face:
+            face["should_anonymize"] = False
+        if "is_official" not in face:
+            face["is_official"] = False
 
 
 def push_job_entities_to_twelvelabs(job_id):
@@ -723,6 +908,29 @@ def push_job_entities_to_twelvelabs(job_id):
 def get_enriched_faces(job_id):
     job = get_job(job_id)
     if job:
+        people_desc = job.get("twelvelabs_people")
+        faces = job.get("unique_faces", [])
+        video_id = str(job.get("twelvelabs_video_id") or "").strip()
+        if faces and not isinstance(people_desc, list) and video_id:
+            try:
+                people_desc = twelvelabs_service.describe_people(video_id)
+            except Exception as e:
+                logger.warning("Could not refresh people descriptions for job %s (%s): %s", job_id, video_id, e)
+            else:
+                job["twelvelabs_people"] = people_desc
+                persist_job_manifest(job_id, job=job)
+        if faces and isinstance(people_desc, list):
+            needs_refresh = any(
+                "priority_rank" not in face or
+                "should_anonymize" not in face or
+                "is_official" not in face or
+                "tags" not in face
+                for face in faces
+                if isinstance(face, dict)
+            )
+            if needs_refresh:
+                enrich_faces_with_descriptions(job_id, people_desc, faces)
+                save_detection_metadata(get_run_dir(job_id), faces, job.get("unique_objects", []))
         if job.get("unique_faces") or job.get("unique_objects"):
             run_dir = get_run_dir(job_id)
             if load_detection_metadata(run_dir) is None:
@@ -762,6 +970,7 @@ def get_enriched_faces(job_id):
 def run_redaction(
     job_id,
     face_encodings=None,
+    face_targets=None,
     object_classes=None,
     entity_ids=None,
     custom_regions=None,
@@ -785,7 +994,15 @@ def run_redaction(
 
     temporal_ranges = []
 
-    if use_temporal_optimization and entity_ids and video_id:
+    if use_temporal_optimization and face_targets:
+        temporal_ranges = collect_temporal_ranges_from_face_targets(face_targets)
+        if temporal_ranges:
+            logger.info(
+                "Selected face targets limited redaction to %d temporal ranges",
+                len(temporal_ranges),
+            )
+
+    if not temporal_ranges and use_temporal_optimization and entity_ids and video_id:
         for eid in entity_ids:
             try:
                 ranges = twelvelabs_service.entity_search_time_ranges(
@@ -839,6 +1056,7 @@ def run_redaction(
         input_path=video_path,
         output_path=output_path,
         face_encodings=enc_arrays,
+        face_targets=face_targets or [],
         object_classes=obj_set,
         blur_strength=blur_strength,
         redaction_style=redaction_style,

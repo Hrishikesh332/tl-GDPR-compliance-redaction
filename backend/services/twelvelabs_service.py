@@ -88,13 +88,23 @@ def describe_people(video_id):
         video_id=video_id,
         prompt=(
             "List every distinct person visible in this video. "
+            "Order the array so people whose faces should likely be anonymized or hidden "
+            "for privacy come first. Put clearly official or public-facing people later "
+            "(for example police officers in uniform, judges, anchors, presenters, or other "
+            "on-duty public officials). "
             "For each person, provide: "
             "1) Their name if visible (from name tags, captions, chyrons, or on-screen text). "
             "   If the name is not identifiable, leave it blank. "
             "2) A brief physical description (hair, clothing, distinguishing features) "
             "3) The approximate time ranges (start and end in seconds) when they are visible. "
+            "4) should_anonymize: true for private individuals or anyone whose face should be hidden; "
+            "false for clearly official/public-facing people. "
+            "5) is_official: true only when they are clearly an official/public-facing person. "
+            "6) tags: include 'Anonymized' only when should_anonymize is true; do not include "
+            "'Anonymized' for official/public-facing people. You may include 'Official' for those people. "
             "Return as a JSON array with objects having keys: "
-            "name, description, time_ranges (array of {start_sec, end_sec})."
+            "name, description, time_ranges (array of {start_sec, end_sec}), "
+            "should_anonymize, is_official, tags."
         ),
         temperature=0.1,
     )

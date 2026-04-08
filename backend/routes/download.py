@@ -16,4 +16,11 @@ def download(filename):
     path = os.path.join(OUTPUT_DIR, safe)
     if not os.path.isfile(path):
         return jsonify({"error": "file not found"}), 404
-    return send_file(path, mimetype="video/mp4", as_attachment=True)
+    return send_file(
+        path,
+        mimetype="video/mp4",
+        as_attachment=True,
+        download_name=safe,
+        conditional=False,
+        max_age=0,
+    )

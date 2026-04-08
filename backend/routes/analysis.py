@@ -15,7 +15,9 @@ from services.redactor import (
     corners_to_bbox,
     detect_best_face_bbox,
     expand_bbox,
+    expand_face_redaction_bbox,
     frame_bbox_to_small_bbox,
+    normalize_object_class_name,
     optical_flow_bbox_update,
     seed_tracking_points,
     small_bbox_to_frame_bbox,
@@ -584,6 +586,37 @@ def merge_temporal_detections(detections, requested_time):
     return merged
 
 
+def filter_detections_to_selected_targets(detections, person_ids=None, object_class_set=None):
+    selected_person_ids = {str(item).strip() for item in (person_ids or []) if str(item).strip()}
+    selected_object_classes = {
+        normalize_object_class_name(item)
+        for item in (object_class_set or set())
+        if normalize_object_class_name(item)
+    }
+
+    if not selected_person_ids and not selected_object_classes:
+        return detections
+
+    filtered = []
+    for detection in detections or []:
+        kind = str(detection.get("kind") or "").strip().lower()
+        if kind == "face":
+            if not selected_person_ids:
+                continue
+            person_id = str(detection.get("personId") or "").strip()
+            if person_id and person_id in selected_person_ids:
+                filtered.append(detection)
+            continue
+        if kind == "object":
+            if not selected_object_classes:
+                continue
+            object_class = normalize_object_class_name(detection.get("objectClass"))
+            if object_class and object_class in selected_object_classes:
+                filtered.append(detection)
+            continue
+    return filtered
+
+
 @analysis_bp.route("/faces/<job_id>", methods=["GET"])
 def get_faces(job_id):
     result = get_enriched_faces(job_id)
@@ -607,6 +640,7 @@ def get_faces(job_id):
     for f in faces:
         response_faces.append({
             "person_id": f.get("person_id"),
+            "name": f.get("name"),
             "snap_base64": f.get("snap_base64"),
             "description": f.get("description", ""),
             "time_ranges": f.get("time_ranges", []),
@@ -616,6 +650,10 @@ def get_faces(job_id):
             "bbox": f.get("bbox"),
             "entity_id": f.get("entity_id"),
             "entity_asset_ids": f.get("entity_asset_ids", []),
+            "tags": f.get("tags", []),
+            "should_anonymize": bool(f.get("should_anonymize", False)),
+            "is_official": bool(f.get("is_official", False)),
+            "priority_rank": f.get("priority_rank"),
         })
 
     return jsonify({
@@ -748,7 +786,11 @@ def live_redaction_detect():
                 object_classes = [item.strip() for item in raw_object_classes.split(",") if item.strip()]
     if not isinstance(object_classes, list):
         object_classes = []
-    object_class_set = {str(item).strip() for item in object_classes if str(item).strip()}
+    object_class_set = {
+        normalize_object_class_name(item)
+        for item in object_classes
+        if normalize_object_class_name(item)
+    }
 
     try:
         object_confidence = float(data.get("object_confidence", request.form.get("object_confidence", 0.25)) or 0.25)
@@ -784,17 +826,18 @@ def live_redaction_detect():
 
     if include_faces:
         if person_ids:
-            from services.detection import identify_faces_in_frame
+            from services.detection import localize_known_faces_in_frame
 
             enriched = get_enriched_faces(job_id) or {}
             selected_faces = [
                 face for face in (job.get("unique_faces") or enriched.get("unique_faces") or [])
-                if str(face.get("person_id") or "").strip() in person_ids and face.get("encoding") is not None
+                if str(face.get("person_id") or "").strip() in person_ids
             ]
             for sample_time in sample_times:
                 sample_frame = frames_by_time.get(round(sample_time, 3), frame)
-                for face in identify_faces_in_frame(sample_frame, selected_faces):
-                    normalized = normalize_bbox(face.get("bbox"), frame_w, frame_h)
+                for face in localize_known_faces_in_frame(sample_frame, selected_faces, time_sec=sample_time):
+                    expanded_bbox = expand_face_redaction_bbox(face.get("bbox"), frame_w, frame_h)
+                    normalized = normalize_bbox(expanded_bbox, frame_w, frame_h)
                     if normalized is None:
                         continue
                     detections.append({
@@ -816,7 +859,8 @@ def live_redaction_detect():
                     confidence_threshold=face_confidence,
                     include_supplemental=True,
                 ):
-                    normalized = normalize_bbox(face.get("bbox"), frame_w, frame_h)
+                    expanded_bbox = expand_face_redaction_bbox(face.get("bbox"), frame_w, frame_h)
+                    normalized = normalize_bbox(expanded_bbox, frame_w, frame_h)
                     if normalized is None:
                         continue
                     detections.append({
@@ -841,7 +885,8 @@ def live_redaction_detect():
                 strict=False,
             ):
                 obj_label = str(obj.get("identification") or "Object")
-                if object_class_set and obj_label not in object_class_set:
+                obj_class = normalize_object_class_name(obj_label)
+                if object_class_set and obj_class not in object_class_set:
                     continue
                 normalized = normalize_bbox(obj.get("bbox"), frame_w, frame_h)
                 if normalized is None:
@@ -849,7 +894,7 @@ def live_redaction_detect():
                 detections.append({
                     "kind": "object",
                     "label": obj_label,
-                    "objectClass": obj_label,
+                    "objectClass": obj_class or obj_label,
                     "confidence": round(float(obj.get("confidence", 0.0)), 4),
                     "sample_time": sample_time,
                     **normalized,
@@ -874,6 +919,11 @@ def live_redaction_detect():
         frame_w,
         frame_h,
         time_sec,
+    )
+    detections = filter_detections_to_selected_targets(
+        detections,
+        person_ids=person_ids,
+        object_class_set=object_class_set,
     )
 
     return jsonify({

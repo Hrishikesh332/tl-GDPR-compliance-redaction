@@ -15,6 +15,7 @@ logger = logging.getLogger("video_redaction.detection")
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PROTOTXT = os.path.join(_BACKEND_DIR, "models", "deploy.prototxt")
 _CAFFEMODEL = os.path.join(_BACKEND_DIR, "models", "res10_300x300_ssd_iter_140000.caffemodel")
+_RUNTIME_CACHE_DIR = os.path.join(_BACKEND_DIR, ".cache")
 
 
 def is_git_lfs_pointer(path: str) -> bool:
@@ -73,12 +74,10 @@ _obj_model_error = None
 MIN_FACE_SIZE = 30
 MIN_FACE_SHARPNESS = 10.0
 RES10_CONFIDENCE = 0.35
-
-_ONNX_PROVIDERS = (
-    ["CoreMLExecutionProvider", "CPUExecutionProvider"]
-    if sys.platform == "darwin"
-    else ["CUDAExecutionProvider", "CPUExecutionProvider"]
-)
+KNOWN_FACE_ANCHOR_WINDOW_SEC = 1.5
+KNOWN_FACE_ANCHOR_SEARCH_EXPAND = 1.85
+KNOWN_FACE_STALE_ANCHOR_MAX_GAP_SEC = 10.0
+KNOWN_FACE_STALE_ANCHOR_SEARCH_EXPAND = 3.25
 
 FORENSIC_CLASSES = {
     "car", "truck", "bus", "motorcycle", "bicycle",
@@ -105,20 +104,66 @@ def get_face_net():
     return _face_net
 
 
+def ensure_runtime_cache_dirs():
+    """Give model-side helpers a writable cache directory inside the project."""
+    cache_dirs = {
+        "MPLCONFIGDIR": os.path.join(_RUNTIME_CACHE_DIR, "matplotlib"),
+        "XDG_CACHE_HOME": os.path.join(_RUNTIME_CACHE_DIR, "xdg-cache"),
+    }
+    for env_name, path in cache_dirs.items():
+        current = (os.environ.get(env_name) or "").strip()
+        if current:
+            os.makedirs(current, exist_ok=True)
+            continue
+        os.makedirs(path, exist_ok=True)
+        os.environ[env_name] = path
+
+
+def build_insightface_provider_candidates():
+    configured = (os.environ.get("INSIGHTFACE_PROVIDERS") or "").strip()
+    if configured:
+        parsed = [item.strip() for item in configured.split(",") if item.strip()]
+        candidates = [parsed] if parsed else []
+    elif sys.platform == "darwin":
+        # CoreML has been unstable here and can leak runtime resources on shutdown.
+        # Default to CPU on macOS and let CoreML be opt-in via INSIGHTFACE_PROVIDERS.
+        candidates = [["CPUExecutionProvider"]]
+    else:
+        candidates = [["CUDAExecutionProvider", "CPUExecutionProvider"], ["CPUExecutionProvider"]]
+
+    try:
+        import onnxruntime as ort
+        available = set(ort.get_available_providers())
+    except Exception:
+        available = None
+
+    filtered_candidates = []
+    seen = set()
+    for provider_group in candidates:
+        filtered = tuple(
+            provider
+            for provider in provider_group
+            if available is None or provider in available
+        )
+        if not filtered or filtered in seen:
+            continue
+        seen.add(filtered)
+        filtered_candidates.append(list(filtered))
+
+    if not filtered_candidates:
+        filtered_candidates.append(["CPUExecutionProvider"])
+    return filtered_candidates
+
+
 def get_face_app():
     """Load InsightFace buffalo_l for primary face detection plus ArcFace embeddings."""
     global _face_app, _face_app_load_failed
     if _face_app_load_failed:
         return None
     if _face_app is None:
+        ensure_runtime_cache_dirs()
         try:
             from insightface.app import FaceAnalysis
-            _face_app = FaceAnalysis(
-                name="buffalo_l",
-                providers=_ONNX_PROVIDERS,
-            )
-            _face_app.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.5)
-            logger.info("Loaded InsightFace buffalo_l for face detection and embeddings")
         except Exception as e:
             _face_app = None
             _face_app_load_failed = True
@@ -127,6 +172,38 @@ def get_face_app():
                 "Manual blur tracking will still run, but face embeddings/supplemental detections are disabled: %s",
                 e,
             )
+            return None
+
+        last_error = None
+        provider_candidates = build_insightface_provider_candidates()
+        for providers in provider_candidates:
+            try:
+                app = FaceAnalysis(
+                    name="buffalo_l",
+                    providers=providers,
+                )
+                app.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.5)
+                _face_app = app
+                logger.info(
+                    "Loaded InsightFace buffalo_l for face detection and embeddings (providers=%s)",
+                    ",".join(providers),
+                )
+                return _face_app
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "InsightFace provider set %s failed; trying next option: %s",
+                    ",".join(providers),
+                    e,
+                )
+
+        _face_app = None
+        _face_app_load_failed = True
+        logger.warning(
+            "InsightFace unavailable; falling back to res10-only face detection. "
+            "Manual blur tracking will still run, but face embeddings/supplemental detections are disabled: %s",
+            last_error,
+        )
     return _face_app
 
 
@@ -342,6 +419,164 @@ def detect_face_boxes(img_bgr, confidence_threshold=RES10_CONFIDENCE, include_su
             "sharpness": round(sharpness, 1),
             "source": "insightface",
         })
+
+    return results
+
+
+def normalize_face_bbox(bbox):
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in bbox[:4]]
+    except (TypeError, ValueError):
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def face_bbox_center_distance(box_a, box_b):
+    if not box_a or not box_b:
+        return 1e9
+    acx = (float(box_a[0]) + float(box_a[2])) / 2.0
+    acy = (float(box_a[1]) + float(box_a[3])) / 2.0
+    bcx = (float(box_b[0]) + float(box_b[2])) / 2.0
+    bcy = (float(box_b[1]) + float(box_b[3])) / 2.0
+    return float(np.hypot(acx - bcx, acy - bcy))
+
+
+def find_known_face_anchor_bbox(known_face, time_sec, max_gap_sec=KNOWN_FACE_ANCHOR_WINDOW_SEC):
+    if time_sec is None:
+        return None, None
+
+    best_bbox = None
+    best_gap = None
+    for appearance in known_face.get("appearances") or []:
+        bbox = normalize_face_bbox(appearance.get("bbox"))
+        timestamp = appearance.get("timestamp")
+        if bbox is None or timestamp is None:
+            continue
+        try:
+            gap = abs(float(timestamp) - float(time_sec))
+        except (TypeError, ValueError):
+            continue
+        if gap > max_gap_sec:
+            continue
+        if best_gap is None or gap < best_gap:
+            best_bbox = bbox
+            best_gap = gap
+
+    return best_bbox, best_gap
+
+
+def find_nearest_known_face_anchor_bbox(known_face, time_sec):
+    if time_sec is None:
+        return normalize_face_bbox(known_face.get("bbox")), None
+
+    best_bbox = normalize_face_bbox(known_face.get("bbox"))
+    best_gap = None
+    for appearance in known_face.get("appearances") or []:
+        bbox = normalize_face_bbox(appearance.get("bbox"))
+        timestamp = appearance.get("timestamp")
+        if bbox is None or timestamp is None:
+            continue
+        try:
+            gap = abs(float(timestamp) - float(time_sec))
+        except (TypeError, ValueError):
+            continue
+        if best_gap is None or gap < best_gap:
+            best_bbox = bbox
+            best_gap = gap
+
+    return best_bbox, best_gap
+
+
+def known_face_search_expand_factor(anchor_gap):
+    if anchor_gap is None:
+        return KNOWN_FACE_ANCHOR_SEARCH_EXPAND
+    if anchor_gap <= KNOWN_FACE_ANCHOR_WINDOW_SEC:
+        return KNOWN_FACE_ANCHOR_SEARCH_EXPAND
+    return min(
+        KNOWN_FACE_STALE_ANCHOR_SEARCH_EXPAND,
+        KNOWN_FACE_ANCHOR_SEARCH_EXPAND + (anchor_gap - KNOWN_FACE_ANCHOR_WINDOW_SEC) * 0.24,
+    )
+
+
+def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, tolerance=0.35):
+    """Locate specific saved faces in a frame.
+
+    Prefers nearby saved appearance boxes as anchors so selected-face blur still
+    works even when embedding-based identity matching is unavailable. Falls back
+    to encoding matches when they are available.
+    """
+    if not known_faces:
+        return []
+
+    matched_by_person = {}
+    if any(face.get("encoding") is not None for face in known_faces):
+        for det in identify_faces_in_frame(frame_bgr, known_faces, tolerance=tolerance):
+            person_id = str(det.get("person_id") or "").strip()
+            if person_id:
+                matched_by_person[person_id] = det
+
+    frame_h, frame_w = frame_bgr.shape[:2]
+    results = []
+    used_boxes = []
+    from services.redactor import detect_best_face_bbox, expand_bbox
+
+    for known_face in known_faces:
+        person_id = str(known_face.get("person_id") or "").strip()
+        if not person_id:
+            continue
+
+        anchor_bbox, anchor_gap = find_known_face_anchor_bbox(known_face, time_sec)
+        if anchor_bbox is None:
+            anchor_bbox, anchor_gap = find_nearest_known_face_anchor_bbox(known_face, time_sec)
+        anchor_candidate = None
+        if anchor_bbox is not None:
+            search_expand = known_face_search_expand_factor(anchor_gap)
+            refined_bbox = detect_best_face_bbox(
+                frame_bgr,
+                expand_bbox(anchor_bbox, frame_w, frame_h, search_expand),
+                preferred_bbox=anchor_bbox,
+                allow_supplemental=True,
+            )
+            candidate_bbox = normalize_face_bbox(refined_bbox or anchor_bbox)
+            if candidate_bbox is not None and (
+                anchor_gap is None or anchor_gap <= KNOWN_FACE_STALE_ANCHOR_MAX_GAP_SEC
+            ):
+                confidence_penalty = 0.0 if anchor_gap is None else min(0.55, max(0.0, anchor_gap - 0.25) * 0.08)
+                anchor_candidate = {
+                    "bbox": candidate_bbox,
+                    "person_id": person_id,
+                    "match_score": round(max(0.18, 0.98 - confidence_penalty), 4),
+                    "det_score": 0.58 if refined_bbox is not None else 0.34,
+                }
+
+        matched_candidate = matched_by_person.get(person_id)
+        chosen = None
+        if anchor_candidate and matched_candidate:
+            overlap = iou(anchor_candidate["bbox"], matched_candidate["bbox"])
+            distance = face_bbox_center_distance(anchor_candidate["bbox"], matched_candidate["bbox"])
+            anchor_diag = max(
+                1.0,
+                float(np.hypot(
+                    anchor_candidate["bbox"][2] - anchor_candidate["bbox"][0],
+                    anchor_candidate["bbox"][3] - anchor_candidate["bbox"][1],
+                )),
+            )
+            chosen = matched_candidate if (overlap >= 0.08 or distance <= anchor_diag * 0.7) else anchor_candidate
+        else:
+            chosen = anchor_candidate or matched_candidate
+
+        if chosen is None:
+            continue
+
+        if any(iou(chosen["bbox"], existing) > 0.72 for existing in used_boxes):
+            continue
+
+        used_boxes.append(chosen["bbox"])
+        results.append(chosen)
 
     return results
 

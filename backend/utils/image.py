@@ -89,8 +89,20 @@ def apply_blur(frame, bbox, blur_strength=51):
     if x2 <= x1 or y2 <= y1:
         return frame
     roi = frame[y1:y2, x1:x2]
-    k = blur_strength if blur_strength % 2 == 1 else blur_strength + 1
-    frame[y1:y2, x1:x2] = cv2.GaussianBlur(roi, (k, k), 30)
+    roi_h, roi_w = roi.shape[:2]
+    if roi_w <= 1 or roi_h <= 1:
+        return frame
+
+    strength = max(5, int(blur_strength))
+    downscale_ratio = max(0.03, 0.24 - min(strength, 100) * 0.002)
+    reduced_w = max(1, int(round(roi_w * downscale_ratio)))
+    reduced_h = max(1, int(round(roi_h * downscale_ratio)))
+    reduced = cv2.resize(roi, (reduced_w, reduced_h), interpolation=cv2.INTER_LINEAR)
+    expanded = cv2.resize(reduced, (roi_w, roi_h), interpolation=cv2.INTER_CUBIC)
+
+    kernel = max(9, min(max(roi_w, roi_h) | 1, (strength + 21) | 1))
+    softened = cv2.GaussianBlur(expanded, (kernel, kernel), 0)
+    frame[y1:y2, x1:x2] = softened
     return frame
 
 

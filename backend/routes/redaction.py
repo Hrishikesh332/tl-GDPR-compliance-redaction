@@ -59,14 +59,17 @@ def redact():
             except json.JSONDecodeError:
                 face_encodings = []
 
-    if person_ids and not face_encodings:
+    face_targets = []
+    if person_ids:
         enriched = get_enriched_faces(job_id) or {}
         unique_faces = job.get("unique_faces") or enriched.get("unique_faces", [])
-        face_encodings = []
+        if not face_encodings:
+            face_encodings = []
         matched_names = []
         for face in unique_faces:
             pid = face.get("person_id", "")
             if pid in person_ids:
+                face_targets.append(face)
                 enc = face.get("encoding")
                 if enc:
                     face_encodings.append(enc)
@@ -116,12 +119,13 @@ def redact():
 
     custom_regions = parse_custom_regions(data)
 
-    total_targets = (len(face_encodings) if face_encodings else 0) + (len(object_classes) if object_classes else 0) + len(custom_regions)
+    total_targets = max(len(face_targets), len(face_encodings) if face_encodings else 0) + (len(object_classes) if object_classes else 0) + len(custom_regions)
     if total_targets == 0 and not entity_ids:
         return jsonify({"error": "No targets selected. Provide person_ids, face_encodings, object_classes, entity_ids, or custom_regions (drawn regions with motion tracking)."}), 400
 
-    logger.info("Redacting job %s: %d face encodings (person_ids=%s), %s object classes, %s entity_ids, %d custom_regions",
+    logger.info("Redacting job %s: %d face targets / %d face encodings (person_ids=%s), %s object classes, %s entity_ids, %d custom_regions",
                 job_id,
+                len(face_targets) if face_targets else 0,
                 len(face_encodings) if face_encodings else 0,
                 person_ids or "none",
                 object_classes or "none",
@@ -132,6 +136,7 @@ def redact():
         result = run_redaction(
             job_id=job_id,
             face_encodings=face_encodings,
+            face_targets=face_targets,
             object_classes=object_classes,
             entity_ids=entity_ids,
             custom_regions=custom_regions,
