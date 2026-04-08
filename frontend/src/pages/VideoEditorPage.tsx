@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import Hls from 'hls.js'
 import { useVideoCache } from '../contexts/VideoCache'
 import { API_BASE } from '../lib/api'
+import { storeLastEditorVideoId } from '../lib/editorRouting'
 import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
@@ -508,6 +509,10 @@ type DetectionItem = {
   timeRanges?: DetectionTimeRange[]
   appearances?: DetectionAppearance[]
   entityId?: string | null
+  appearanceCount?: number
+  shouldAnonymize?: boolean
+  isOfficial?: boolean
+  priorityRank?: number
 }
 
 type DetectionTimeRange = {
@@ -521,6 +526,27 @@ type DetectionAppearance = {
   frame_idx?: number
   timestamp?: number
   bbox?: number[]
+}
+
+type FaceDetectionApiRecord = {
+  person_id?: string
+  name?: string
+  description?: string
+  snap_base64?: string
+  time_ranges?: DetectionTimeRange[]
+  appearances?: DetectionAppearance[]
+  entity_id?: string | null
+  tags?: string[]
+  should_anonymize?: boolean
+  is_official?: boolean
+  priority_rank?: number
+  appearance_count?: number
+}
+
+type ObjectDetectionApiRecord = {
+  object_id?: string
+  identification?: string
+  snap_base64?: string
 }
 
 type FaceTimelineSegment = {
@@ -575,8 +601,240 @@ type VideoFrameCallbackCapableElement = HTMLVideoElement & {
   cancelVideoFrameCallback?: (handle: number) => void
 }
 
+let liveBlurScratchCanvas: HTMLCanvasElement | null = null
+
+function getLiveBlurScratchCanvas(): HTMLCanvasElement | null {
+  if (typeof document === 'undefined') return null
+  if (!liveBlurScratchCanvas) {
+    liveBlurScratchCanvas = document.createElement('canvas')
+  }
+  return liveBlurScratchCanvas
+}
+
+function supportsLiveBackdropBlur(): boolean {
+  if (typeof window === 'undefined' || typeof CSS === 'undefined' || typeof CSS.supports !== 'function') {
+    return false
+  }
+  return CSS.supports('backdrop-filter: blur(2px)') || CSS.supports('-webkit-backdrop-filter: blur(2px)')
+}
+
+function getLiveRedactionRenderBox(detection: LiveRedactionDetection) {
+  let renderX = detection.x
+  let renderY = detection.y
+  let renderWidth = detection.width
+  let renderHeight = detection.height
+
+  if (detection.kind === 'face') {
+    // Keep the whole head covered, especially forehead and chin, when the
+    // detected box is slightly tight.
+    const expandX = detection.width * 0.03
+    const expandTop = detection.height * 0.05
+    const expandBottom = detection.height * 0.03
+    renderX = Math.max(0, detection.x - expandX)
+    renderY = Math.max(0, detection.y - expandTop)
+    renderWidth = Math.min(1 - renderX, detection.width + expandX * 2)
+    renderHeight = Math.min(1 - renderY, detection.height + expandTop + expandBottom)
+  }
+
+  return {
+    x: renderX,
+    y: renderY,
+    width: renderWidth,
+    height: renderHeight,
+  }
+}
+
+function getLiveRedactionBlurPx(blurStrength: number): number {
+  return Math.max(16, Math.round(blurStrength * 0.78))
+}
+
+function getLiveRedactionOverlayStyle(
+  detection: LiveRedactionDetection,
+  style: 'blur' | 'black',
+  blurStrength: number,
+): React.CSSProperties {
+  const renderBox = getLiveRedactionRenderBox(detection)
+  const blurCss = `blur(${getLiveRedactionBlurPx(blurStrength)}px) saturate(0.72)`
+
+  return {
+    left: `${renderBox.x * 100}%`,
+    top: `${renderBox.y * 100}%`,
+    width: `${renderBox.width * 100}%`,
+    height: `${renderBox.height * 100}%`,
+    borderRadius: detection.kind === 'face' ? '18px' : '10px',
+    overflow: 'hidden',
+    pointerEvents: 'none',
+    transform: 'translateZ(0)',
+    willChange: 'left, top, width, height',
+    transition: 'left 120ms linear, top 120ms linear, width 120ms linear, height 120ms linear',
+    backgroundColor: style === 'black'
+      ? 'rgba(5, 6, 8, 0.96)'
+      : detection.kind === 'face'
+        ? 'rgba(12, 14, 18, 0.10)'
+        : 'rgba(12, 14, 18, 0.07)',
+    backdropFilter: style === 'black' ? undefined : blurCss,
+    WebkitBackdropFilter: style === 'black' ? undefined : blurCss,
+    boxShadow: style === 'black' ? 'none' : 'inset 0 0 0 1px rgba(255,255,255,0.04)',
+  }
+}
+
 function clampUnit(value: number): number {
   return Math.max(0, Math.min(1, value))
+}
+
+function normalizeObjectClass(value?: string | null): string | null {
+  const normalized = (value || '').trim().toLowerCase()
+  return normalized || null
+}
+
+function clickDownloadLink(url: string, filename?: string) {
+  if (typeof document === 'undefined' || !url) return
+  const link = document.createElement('a')
+  link.href = url
+  if (filename) {
+    link.download = filename
+  }
+  link.rel = 'noopener'
+  link.style.display = 'none'
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+}
+
+async function triggerFileDownload(url: string, filename?: string) {
+  if (typeof window === 'undefined' || typeof document === 'undefined' || !url) return
+
+  let objectUrl: string | null = null
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+    })
+    if (!response.ok) {
+      throw new Error(`Download failed (${response.status})`)
+    }
+
+    const blob = await response.blob()
+    objectUrl = window.URL.createObjectURL(blob)
+    clickDownloadLink(objectUrl, filename)
+  } catch (error) {
+    // Fall back to direct navigation if the blob fetch is blocked by the browser.
+    clickDownloadLink(url, filename)
+    if (error instanceof Error && /Download failed/i.test(error.message)) {
+      throw error
+    }
+  } finally {
+    if (objectUrl) {
+      window.setTimeout(() => window.URL.revokeObjectURL(objectUrl as string), 1000)
+    }
+  }
+}
+
+function normalizeDetectionTags(
+  rawTags: unknown,
+  options: { shouldAnonymize?: boolean; isOfficial?: boolean } = {},
+): string[] {
+  const tags: string[] = []
+  const seen = new Set<string>()
+  const source = Array.isArray(rawTags) ? rawTags : []
+  source.forEach((value) => {
+    const rawTag = String(value || '').trim()
+    if (!rawTag) return
+    const key = rawTag.toLowerCase()
+    let tag = rawTag
+    if (key === 'anonymized') {
+      if (!options.shouldAnonymize || options.isOfficial) return
+      tag = 'Anonymized'
+    } else if (key === 'official') {
+      if (!options.isOfficial) return
+      tag = 'Official'
+    }
+    if (seen.has(key)) return
+    seen.add(key)
+    tags.push(tag)
+  })
+  if (options.shouldAnonymize && !options.isOfficial && !seen.has('anonymized')) {
+    seen.add('anonymized')
+    tags.unshift('Anonymized')
+  }
+  if (options.isOfficial && !seen.has('official')) {
+    tags.push('Official')
+  }
+  return tags
+}
+
+function sortDetectionItems(items: DetectionItem[]): DetectionItem[] {
+  return [...items].sort((a, b) => {
+    const groupRank = (item: DetectionItem) => {
+      if (item.kind === 'face' && item.shouldAnonymize) return 0
+      if (item.kind === 'face') return 1
+      return 2
+    }
+    const groupDifference = groupRank(a) - groupRank(b)
+    if (groupDifference !== 0) return groupDifference
+
+    if (a.kind === 'face' && b.kind === 'face') {
+      const priorityA = Number.isFinite(a.priorityRank) ? Number(a.priorityRank) : Number.MAX_SAFE_INTEGER
+      const priorityB = Number.isFinite(b.priorityRank) ? Number(b.priorityRank) : Number.MAX_SAFE_INTEGER
+      if (priorityA !== priorityB) return priorityA - priorityB
+
+      const appearanceDifference = (b.appearanceCount || 0) - (a.appearanceCount || 0)
+      if (appearanceDifference !== 0) return appearanceDifference
+    }
+
+    return a.label.localeCompare(b.label)
+  })
+}
+
+function buildDetectionItemsFromApi(
+  uniqueFaces: FaceDetectionApiRecord[],
+  uniqueObjects: ObjectDetectionApiRecord[],
+): DetectionItem[] {
+  const items: DetectionItem[] = []
+  const faceColor = '#F59E0B'
+  const objectColors = ['#3B82F6', '#EF4444', '#10B981', '#8B5CF6']
+
+  uniqueFaces.forEach((face, index) => {
+    const personId = (face.person_id || `person_${index}`).toString().trim()
+    const shouldAnonymize = Boolean(face.should_anonymize) && !Boolean(face.is_official)
+    const isOfficial = Boolean(face.is_official)
+    const label = (face.name || face.description || personId || `Person ${index + 1}`).toString().trim()
+    items.push({
+      id: `face-${personId}`,
+      kind: 'face',
+      label: label.slice(0, 60),
+      tags: normalizeDetectionTags(face.tags, { shouldAnonymize, isOfficial }),
+      color: faceColor,
+      snapBase64: face.snap_base64,
+      personId,
+      timeRanges: Array.isArray(face.time_ranges) ? face.time_ranges : [],
+      appearances: Array.isArray(face.appearances) ? face.appearances : [],
+      entityId: typeof face.entity_id === 'string' && face.entity_id.trim() ? face.entity_id : null,
+      appearanceCount: typeof face.appearance_count === 'number' ? face.appearance_count : 0,
+      shouldAnonymize,
+      isOfficial,
+      priorityRank: typeof face.priority_rank === 'number' ? face.priority_rank : undefined,
+    })
+  })
+
+  const seenClasses = new Set<string>()
+  uniqueObjects.forEach((objectItem, index) => {
+    const rawObjectClass = (objectItem.identification || objectItem.object_id || `Object ${index + 1}`).toString().trim()
+    const objectClass = normalizeObjectClass(rawObjectClass)
+    if (!objectClass || seenClasses.has(objectClass)) return
+    seenClasses.add(objectClass)
+    items.push({
+      id: `object-${objectClass}`,
+      kind: 'object',
+      label: rawObjectClass.slice(0, 60),
+      tags: [],
+      color: objectColors[index % objectColors.length],
+      snapBase64: objectItem.snap_base64,
+      objectClass,
+    })
+  })
+
+  return sortDetectionItems(items)
 }
 
 function expandLiveDetection(detection: LiveRedactionDetection): LiveRedactionDetection {
@@ -879,10 +1137,36 @@ function getSelectionIdForLiveDetection(detection: LiveRedactionDetection): stri
   if (detection.kind === 'face' && detection.personId) {
     return `face-${detection.personId}`
   }
-  if (detection.kind === 'object' && detection.objectClass) {
-    return `object-${detection.objectClass}`
+  const normalizedObjectClass = normalizeObjectClass(detection.objectClass)
+  if (detection.kind === 'object' && normalizedObjectClass) {
+    return `object-${normalizedObjectClass}`
   }
   return null
+}
+
+function filterLiveDetectionsToSelections(
+  detections: LiveRedactionDetection[],
+  options: {
+    hasRunDetection: boolean
+    selectedFacePersonIds: string[]
+    selectedObjectClasses: string[]
+  },
+): LiveRedactionDetection[] {
+  if (!options.hasRunDetection) return detections
+
+  const selectedFaces = new Set(options.selectedFacePersonIds)
+  const selectedObjects = new Set(options.selectedObjectClasses.map((item) => normalizeObjectClass(item)).filter(Boolean) as string[])
+
+  return detections.filter((detection) => {
+    if (detection.kind === 'face') {
+      return !!detection.personId && selectedFaces.has(detection.personId)
+    }
+    if (detection.kind === 'object') {
+      const objectClass = normalizeObjectClass(detection.objectClass)
+      return !!objectClass && selectedObjects.has(objectClass)
+    }
+    return false
+  })
 }
 
 const DUMMY_DETECTIONS: DetectionItem[] = [
@@ -1125,21 +1409,11 @@ function drawCanvasBlurRegion(
   style: 'blur' | 'black',
   blurStrength: number,
 ) {
-  let renderX = detection.x
-  let renderY = detection.y
-  let renderWidth = detection.width
-  let renderHeight = detection.height
-
-  if (detection.kind === 'face') {
-    // Keep the face covered without letting the blur balloon too far beyond the detected head.
-    const expandX = detection.width * 0.03
-    const expandTop = detection.height * 0.05
-    const expandBottom = detection.height * 0.03
-    renderX = Math.max(0, detection.x - expandX)
-    renderY = Math.max(0, detection.y - expandTop)
-    renderWidth = Math.min(1 - renderX, detection.width + expandX * 2)
-    renderHeight = Math.min(1 - renderY, detection.height + expandTop + expandBottom)
-  }
+  const renderBox = getLiveRedactionRenderBox(detection)
+  const renderX = renderBox.x
+  const renderY = renderBox.y
+  const renderWidth = renderBox.width
+  const renderHeight = renderBox.height
 
   const sx = renderX * video.videoWidth
   const sy = renderY * video.videoHeight
@@ -1160,10 +1434,37 @@ function drawCanvasBlurRegion(
     ctx.fillStyle = 'rgba(5, 6, 8, 0.96)'
     ctx.fillRect(dx, dy, dw, dh)
   } else {
-    const blurPx = Math.max(10, Math.round((blurStrength / 100) * Math.min(dw, dh) * 0.55))
-    ctx.filter = `blur(${blurPx}px)`
-    ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
-    ctx.filter = 'none'
+    const scratch = getLiveBlurScratchCanvas()
+    const downscaleRatio = Math.max(0.06, 0.32 - (blurStrength / 100) * 0.22)
+    const reducedWidth = Math.max(2, Math.round(dw * downscaleRatio))
+    const reducedHeight = Math.max(2, Math.round(dh * downscaleRatio))
+    const blurPx = Math.max(8, Math.round((blurStrength / 100) * Math.min(dw, dh) * 0.34))
+
+    if (scratch) {
+      scratch.width = reducedWidth
+      scratch.height = reducedHeight
+      const scratchCtx = scratch.getContext('2d')
+      if (scratchCtx) {
+        scratchCtx.setTransform(1, 0, 0, 1, 0, 0)
+        scratchCtx.clearRect(0, 0, reducedWidth, reducedHeight)
+        scratchCtx.imageSmoothingEnabled = true
+        scratchCtx.drawImage(video, sx, sy, sw, sh, 0, 0, reducedWidth, reducedHeight)
+
+        ctx.imageSmoothingEnabled = true
+        ctx.filter = `blur(${blurPx}px)`
+        ctx.drawImage(scratch, 0, 0, reducedWidth, reducedHeight, dx, dy, dw, dh)
+        ctx.filter = 'none'
+      } else {
+        ctx.filter = `blur(${blurPx}px)`
+        ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
+        ctx.filter = 'none'
+      }
+    } else {
+      ctx.filter = `blur(${blurPx}px)`
+      ctx.drawImage(video, sx, sy, sw, sh, dx, dy, dw, dh)
+      ctx.filter = 'none'
+    }
+
     ctx.fillStyle = 'rgba(0, 0, 0, 0.16)'
     ctx.fillRect(dx, dy, dw, dh)
   }
@@ -1209,6 +1510,8 @@ export default function VideoEditorPage() {
   const editorCenterRef = useRef<HTMLDivElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const hlsLoadedUrlRef = useRef<string | null>(null)
+  const detectionLoadRequestIdRef = useRef(0)
+  const readyRedactionJobIdsRef = useRef<Record<string, true>>({})
 
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
@@ -1339,9 +1642,9 @@ export default function VideoEditorPage() {
   const title = cached?.metadata?.filename || videoInfo?.system_metadata?.filename || videoId || 'Untitled'
 
   /* ---- HLS: play m3u8 streams in Chrome/Firefox (TwelveLabs returns HLS) ---- */
-  const effectiveStreamUrl = exportRedactDownloadUrl || streamUrl
+  const effectiveStreamUrl = streamUrl
   const useHls = effectiveStreamUrl && isHlsUrl(effectiveStreamUrl) && Hls.isSupported()
-  const liveRedactionReady = liveRedactionEnabled && !!streamUrl && !exportRedactDownloadUrl
+  const liveRedactionReady = liveRedactionEnabled && !!streamUrl
   const liveRedactionActive = liveRedactionReady
   const markLiveRedactionSeekPending = useCallback(() => {
     if (!liveRedactionActive) return
@@ -1349,6 +1652,8 @@ export default function VideoEditorPage() {
   }, [liveRedactionActive])
 
   useEffect(() => {
+    detectionLoadRequestIdRef.current += 1
+    readyRedactionJobIdsRef.current = {}
     setVideoInfo(null)
     setDetectionJobId(null)
     setHasRunDetection(false)
@@ -1374,6 +1679,10 @@ export default function VideoEditorPage() {
   useEffect(() => {
     setSummaryText(null)
     setSummaryTags(null)
+  }, [videoId])
+
+  useEffect(() => {
+    storeLastEditorVideoId(videoId)
   }, [videoId])
 
   useEffect(() => {
@@ -1897,37 +2206,121 @@ export default function VideoEditorPage() {
     }
   }, [videoId])
 
-  const runDetect = useCallback(async () => {
-    if (!videoId) {
-      setDetectionError('Video not loaded.')
-      return
+  const clearDetectionResults = useCallback((errorMessage: string | null, requestId: number) => {
+    if (detectionLoadRequestIdRef.current !== requestId) return
+    setDetectionJobId(null)
+    setApiDetections([])
+    setExcludedFromRedactionIds([])
+    setHasRunDetection(false)
+    setDetectionError(errorMessage)
+  }, [])
+
+  const loadDetectionItemsForJob = useCallback(async (
+    jobId: string,
+    requestId: number,
+    interactive: boolean,
+  ): Promise<boolean> => {
+    const [facesRes, objectsRes] = await Promise.all([
+      fetch(`${API_BASE}/api/faces/${encodeURIComponent(jobId)}`),
+      fetch(`${API_BASE}/api/objects/${encodeURIComponent(jobId)}`),
+    ])
+    const facesJson = await facesRes.json().catch(() => ({})) as {
+      unique_faces?: FaceDetectionApiRecord[]
+      error?: string
+      message?: string
+    }
+    const objectsJson = await objectsRes.json().catch(() => ({})) as {
+      unique_objects?: ObjectDetectionApiRecord[]
+      error?: string
+      message?: string
     }
 
-    setDetectionError(null)
-    setDetectionLoading(true)
+    if (detectionLoadRequestIdRef.current !== requestId) return false
+
+    if (facesRes.status === 202 || objectsRes.status === 202) {
+      if (interactive) {
+        clearDetectionResults('Analysis still in progress. Try again in a moment.', requestId)
+      }
+      return false
+    }
+    if (facesRes.status === 404 || objectsRes.status === 404) {
+      if (interactive) {
+        clearDetectionResults('Detection data is not ready for this video yet. Run processing for this video and try again.', requestId)
+      }
+      return false
+    }
+    if (!facesRes.ok || !objectsRes.ok) {
+      if (interactive) {
+        const faceError = facesJson.error || facesJson.message
+        const objectError = objectsJson.error || objectsJson.message
+        clearDetectionResults(faceError || objectError || 'Detection request failed.', requestId)
+      }
+      return false
+    }
+
+    const items = buildDetectionItemsFromApi(
+      Array.isArray(facesJson.unique_faces) ? facesJson.unique_faces : [],
+      Array.isArray(objectsJson.unique_objects) ? objectsJson.unique_objects : [],
+    )
+    if (detectionLoadRequestIdRef.current !== requestId) return false
+
+    setDetectionJobId(jobId)
+    readyRedactionJobIdsRef.current[jobId] = true
+    setApiDetections(items)
+    setExcludedFromRedactionIds(items.map((item) => item.id))
+    setHasRunDetection(true)
+    if (interactive && items.length === 0) {
+      setDetectionError('No faces or objects found for this video.')
+    } else {
+      setDetectionError(null)
+    }
+    return true
+  }, [clearDetectionResults])
+
+  const hydrateStoredDetections = useCallback(async ({
+    ensure = false,
+    interactive = false,
+  }: {
+    ensure?: boolean
+    interactive?: boolean
+  } = {}): Promise<boolean> => {
+    if (!videoId) {
+      if (interactive) setDetectionError('Video not loaded.')
+      return false
+    }
+
+    const requestId = detectionLoadRequestIdRef.current + 1
+    detectionLoadRequestIdRef.current = requestId
+
+    if (interactive) {
+      setDetectionError(null)
+      setDetectionLoading(true)
+    }
+
     try {
-      const r = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?ensure=true&exact=true&force=true`)
-      const data = await r.json().catch(() => ({})) as {
+      const params = new URLSearchParams({ exact: 'true' })
+      if (ensure) params.set('ensure', 'true')
+      const response = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?${params.toString()}`)
+      const data = await response.json().catch(() => ({})) as {
         job_id?: string
         status?: string
         local_status?: string
         created?: boolean
-        forced?: boolean
         error?: string
       }
-      const jobId = r.ok && data.job_id ? String(data.job_id) : ''
 
+      if (detectionLoadRequestIdRef.current !== requestId) return false
+
+      const jobId = response.ok && data.job_id ? String(data.job_id) : ''
       if (!jobId) {
-        setDetectionJobId(null)
-        setApiDetections([])
-        setExcludedFromRedactionIds([])
-        setHasRunDetection(false)
-        setDetectionError(data.error || 'No local detection job was found for this video yet.')
-        return
+        if (interactive) {
+          clearDetectionResults(data.error || 'No saved local detection result was found for this video yet.', requestId)
+        }
+        return false
       }
 
       setDetectionJobId(jobId)
-      if (data.created || data.status !== 'ready') {
+      if (ensure && (data.created || data.status !== 'ready')) {
         const startedAt = Date.now()
         while (Date.now() - startedAt < 180000) {
           const statusRes = await fetch(`${API_BASE}/api/index/${encodeURIComponent(jobId)}`)
@@ -1935,6 +2328,7 @@ export default function VideoEditorPage() {
             status?: string
             error?: string
           }
+          if (detectionLoadRequestIdRef.current !== requestId) return false
           if (!statusRes.ok) {
             throw new Error(statusJson.error || 'Could not check detection status for this video.')
           }
@@ -1944,100 +2338,30 @@ export default function VideoEditorPage() {
           }
           await delay(1500)
         }
+      } else if (data.status !== 'ready') {
+        return false
       }
 
-      const [facesRes, objectsRes] = await Promise.all([
-        fetch(`${API_BASE}/api/faces/${encodeURIComponent(jobId)}`),
-        fetch(`${API_BASE}/api/objects/${encodeURIComponent(jobId)}`),
-      ])
-      const facesJson = await facesRes.json().catch(() => ({}))
-      const objectsJson = await objectsRes.json().catch(() => ({}))
-      if (facesRes.status === 202 || objectsRes.status === 202) {
-        setApiDetections([])
-        setExcludedFromRedactionIds([])
-        setHasRunDetection(false)
-        setDetectionError('Analysis still in progress. Try again in a moment.')
-        return
-      }
-      if (facesRes.status === 404 || objectsRes.status === 404) {
-        setApiDetections([])
-        setExcludedFromRedactionIds([])
-        setHasRunDetection(false)
-        setDetectionError('Detection data is not ready for this video yet. Run processing for this video and try again.')
-        return
-      }
-      if (!facesRes.ok || !objectsRes.ok) {
-        setApiDetections([])
-        setExcludedFromRedactionIds([])
-        setHasRunDetection(false)
-        const faceError = (facesJson as { error?: string; message?: string }).error || (facesJson as { error?: string; message?: string }).message
-        const objectError = (objectsJson as { error?: string; message?: string }).error || (objectsJson as { error?: string; message?: string }).message
-        setDetectionError(faceError || objectError || 'Detection request failed.')
-        return
-      }
-      const items: DetectionItem[] = []
-      const faceColor = '#F59E0B'
-      const objectColors = ['#3B82F6', '#EF4444', '#10B981', '#8B5CF6']
-      if (facesRes.ok && Array.isArray(facesJson.unique_faces)) {
-        facesJson.unique_faces.forEach((f: {
-          person_id?: string
-          description?: string
-          snap_base64?: string
-          time_ranges?: DetectionTimeRange[]
-          appearances?: DetectionAppearance[]
-          entity_id?: string | null
-        }, i: number) => {
-          const personId = (f.person_id || `person_${i}`).toString().trim()
-          const name = (f.description || personId || `Person ${i}`).toString().trim()
-          items.push({
-            id: `face-${personId}`,
-            kind: 'face',
-            label: name.slice(0, 60),
-            tags: [],
-            color: faceColor,
-            snapBase64: f.snap_base64,
-            personId,
-            timeRanges: Array.isArray(f.time_ranges) ? f.time_ranges : [],
-            appearances: Array.isArray(f.appearances) ? f.appearances : [],
-            entityId: typeof f.entity_id === 'string' && f.entity_id.trim() ? f.entity_id : null,
-          })
-        })
-      }
-      if (objectsRes.ok && Array.isArray(objectsJson.unique_objects)) {
-        const seenClasses = new Set<string>()
-        objectsJson.unique_objects.forEach((o: { object_id?: string; identification?: string; snap_base64?: string }, i: number) => {
-          const objectClass = (o.identification || o.object_id || `Object ${i}`).toString().trim()
-          if (seenClasses.has(objectClass)) return
-          seenClasses.add(objectClass)
-          items.push({
-            id: `object-${objectClass}`,
-            kind: 'object',
-            label: objectClass.slice(0, 60),
-            tags: [],
-            color: objectColors[i % objectColors.length],
-            snapBase64: o.snap_base64,
-            objectClass,
-          })
-        })
-      }
-      if (items.length === 0) {
-        if (facesRes.status === 404 && objectsRes.status === 404) {
-          setDetectionError('Detection data was not found for this video.')
-        } else if (facesRes.ok || objectsRes.ok) {
-          setDetectionError('No faces or objects found for this video.')
-        }
-      } else {
-        setDetectionError(null)
-      }
-      setApiDetections(items)
-      setExcludedFromRedactionIds(items.map((item) => item.id))
-      setHasRunDetection(true)
+      return loadDetectionItemsForJob(jobId, requestId, interactive)
     } catch (e) {
-      setDetectionError(e instanceof Error ? e.message : 'Detection request failed')
+      if (interactive) {
+        clearDetectionResults(e instanceof Error ? e.message : 'Detection request failed', requestId)
+      }
+      return false
     } finally {
-      setDetectionLoading(false)
+      if (interactive && detectionLoadRequestIdRef.current === requestId) {
+        setDetectionLoading(false)
+      }
     }
-  }, [videoId])
+  }, [clearDetectionResults, loadDetectionItemsForJob, videoId])
+
+  useEffect(() => {
+    void hydrateStoredDetections()
+  }, [hydrateStoredDetections])
+
+  const runDetect = useCallback(async () => {
+    await hydrateStoredDetections({ ensure: true, interactive: true })
+  }, [hydrateStoredDetections])
 
   const selectedFacePersonIds = useMemo(
     () =>
@@ -2191,8 +2515,45 @@ export default function VideoEditorPage() {
     })
   ), [excludedFromRedactionIds, faceDetectionItemsByPersonId, faceLaneEntityRangesByPersonId, personLaneIds])
 
+  const waitForRedactionJobReady = useCallback(async (jobId: string, initialStatus?: string | null) => {
+    if (!jobId) {
+      throw new Error('No local processing job found for this video.')
+    }
+    if (readyRedactionJobIdsRef.current[jobId]) {
+      return jobId
+    }
+    if (initialStatus === 'ready') {
+      readyRedactionJobIdsRef.current[jobId] = true
+      return jobId
+    }
+
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < 180000) {
+      const statusRes = await fetch(`${API_BASE}/api/index/${encodeURIComponent(jobId)}`)
+      const statusJson = await statusRes.json().catch(() => ({})) as {
+        status?: string
+        error?: string
+      }
+      if (!statusRes.ok) {
+        throw new Error(statusJson.error || 'Could not check local processing status for this video.')
+      }
+      if (statusJson.status === 'ready') {
+        readyRedactionJobIdsRef.current[jobId] = true
+        return jobId
+      }
+      if (statusJson.status === 'failed') {
+        throw new Error(statusJson.error || 'Local processing failed for this video.')
+      }
+      await delay(1500)
+    }
+
+    throw new Error('Local processing is still running. Please try again in a moment.')
+  }, [])
+
   const resolveRedactionJobId = useCallback(async () => {
-    if (detectionJobId) return detectionJobId
+    if (detectionJobId) {
+      return waitForRedactionJobReady(detectionJobId)
+    }
     if (!videoId) {
       throw new Error('Video not loaded.')
     }
@@ -2206,9 +2567,10 @@ export default function VideoEditorPage() {
     if (!data.job_id) {
       throw new Error('No local processing job found for this video.')
     }
-    setDetectionJobId(data.job_id as string)
-    return data.job_id as string
-  }, [detectionJobId, videoId])
+    const jobId = data.job_id as string
+    setDetectionJobId(jobId)
+    return waitForRedactionJobReady(jobId, typeof data.status === 'string' ? data.status : null)
+  }, [detectionJobId, videoId, waitForRedactionJobReady])
 
   const requestLiveRedaction = useCallback(async (requestedTime: number, options?: { force?: boolean; resetTracking?: boolean }) => {
     if (!liveRedactionActive || !effectiveStreamUrl) return
@@ -2259,10 +2621,18 @@ export default function VideoEditorPage() {
       }
 
       const resolvedTime = typeof data.time_sec === 'number' ? data.time_sec : requestedTime
+      const filteredDetections = filterLiveDetectionsToSelections(
+        Array.isArray(data.detections) ? data.detections : [],
+        {
+          hasRunDetection,
+          selectedFacePersonIds,
+          selectedObjectClasses,
+        },
+      )
       setLiveRedactionDetections((previous) =>
         stabilizeLiveDetections(
           previous,
-          Array.isArray(data.detections) ? data.detections : [],
+          filteredDetections,
           resolvedTime,
         )
       )
@@ -2340,10 +2710,11 @@ export default function VideoEditorPage() {
     setExportRedactLoading(true)
     try {
       const jobId = await resolveRedactionJobId()
+      const shouldUseTemporalOptimization = selectedFacePersonIds.length > 0
       const body: any = {
         job_id: jobId,
-        detect_every_n: 1,
-        use_temporal_optimization: false,
+        detect_every_n: 3,
+        use_temporal_optimization: shouldUseTemporalOptimization,
         blur_strength: blurIntensity,
         redaction_style: redactionStyle,
       }
@@ -2373,20 +2744,37 @@ export default function VideoEditorPage() {
         throw new Error((err as { error?: string }).error || res.statusText)
       }
       const result = (await res.json()) as { download_url?: string; output_path?: string }
+      let resolvedDownloadUrl: string | null = null
+      let resolvedFilename = 'redacted-video.mp4'
       if (result.download_url) {
-        setExportRedactDownloadUrl(result.download_url.startsWith('http') ? result.download_url : `${API_BASE}${result.download_url}`)
+        resolvedDownloadUrl = result.download_url.startsWith('http') ? result.download_url : `${API_BASE}${result.download_url}`
+        setExportRedactDownloadUrl(resolvedDownloadUrl)
       }
       if (result.output_path) {
-        const fileName = result.output_path.split('/').pop() || 'redacted-video.mp4'
-        setExportRedactFilename(fileName)
+        resolvedFilename = result.output_path.split('/').pop() || 'redacted-video.mp4'
+        setExportRedactFilename(resolvedFilename)
       }
-      // Keep menu open so user can click "Download redacted video"
+      if (resolvedDownloadUrl) {
+        await triggerFileDownload(resolvedDownloadUrl, resolvedFilename)
+        setExportMenuOpen(false)
+      }
     } catch (e) {
       setExportRedactError(e instanceof Error ? e.message : 'Export failed')
     } finally {
       setExportRedactLoading(false)
     }
-  }, [buildCustomRegionPayload, hasRunDetection, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses, trackingRegions])
+  }, [blurIntensity, buildCustomRegionPayload, hasRunDetection, redactionStyle, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses, trackingRegions])
+
+  const downloadExportedVideo = useCallback(async () => {
+    if (!exportRedactDownloadUrl) return
+    setExportRedactError(null)
+    try {
+      await triggerFileDownload(exportRedactDownloadUrl, exportRedactFilename)
+      setExportMenuOpen(false)
+    } catch (e) {
+      setExportRedactError(e instanceof Error ? e.message : 'Download failed')
+    }
+  }, [exportRedactDownloadUrl, exportRedactFilename])
 
   useEffect(() => {
     if (!liveRedactionActive || !effectiveStreamUrl) {
@@ -2897,6 +3285,11 @@ export default function VideoEditorPage() {
       return true
     })
   }, [liveRedactionDetections])
+  const liveBackdropBlurSupported = useMemo(() => supportsLiveBackdropBlur(), [])
+  const renderedLiveRedactionDetections = useMemo(() => {
+    const playbackTime = videoRef.current?.currentTime ?? currentTime
+    return visibleLiveRedactionDetections.map((entry) => predictLiveDetection(entry, playbackTime))
+  }, [currentTime, visibleLiveRedactionDetections])
   const showLiveRedactionSeekLoader = liveRedactionActive && liveRedactionSeekPending
   useEffect(() => {
     visibleLiveRedactionDetectionsRef.current = visibleLiveRedactionDetections
@@ -2984,6 +3377,7 @@ export default function VideoEditorPage() {
     blurIntensity,
     currentTime,
     isPlaying,
+    liveBackdropBlurSupported,
     liveRedactionActive,
     overlayViewport.height,
     overlayViewport.width,
@@ -3070,7 +3464,7 @@ export default function VideoEditorPage() {
       }
       ctx.clearRect(0, 0, Math.max(0, overlayViewport.width), Math.max(0, overlayViewport.height))
     }
-  }, [blurIntensity, isPlaying, liveRedactionActive, overlayViewport.height, overlayViewport.width, redactionStyle])
+  }, [blurIntensity, isPlaying, liveBackdropBlurSupported, liveRedactionActive, overlayViewport.height, overlayViewport.width, redactionStyle])
 
   useEffect(() => {
     if (!liveRedactionActive || !hasRunDetection) return
@@ -3093,6 +3487,9 @@ export default function VideoEditorPage() {
     const isExcluded = excludedFromRedactionIds.includes(selectionId)
     if (isExcluded && personId) {
       ensureFaceTimelineLane(personId)
+    }
+    if (isExcluded) {
+      setLiveRedactionEnabled(true)
     }
     setExcludedFromRedactionIds((previous) => (
       previous.includes(selectionId)
@@ -3265,8 +3662,8 @@ export default function VideoEditorPage() {
                 </div>
                 <p className="text-xs text-text-secondary leading-relaxed break-words">
                   {liveRedactionEnabled
-                    ? 'Live blur is previewing directly on the video. Detect selections now apply immediately to this preview and are also reused when you render the redacted download.'
-                    : 'Live blur preview is off. Your Detect blur and unblur choices are still preserved for render and download, and you can switch Live Blur back on anytime.'}
+                    ? 'Live blur is previewing directly on the video player. Detect selections apply immediately here and are also reused when you render the redacted download.'
+                    : 'Live blur preview is off in the video player. Your Detect blur and unblur choices are still preserved for render and download, and selecting a target for blur will turn the player preview back on.'}
                 </p>
                 <div className="space-y-2 border-t border-border pt-3 min-w-0">
                   <span className="text-[11px] font-medium uppercase tracking-wider text-text-tertiary">Redaction</span>
@@ -3434,21 +3831,23 @@ export default function VideoEditorPage() {
                   >
                     <IconDownload className="w-4 h-4" />
                     {exportRedactLoading
-                      ? 'Preparing redacted download...'
-                      : exportRedactDownloadUrl
-                        ? 'Redacted Download'
-                        : 'Redacted Download'}
+                      ? 'Rendering redacted video...'
+                      : 'Render and download redacted video'}
                   </button>
+                  {exportRedactLoading && (
+                    <p className="px-3 py-2 text-xs text-text-secondary border-b border-border">
+                      Long videos can take a bit. We now render with tracking and selected-person time ranges to speed this up.
+                    </p>
+                  )}
                   {exportRedactDownloadUrl && (
-                    <a
-                      href={exportRedactDownloadUrl}
-                      download={exportRedactFilename}
-                      className="block w-full px-3 py-2 text-left text-sm text-accent hover:bg-card transition-colors flex items-center gap-2 border-b border-border whitespace-nowrap"
-                      onClick={() => setExportMenuOpen(false)}
+                    <button
+                      type="button"
+                      className="w-full px-3 py-2 text-left text-sm text-accent hover:bg-card transition-colors flex items-center gap-2 border-b border-border whitespace-nowrap"
+                      onClick={() => { void downloadExportedVideo() }}
                     >
                       <IconDownload className="w-4 h-4" />
                       Download redacted video
-                    </a>
+                    </button>
                   )}
                   <button
                     type="button"
@@ -3526,6 +3925,14 @@ export default function VideoEditorPage() {
                         ref={liveBlurCanvasRef}
                         className="absolute inset-0 w-full h-full pointer-events-none"
                       />
+                      {!showLiveRedactionSeekLoader && liveBackdropBlurSupported && renderedLiveRedactionDetections.map((detection, index) => (
+                        <div
+                          key={`live-region-${detection.trackId || detection.id || `${detection.kind}-${index}`}`}
+                          className="absolute z-10"
+                          style={getLiveRedactionOverlayStyle(detection, redactionStyle, blurIntensity)}
+                          aria-hidden
+                        />
+                      ))}
                       {showLiveRedactionSeekLoader && (
                         <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/18 backdrop-blur-[2px]">
                           <div
@@ -3549,14 +3956,15 @@ export default function VideoEditorPage() {
                           </div>
                         </div>
                       )}
-                      {!showLiveRedactionSeekLoader && !isPlaying && hasRunDetection && visibleLiveRedactionDetections.map((detection) => {
+                      {!showLiveRedactionSeekLoader && !isPlaying && hasRunDetection && renderedLiveRedactionDetections.map((detection) => {
                         const selectionId = hasRunDetection ? getSelectionIdForLiveDetection(detection) : null
                         if (!selectionId) return null
+                        const renderBox = getLiveRedactionRenderBox(detection)
                         const overlayStyle = {
-                          left: `${detection.x * 100}%`,
-                          top: `${detection.y * 100}%`,
-                          width: `${detection.width * 100}%`,
-                          height: `${detection.height * 100}%`,
+                          left: `${renderBox.x * 100}%`,
+                          top: `${renderBox.y * 100}%`,
+                          width: `${renderBox.width * 100}%`,
+                          height: `${renderBox.height * 100}%`,
                           borderColor: detection.kind === 'face' ? 'rgba(255,255,255,0.98)' : 'rgba(0,220,130,0.98)',
                           backgroundColor: detection.kind === 'face' ? 'rgba(255,255,255,0.06)' : 'rgba(0,220,130,0.10)',
                           transition: 'left 120ms linear, top 120ms linear, width 120ms linear, height 120ms linear',

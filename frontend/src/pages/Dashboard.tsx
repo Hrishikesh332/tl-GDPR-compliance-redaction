@@ -1192,7 +1192,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
             {filteredVideos.map((v) => (
                 <Link
                   key={v.id}
-                  to={`/video/${v.id}`}
+                  to={`/editor/${v.id}`}
                   className="group block focus:outline-none focus:ring-2 focus:ring-accent/30 rounded-xl min-w-0"
                 >
                   <div className="relative aspect-video rounded-xl overflow-hidden bg-brand-charcoal">

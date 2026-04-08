@@ -6,6 +6,7 @@ import EditorPage from './pages/EditorPage'
 import VideoEditorPage from './pages/VideoEditorPage'
 import UploadVideosModal from './components/UploadVideosModal'
 import { VideoCacheProvider, useVideoCache } from './contexts/VideoCache'
+import { isEditorExperiencePath } from './lib/editorRouting'
 import logoFullUrl from '../strand/assets/logo-full.svg?url'
 import logoMarkUrl from '../strand/assets/logo-mark.svg?url'
 import devicesIconUrl from '../strand/icons/devices.svg?url'
@@ -28,11 +29,19 @@ function NavLinks({
   mobile?: boolean
   onNavigate?: () => void
 }) {
+  const location = useLocation()
   const base = 'font-brand-xbold px-3 py-2 rounded-lg text-sm font-medium transition-colors border'
   const active = 'text-text-primary bg-card border-border'
   const inactive = 'border-transparent text-text-secondary hover:bg-card hover:text-text-primary'
-  const linkClass = ({ isActive }: { isActive: boolean }) =>
-    `${base} ${isActive ? active : inactive} ${mobile ? 'block w-full text-left' : ''}`
+  const isItemActive = (to: string, routeActive: boolean) => {
+    if (to === '/editor') return isEditorExperiencePath(location.pathname)
+    if (to === '/overview') return location.pathname === '/' || routeActive
+    return routeActive
+  }
+  const linkClass = ({ isActive, isPending }: { isActive: boolean; isPending: boolean }) => {
+    const resolvedActive = isPending ? false : isActive
+    return `${base} ${resolvedActive ? active : inactive} ${mobile ? 'block w-full text-left' : ''}`
+  }
 
   return (
     <>
@@ -40,9 +49,13 @@ function NavLinks({
         <NavLink
           key={item.to}
           to={item.to}
-          end
-          className={linkClass}
+          end={item.to !== '/editor'}
+          className={({ isActive, isPending }) => linkClass({
+            isActive: isItemActive(item.to, isActive),
+            isPending,
+          })}
           onClick={onNavigate}
+          aria-current={isItemActive(item.to, location.pathname === item.to) ? 'page' : undefined}
         >
           {item.label}
         </NavLink>
@@ -161,7 +174,7 @@ function Shell() {
   const isOverviewRoute = location.pathname === '/' || location.pathname === '/overview'
   const mobileRestrictedSection =
     isMobileEditorViewport && !isOverviewRoute
-      ? (location.pathname.startsWith('/video/')
+      ? (location.pathname.startsWith('/video/') || location.pathname.startsWith('/editor/')
           ? 'video'
           : location.pathname === '/editor'
             ? 'editor'
@@ -256,6 +269,7 @@ function Shell() {
               />
               <Route path="/overview" element={<OverviewPage />} />
               <Route path="/editor" element={<EditorPage />} />
+              <Route path="/editor/:videoId" element={<VideoEditorPage />} />
               <Route path="/video/:videoId" element={<VideoEditorPage />} />
             </Routes>
           )}
