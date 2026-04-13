@@ -802,10 +802,18 @@ def live_redaction_detect():
     except (TypeError, ValueError):
         face_confidence = 0.28
 
-    # Use the same denser temporal sampling for all live detection requests so
-    # the frontend receives a steadier signal, even before a saved detection job
-    # has been loaded in the editor.
+    # Dense temporal sampling is useful for open-ended "detect everything"
+    # preview requests, but it makes selected saved-face playback too slow
+    # because the same identity relock work gets repeated across 5 frames.
+    # When the editor is following explicit person ids, stay on the current
+    # frame and let the saved appearance anchors plus live tracking provide
+    # continuity instead.
     sample_offsets = (-0.12, -0.06, 0.0, 0.06, 0.12)
+    if person_ids:
+        sample_offsets = (0.0,)
+    elif object_class_set:
+        sample_offsets = (-0.08, 0.0, 0.08)
+
     sample_times = []
     for offset in sample_offsets:
         ts = max(0.0, time_sec + offset)
@@ -817,11 +825,14 @@ def live_redaction_detect():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    sampled_frames = extract_frames_at_timestamps(job["video_path"], sample_times)
-    frames_by_time = {round(float(item["timestamp"]), 3): item["frame"] for item in sampled_frames}
-
     frame = frame_info["frame"]
     frame_h, frame_w = frame.shape[:2]
+    if len(sample_times) == 1 and abs(sample_times[0] - float(frame_info["timestamp"])) <= 1e-4:
+        frames_by_time = {round(float(frame_info["timestamp"]), 3): frame}
+    else:
+        sampled_frames = extract_frames_at_timestamps(job["video_path"], sample_times)
+        frames_by_time = {round(float(item["timestamp"]), 3): item["frame"] for item in sampled_frames}
+
     detections = []
 
     if include_faces:

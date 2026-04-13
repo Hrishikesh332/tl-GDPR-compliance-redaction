@@ -192,6 +192,21 @@ def bbox_center_distance(box_a, box_b):
     return math.hypot(acx - bcx, acy - bcy)
 
 
+def is_face_track_motion_consistent(candidate_bbox, reference_bbox):
+    if not candidate_bbox or not reference_bbox:
+        return False
+    if bbox_iou(candidate_bbox, reference_bbox) >= 0.42:
+        return True
+    ref_diag = max(
+        1.0,
+        math.hypot(
+            reference_bbox[2] - reference_bbox[0],
+            reference_bbox[3] - reference_bbox[1],
+        ),
+    )
+    return bbox_center_distance(candidate_bbox, reference_bbox) <= ref_diag * 0.26
+
+
 def frame_bbox_to_tracker_roi(bbox, scale_back, small_w, small_h):
     if not bbox or small_w <= 0 or small_h <= 0:
         return None
@@ -527,7 +542,7 @@ def bbox_to_normalized_region(bbox, frame_w, frame_h):
     }
 
 
-def initialize_auto_redaction_track(small_frame, gray_small, bbox, scale_back, kind):
+def initialize_auto_redaction_track(small_frame, gray_small, bbox, scale_back, kind, metadata=None):
     tracker = None
     try:
         tracker = create_initialized_tracker(small_frame, bbox, scale_back, scale_adaptive=True)
@@ -541,6 +556,7 @@ def initialize_auto_redaction_track(small_frame, gray_small, bbox, scale_back, k
         small_frame.shape[0],
     )
     return {
+        **(metadata or {}),
         "kind": kind,
         "tracker": tracker,
         "last_bbox": bbox,
@@ -565,6 +581,8 @@ def update_auto_redaction_track(
 ):
     tracker = track.get("tracker")
     kind = str(track.get("kind") or "object").strip().lower()
+    known_face = track.get("known_face")
+    identity_tolerance = track.get("identity_tolerance")
     last_bbox = track.get("last_bbox")
     prev_smoothed = track.get("smoothed_bbox") or last_bbox
     prev_small_bbox = track.get("small_bbox")
@@ -630,37 +648,66 @@ def update_auto_redaction_track(
         except (cv2.error, AttributeError, Exception):
             pass
 
-    resolved_bbox = optical_bbox if optical_ok else (tracker_bbox if tracker_ok else last_bbox)
+    predicted_bbox = optical_bbox if optical_ok else (tracker_bbox if tracker_ok else None)
+    resolved_bbox = predicted_bbox or last_bbox
     face_detected = False
+    tracking_success = tracker_ok or optical_ok
 
     if kind == "face" and resolved_bbox is not None:
-        search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
-        refined_bbox = detect_best_face_bbox(
-            frame,
-            expand_bbox(resolved_bbox, frame_w, frame_h, search_factor),
-            preferred_bbox=resolved_bbox,
-            allow_supplemental=(not tracker_ok or fail_count > 0),
-        )
-        if refined_bbox is not None:
-            resolved_bbox = refined_bbox
-            face_detected = True
-            if tracker is not None and (
-                periodic_reinit
-                or not tracker_ok
-                or bbox_iou(tracker_bbox, resolved_bbox) < 0.45
-            ):
-                try:
-                    refreshed_tracker = create_initialized_tracker(
-                        small_frame,
-                        expand_bbox(resolved_bbox, frame_w, frame_h, TRACKER_REINIT_BBOX_EXPAND_FACTOR),
-                        scale_back,
-                        scale_adaptive=True,
-                    )
-                    if refreshed_tracker is not None:
-                        tracker = refreshed_tracker
-                        fail_count = 0
-                except (cv2.error, AttributeError, Exception):
-                    pass
+        if known_face is not None:
+            from services.detection import localize_known_face_in_search_region
+
+            search_anchor = predicted_bbox or last_bbox
+            search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+            relocked_face = localize_known_face_in_search_region(
+                frame,
+                known_face=known_face,
+                search_bbox=expand_bbox(search_anchor, frame_w, frame_h, search_factor),
+                preferred_bbox=search_anchor,
+                tolerance=identity_tolerance if identity_tolerance is not None else 0.35,
+                allow_geometry_fallback=True,
+            ) if search_anchor is not None else None
+
+            if relocked_face is not None:
+                resolved_bbox = tuple(relocked_face["bbox"])
+                face_detected = True
+                tracking_success = True
+            elif predicted_bbox is not None and is_face_track_motion_consistent(predicted_bbox, last_bbox):
+                resolved_bbox = predicted_bbox
+                tracking_success = True
+            else:
+                resolved_bbox = last_bbox
+                tracking_success = False
+        else:
+            search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+            refined_bbox = detect_best_face_bbox(
+                frame,
+                expand_bbox(resolved_bbox, frame_w, frame_h, search_factor),
+                preferred_bbox=resolved_bbox,
+                allow_supplemental=(not tracker_ok or fail_count > 0),
+            )
+            if refined_bbox is not None:
+                resolved_bbox = refined_bbox
+                face_detected = True
+                tracking_success = True
+
+        if face_detected and tracker is not None and (
+            periodic_reinit
+            or not tracker_ok
+            or bbox_iou(tracker_bbox, resolved_bbox) < 0.45
+        ):
+            try:
+                refreshed_tracker = create_initialized_tracker(
+                    small_frame,
+                    expand_bbox(resolved_bbox, frame_w, frame_h, TRACKER_REINIT_BBOX_EXPAND_FACTOR),
+                    scale_back,
+                    scale_adaptive=True,
+                )
+                if refreshed_tracker is not None:
+                    tracker = refreshed_tracker
+                    fail_count = 0
+            except (cv2.error, AttributeError, Exception):
+                pass
 
     resolved_small_bbox = None
     if resolved_bbox is not None:
@@ -680,7 +727,6 @@ def update_auto_redaction_track(
         next_points = seed_tracking_points(gray_small, resolved_small_bbox) if resolved_small_bbox is not None else None
 
     display_bbox = smooth_bbox(resolved_bbox, prev_smoothed, TRACKER_SMOOTHING_ALPHA, frame_w, frame_h) if resolved_bbox is not None else prev_smoothed
-    tracking_success = tracker_ok or optical_ok or face_detected
 
     if not tracking_success and tracker is not None and fail_count >= reinit_after_fails and last_bbox:
         try:
@@ -1125,20 +1171,22 @@ def redact_video(
 
         if run_detection:
             from services.detection import match_faces_in_frame, detect_face_boxes, localize_known_faces_in_frame
+            localized_faces = []
             if auto_face_mode:
                 face_boxes = [
                     expand_face_redaction_bbox(tuple(b["bbox"]), w, h)
                     for b in detect_face_boxes(frame)
                 ]
             elif face_targets:
+                localized_faces = localize_known_faces_in_frame(
+                    frame,
+                    face_targets,
+                    time_sec=current_sec,
+                    tolerance=face_tolerance if face_tolerance is not None else 0.35,
+                )
                 face_boxes = [
                     expand_face_redaction_bbox(tuple(face["bbox"]), w, h)
-                    for face in localize_known_faces_in_frame(
-                        frame,
-                        face_targets,
-                        time_sec=current_sec,
-                        tolerance=face_tolerance if face_tolerance is not None else 0.35,
-                    )
+                    for face in localized_faces
                 ]
             else:
                 face_boxes = [
@@ -1152,15 +1200,48 @@ def redact_video(
                     )
                 ]
             obj_boxes = match_objects(frame, object_classes, conf_threshold=obj_conf) if object_classes else []
-            detected_tracks = ([("face", box) for box in face_boxes] + [("object", box) for box in obj_boxes])
+            detected_tracks = []
+            if auto_face_mode:
+                detected_tracks.extend({"kind": "face", "bbox": box} for box in face_boxes)
+            elif face_targets:
+                face_targets_by_person = {
+                    str(face.get("person_id") or "").strip(): face
+                    for face in face_targets
+                    if str(face.get("person_id") or "").strip()
+                }
+                for face in localized_faces:
+                    expanded_bbox = expand_face_redaction_bbox(tuple(face["bbox"]), w, h)
+                    person_id = str(face.get("person_id") or "").strip()
+                    detected_tracks.append({
+                        "kind": "face",
+                        "bbox": expanded_bbox,
+                        "person_id": person_id or None,
+                        "known_face": face_targets_by_person.get(person_id),
+                        "identity_tolerance": face_tolerance if face_tolerance is not None else 0.35,
+                    })
+            else:
+                detected_tracks.extend({"kind": "face", "bbox": box} for box in face_boxes)
+            detected_tracks.extend({"kind": "object", "bbox": box} for box in obj_boxes)
             detection_frames_processed += 1
 
-            for _, box in detected_tracks:
+            for detected_track in detected_tracks:
+                box = detected_track["bbox"]
                 x1, y1, x2, y2 = [int(v) for v in box]
                 apply_redaction(frame, (x1, y1, x2, y2), redaction_style, blur_strength)
             trackers = [
-                initialize_auto_redaction_track(small, gray_small, box, scale_back_actual, kind)
-                for kind, box in detected_tracks
+                initialize_auto_redaction_track(
+                    small,
+                    gray_small,
+                    detected_track["bbox"],
+                    scale_back_actual,
+                    detected_track["kind"],
+                    {
+                        key: value
+                        for key, value in detected_track.items()
+                        if key not in {"bbox", "kind"}
+                    },
+                )
+                for detected_track in detected_tracks
             ] if small is not None and gray_small is not None and scale_back_actual is not None else []
             auto_prev_small_gray = gray_small
         elif trackers and in_temporal_range and small is not None and gray_small is not None and scale_back_actual is not None:

@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import Hls from 'hls.js'
 import { useVideoCache } from '../contexts/VideoCache'
 import { API_BASE } from '../lib/api'
-import { storeLastEditorVideoId } from '../lib/editorRouting'
+import { DEMO_EDITOR_VIDEO_ID, storeLastEditorVideoId } from '../lib/editorRouting'
 import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
@@ -447,8 +447,8 @@ const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
 ]
 
 const LIVE_DETECTION_POLL_MS = 120
-const LIVE_DETECTION_HOLD_MS = 720
-const LIVE_IDENTIFIED_FACE_HOLD_MS = 1200
+const LIVE_DETECTION_HOLD_MS = 1500
+const LIVE_IDENTIFIED_FACE_HOLD_MS = 2800
 const LIVE_FACE_PADDING = 0.2
 const LIVE_OBJECT_PADDING = 0.08
 const LIVE_DETECTION_SMOOTHING = 0.34
@@ -466,7 +466,7 @@ const LIVE_FACE_MAJOR_SHIFT_SIZE_RATIO = 0.45
 const LIVE_FACE_MAX_VELOCITY = 1.45
 const LIVE_OBJECT_MAX_VELOCITY = 1.8
 const LIVE_SIZE_MAX_VELOCITY = 1.3
-const LIVE_PREDICTION_MAX_LEAD_SEC = 0.26
+const LIVE_PREDICTION_MAX_LEAD_SEC = 1.0
 const LIVE_PREDICTION_MAX_LAG_SEC = 0.08
 // Hide the audio waveform so the lower lane can focus on entity-search matches.
 const SHOW_AUDIO_WAVEFORM = false
@@ -547,6 +547,8 @@ type ObjectDetectionApiRecord = {
   object_id?: string
   identification?: string
   snap_base64?: string
+  appearance_count?: number
+  appearances?: DetectionAppearance[]
 }
 
 type FaceTimelineSegment = {
@@ -831,6 +833,8 @@ function buildDetectionItemsFromApi(
       color: objectColors[index % objectColors.length],
       snapBase64: objectItem.snap_base64,
       objectClass,
+      appearances: Array.isArray(objectItem.appearances) ? objectItem.appearances : [],
+      appearanceCount: typeof objectItem.appearance_count === 'number' ? objectItem.appearance_count : 0,
     })
   })
 
@@ -1357,6 +1361,80 @@ function buildFaceTimelineSegments(
   return buildFaceTimelineSegmentsFromAppearances(item.appearances)
 }
 
+function getDetectionItemTimelineSegments(item: DetectionItem): FaceTimelineSegment[] {
+  const rangedSegments = mergeFaceTimelineSegments(
+    (item.timeRanges || [])
+      .map((range) => normalizeFaceTimelineSegment(range))
+      .filter((segment): segment is FaceTimelineSegment => segment !== null),
+  )
+  if (rangedSegments.length > 0) return rangedSegments
+  return buildFaceTimelineSegmentsFromAppearances(item.appearances)
+}
+
+function getDetectionItemNearestGapSec(item: DetectionItem, targetTime: number): number {
+  if (!Number.isFinite(targetTime)) return Number.POSITIVE_INFINITY
+  const segments = getDetectionItemTimelineSegments(item)
+  if (!segments.length) return Number.POSITIVE_INFINITY
+
+  let nearestGap = Number.POSITIVE_INFINITY
+  for (const segment of segments) {
+    if (targetTime >= segment.start && targetTime <= segment.end) {
+      return 0
+    }
+    const gap = targetTime < segment.start
+      ? segment.start - targetTime
+      : targetTime - segment.end
+    if (gap < nearestGap) {
+      nearestGap = gap
+    }
+  }
+  return nearestGap
+}
+
+function isDetectionItemLikelyVisibleAtTime(item: DetectionItem, targetTime: number): boolean {
+  return getDetectionItemNearestGapSec(item, targetTime) <= 0.18
+}
+
+function getDetectionItemSeekTime(item: DetectionItem, referenceTime: number): number | null {
+  const timestamps = (item.appearances || [])
+    .map((appearance) => asFiniteNumber(appearance.timestamp))
+    .filter((value): value is number => value !== null)
+    .sort((a, b) => a - b)
+
+  if (timestamps.length > 0) {
+    let nearest = timestamps[0]
+    let nearestGap = Math.abs(nearest - referenceTime)
+    for (const timestamp of timestamps.slice(1)) {
+      const gap = Math.abs(timestamp - referenceTime)
+      if (gap < nearestGap) {
+        nearest = timestamp
+        nearestGap = gap
+      }
+    }
+    return nearest
+  }
+
+  const segments = getDetectionItemTimelineSegments(item)
+  if (segments.length > 0) {
+    let bestSegment = segments[0]
+    let bestGap = Number.POSITIVE_INFINITY
+    for (const segment of segments) {
+      const gap = referenceTime < segment.start
+        ? segment.start - referenceTime
+        : referenceTime > segment.end
+          ? referenceTime - segment.end
+          : 0
+      if (gap < bestGap) {
+        bestGap = gap
+        bestSegment = segment
+      }
+    }
+    return (bestSegment.start + bestSegment.end) / 2
+  }
+
+  return null
+}
+
 function loadFaceLaneDebugCache(): Record<string, Record<string, FaceLaneDebugCacheEntry>> {
   if (typeof window === 'undefined') return {}
   try {
@@ -1640,11 +1718,15 @@ export default function VideoEditorPage() {
 
   const streamUrl = cached?.stream_url || videoInfo?.hls?.video_url || undefined
   const title = cached?.metadata?.filename || videoInfo?.system_metadata?.filename || videoId || 'Untitled'
+  const isDemoEditorVideo = videoId === DEMO_EDITOR_VIDEO_ID
 
   /* ---- HLS: play m3u8 streams in Chrome/Firefox (TwelveLabs returns HLS) ---- */
   const effectiveStreamUrl = streamUrl
   const useHls = effectiveStreamUrl && isHlsUrl(effectiveStreamUrl) && Hls.isSupported()
-  const liveRedactionReady = liveRedactionEnabled && !!streamUrl
+  const liveRedactionPreviewForcedBySelection = hasRunDetection && apiDetections.some(
+    (item) => !excludedFromRedactionIds.includes(item.id),
+  )
+  const liveRedactionReady = (liveRedactionEnabled || liveRedactionPreviewForcedBySelection) && !!streamUrl
   const liveRedactionActive = liveRedactionReady
   const markLiveRedactionSeekPending = useCallback(() => {
     if (!liveRedactionActive) return
@@ -3188,12 +3270,26 @@ export default function VideoEditorPage() {
   const detectionList = hasRunDetection ? apiDetections : DUMMY_DETECTIONS
   const filteredDetections = useMemo((): DetectionItem[] => {
     const q = detectionFilter.trim().toLowerCase()
-    if (!q) return detectionList
-    return detectionList.filter(
-      (d) =>
-        d.label.toLowerCase().includes(q) || d.tags.some((t: string) => t.toLowerCase().includes(q))
-    )
-  }, [detectionFilter, detectionList])
+    const matchingItems = !q
+      ? detectionList
+      : detectionList.filter(
+        (d) =>
+          d.label.toLowerCase().includes(q) || d.tags.some((t: string) => t.toLowerCase().includes(q))
+      )
+
+    return [...matchingItems].sort((a, b) => {
+      const activeDifference = Number(excludedFromRedactionIds.includes(a.id)) - Number(excludedFromRedactionIds.includes(b.id))
+      if (activeDifference !== 0) return activeDifference
+
+      const visibleDifference = Number(isDetectionItemLikelyVisibleAtTime(b, currentTime)) - Number(isDetectionItemLikelyVisibleAtTime(a, currentTime))
+      if (visibleDifference !== 0) return visibleDifference
+
+      const proximityDifference = getDetectionItemNearestGapSec(a, currentTime) - getDetectionItemNearestGapSec(b, currentTime)
+      if (Math.abs(proximityDifference) > 0.001) return proximityDifference
+
+      return a.label.localeCompare(b.label)
+    })
+  }, [currentTime, detectionFilter, detectionList, excludedFromRedactionIds])
   const searchResultForVideo = useMemo(() => {
     if (!videoId || !searchSessionResult?.results?.length) return null
     const result = searchSessionResult.results.find((entry) => entry?.id === videoId || entry?.video_id === videoId)
@@ -3498,6 +3594,22 @@ export default function VideoEditorPage() {
     ))
   }, [ensureFaceTimelineLane, excludedFromRedactionIds])
 
+  const handleDetectionListToggle = useCallback((item: DetectionItem) => {
+    const isExcluded = excludedFromRedactionIds.includes(item.id)
+    toggleDetectionSelectionById(item.id, item.kind === 'face' ? item.personId : null)
+
+    if (!isExcluded) return
+    if (isDetectionItemLikelyVisibleAtTime(item, currentTime)) return
+
+    const seekTime = getDetectionItemSeekTime(item, currentTime)
+    if (seekTime === null || !Number.isFinite(seekTime)) return
+    if (Math.abs(seekTime - currentTime) < 0.35) return
+
+    window.setTimeout(() => {
+      seekToTime(seekTime)
+    }, 0)
+  }, [currentTime, excludedFromRedactionIds, seekToTime, toggleDetectionSelectionById])
+
   const toggleLiveDetectionSelection = useCallback((detection: LiveRedactionDetection) => {
     const selectionId = getSelectionIdForLiveDetection(detection)
     if (!selectionId) return
@@ -3625,11 +3737,11 @@ export default function VideoEditorPage() {
               <div className="flex items-center justify-between gap-2 min-w-0">
                 <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider truncate min-w-0">Live Blur</span>
                 <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${
-                  liveRedactionEnabled
+                  liveRedactionReady
                     ? 'bg-accent/15 text-accent border border-accent/25'
                     : 'bg-card text-text-tertiary border border-border'
                 }`}>
-                  {liveRedactionEnabled ? 'Enabled' : 'Disabled'}
+                  {liveRedactionPreviewForcedBySelection && !liveRedactionEnabled ? 'Selection' : liveRedactionEnabled ? 'Enabled' : 'Disabled'}
                 </span>
               </div>
 
@@ -3661,7 +3773,7 @@ export default function VideoEditorPage() {
                   </button>
                 </div>
                 <p className="text-xs text-text-secondary leading-relaxed break-words">
-                  {liveRedactionEnabled
+                  {liveRedactionReady
                     ? 'Live blur is previewing directly on the video player. Detect selections apply immediately here and are also reused when you render the redacted download.'
                     : 'Live blur preview is off in the video player. Your Detect blur and unblur choices are still preserved for render and download, and selecting a target for blur will turn the player preview back on.'}
                 </p>
@@ -3722,15 +3834,21 @@ export default function VideoEditorPage() {
                             ? 'text-text-secondary'
                             : 'text-accent'
                       }`}>
-                        {!liveRedactionEnabled ? 'Disabled' : !liveRedactionReady ? 'Paused' : showLiveRedactionSeekLoader ? 'Updating' : liveRedactionLoading ? 'Scanning' : 'Running'}
+                        {!liveRedactionReady
+                          ? 'Paused'
+                          : liveRedactionPreviewForcedBySelection && !liveRedactionEnabled
+                            ? (showLiveRedactionSeekLoader ? 'Updating' : liveRedactionLoading ? 'Scanning' : 'Selection preview')
+                            : showLiveRedactionSeekLoader
+                              ? 'Updating'
+                              : liveRedactionLoading
+                                ? 'Scanning'
+                                : 'Running'}
                       </span>
                     </div>
                     <div className="flex items-center justify-between gap-2 min-w-0">
                       <span className="text-xs text-text-tertiary truncate min-w-0">Current frame</span>
                       <span className="text-xs text-text-primary tabular-nums shrink-0">
-                        {!liveRedactionEnabled
-                          ? 'Preview off'
-                          : !liveRedactionReady
+                        {!liveRedactionReady
                           ? 'Paused'
                           : showLiveRedactionSeekLoader
                           ? 'Updating...'
@@ -3860,6 +3978,27 @@ export default function VideoEditorPage() {
               )}
             </div>
           </header>
+
+          {isDemoEditorVideo && (
+            <div className="shrink-0 border-b border-border bg-[rgba(0,220,130,0.08)] px-5 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-[11px] font-brand-xbold uppercase tracking-[0.14em] text-accent">
+                    Demo Mode
+                  </p>
+                  <p className="mt-1 text-sm leading-6 text-text-secondary">
+                    You are exploring the sample editor session. Index a video from the dashboard to use and explore your own footage.
+                  </p>
+                </div>
+                <Link
+                  to="/dashboard"
+                  className="inline-flex shrink-0 items-center justify-center rounded-lg border border-accent/20 bg-background px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent/35 hover:text-accent"
+                >
+                  Go to dashboard
+                </Link>
+              </div>
+            </div>
+          )}
 
           {/* Video viewport: must get enough space to show the player; timeline can shrink when space is tight */}
           <div className="flex-1 min-h-[140px] px-4 pt-4 pb-2 flex items-center justify-center">
@@ -4793,12 +4932,14 @@ export default function VideoEditorPage() {
                       className="w-full h-8 rounded-md bg-surface border border-border px-3 text-xs text-text-primary placeholder:text-text-tertiary"
                     />
                     <p className="mt-2 text-[10px] leading-relaxed text-text-tertiary">
-                      Use Blur or Unblur to decide exactly which saved faces and objects should stay redacted for this video. With Live Blur on, the preview updates immediately, and the same selection carries into export.
+                      Use Blur or Unblur to decide exactly which saved faces and objects should stay redacted for this video. With Live Blur on, the preview updates immediately, and if a saved target is not on the current frame the editor can jump to a nearby occurrence so you can verify the blur.
                     </p>
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto">
                     {filteredDetections.map((d) => {
                       const excluded = excludedFromRedactionIds.includes(d.id)
+                      const visibleNow = isDetectionItemLikelyVisibleAtTime(d, currentTime)
+                      const nearestSeekTime = visibleNow ? null : getDetectionItemSeekTime(d, currentTime)
                       return (
                         <div
                           key={d.id}
@@ -4816,6 +4957,20 @@ export default function VideoEditorPage() {
                           </div>
                           <div className="min-w-0 flex-1">
                             <p className="text-sm text-text-primary truncate">{d.label}</p>
+                            {(visibleNow || nearestSeekTime !== null) && (
+                              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                {visibleNow && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-accent/10 border border-accent/20 text-accent">
+                                    On screen now
+                                  </span>
+                                )}
+                                {!visibleNow && nearestSeekTime !== null && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-surface border border-border-light text-text-tertiary">
+                                    Nearest at {fmtShort(nearestSeekTime)}
+                                  </span>
+                                )}
+                              </div>
+                            )}
                             {d.tags && d.tags.length > 0 && (
                               <div className="flex flex-wrap gap-1.5 mt-1.5">
                                 {d.tags.map((tag) => (
@@ -4833,7 +4988,7 @@ export default function VideoEditorPage() {
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation()
-                              toggleDetectionSelectionById(d.id, d.kind === 'face' ? d.personId : null)
+                              handleDetectionListToggle(d)
                             }}
                             className={`shrink-0 inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border text-xs font-medium transition-colors ${
                               excluded

@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import sys
 import warnings
@@ -435,6 +436,25 @@ def normalize_face_bbox(bbox):
     return [x1, y1, x2, y2]
 
 
+def face_bbox_area(bbox):
+    if not bbox:
+        return 0.0
+    return max(0.0, float(bbox[2]) - float(bbox[0])) * max(0.0, float(bbox[3]) - float(bbox[1]))
+
+
+def prepare_face_encoding_vector(encoding):
+    if encoding is None:
+        return None
+    try:
+        vec = np.array(encoding, dtype=np.float32)
+    except (TypeError, ValueError):
+        return None
+    if vec.size == 0:
+        return None
+    norm = np.linalg.norm(vec)
+    return vec / norm if norm > 0 else vec
+
+
 def face_bbox_center_distance(box_a, box_b):
     if not box_a or not box_b:
         return 1e9
@@ -502,6 +522,156 @@ def known_face_search_expand_factor(anchor_gap):
     )
 
 
+def localize_known_face_in_search_region(
+    frame_bgr,
+    known_face,
+    search_bbox,
+    preferred_bbox=None,
+    tolerance=0.35,
+    allow_geometry_fallback=False,
+):
+    """Relock a specific known face inside a search region.
+
+    This keeps person-specific blur efficient by only searching a cropped area,
+    while still requiring the selected person's embedding when available.
+    """
+    if frame_bgr is None or known_face is None:
+        return None
+
+    normalized_search_bbox = normalize_face_bbox(search_bbox)
+    if normalized_search_bbox is None:
+        return None
+
+    person_id = str(known_face.get("person_id") or "").strip()
+    if not person_id:
+        return None
+
+    frame_h, frame_w = frame_bgr.shape[:2]
+    sx1, sy1, sx2, sy2 = normalized_search_bbox
+    sx1 = max(0, min(sx1, frame_w))
+    sy1 = max(0, min(sy1, frame_h))
+    sx2 = max(0, min(sx2, frame_w))
+    sy2 = max(0, min(sy2, frame_h))
+    if sx2 <= sx1 or sy2 <= sy1:
+        return None
+
+    crop = frame_bgr[sy1:sy2, sx1:sx2]
+    if crop.size == 0:
+        return None
+
+    preferred_bbox = normalize_face_bbox(preferred_bbox) or normalize_face_bbox(known_face.get("bbox"))
+    preferred_area = max(1.0, face_bbox_area(preferred_bbox)) if preferred_bbox else None
+    preferred_diag = None
+    if preferred_bbox:
+        preferred_diag = max(
+            1.0,
+            float(np.hypot(
+                preferred_bbox[2] - preferred_bbox[0],
+                preferred_bbox[3] - preferred_bbox[1],
+            )),
+        )
+
+    known_vec = prepare_face_encoding_vector(known_face.get("encoding"))
+    detections = detect_faces(crop, with_encodings=known_vec is not None)
+
+    identity_best = None
+    identity_best_score = -1e9
+    geometry_candidates = []
+
+    for det in detections:
+        det_bbox = normalize_face_bbox([
+            sx1 + float(det["bbox"][0]),
+            sy1 + float(det["bbox"][1]),
+            sx1 + float(det["bbox"][2]),
+            sy1 + float(det["bbox"][3]),
+        ])
+        if det_bbox is None:
+            continue
+
+        det_score = float(det.get("det_score", 0.0))
+        overlap = iou(det_bbox, preferred_bbox) if preferred_bbox else 0.0
+        center_distance = face_bbox_center_distance(det_bbox, preferred_bbox) if preferred_bbox else 0.0
+        center_ratio = (center_distance / preferred_diag) if preferred_diag else 0.0
+        area_penalty = 0.0
+        if preferred_area:
+            det_area = max(1.0, face_bbox_area(det_bbox))
+            area_penalty = abs(math.log(det_area / preferred_area))
+
+        geometry_score = (
+            det_score * 1.65
+            + overlap * 4.1
+            - center_ratio * 1.45
+            - area_penalty * 0.45
+        )
+        geometry_candidate = {
+            "bbox": det_bbox,
+            "person_id": person_id,
+            "match_score": round(max(0.12, min(0.74, 0.18 + overlap * 0.42)), 4),
+            "det_score": round(det_score, 4),
+            "geometry_score": geometry_score,
+            "overlap": overlap,
+            "center_ratio": center_ratio,
+            "area_penalty": area_penalty,
+        }
+        geometry_candidates.append(geometry_candidate)
+
+        if known_vec is None:
+            continue
+
+        det_vec = prepare_face_encoding_vector(det.get("encoding"))
+        if det_vec is None:
+            continue
+
+        similarity = float(np.dot(det_vec, known_vec))
+        if similarity < (1.0 - tolerance):
+            continue
+
+        identity_score = geometry_score + similarity * 5.0
+        if identity_score > identity_best_score:
+            identity_best_score = identity_score
+            identity_best = {
+                "bbox": det_bbox,
+                "person_id": person_id,
+                "match_score": round(similarity, 4),
+                "det_score": round(det_score, 4),
+            }
+
+    if identity_best is not None:
+        return identity_best
+
+    if not allow_geometry_fallback or not geometry_candidates:
+        return None
+
+    geometry_candidates.sort(key=lambda candidate: candidate["geometry_score"], reverse=True)
+    best_geometry = geometry_candidates[0]
+    next_best_score = geometry_candidates[1]["geometry_score"] if len(geometry_candidates) > 1 else None
+    isolated = next_best_score is None or (best_geometry["geometry_score"] - next_best_score) >= 0.85
+
+    if known_vec is not None:
+        if not isolated:
+            return None
+        if best_geometry["overlap"] < 0.48 and best_geometry["center_ratio"] > 0.16:
+            return None
+        if best_geometry["area_penalty"] > 0.9:
+            return None
+        return {
+            "bbox": best_geometry["bbox"],
+            "person_id": person_id,
+            "match_score": best_geometry["match_score"],
+            "det_score": best_geometry["det_score"],
+        }
+
+    if best_geometry["overlap"] >= 0.34 or best_geometry["center_ratio"] <= 0.24:
+        return {
+            "bbox": best_geometry["bbox"],
+            "person_id": person_id,
+            "match_score": best_geometry["match_score"],
+            "det_score": best_geometry["det_score"],
+        }
+
+    return None
+
+
 def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, tolerance=0.35):
     """Locate specific saved faces in a frame.
 
@@ -512,17 +682,12 @@ def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, toleran
     if not known_faces:
         return []
 
-    matched_by_person = {}
-    if any(face.get("encoding") is not None for face in known_faces):
-        for det in identify_faces_in_frame(frame_bgr, known_faces, tolerance=tolerance):
-            person_id = str(det.get("person_id") or "").strip()
-            if person_id:
-                matched_by_person[person_id] = det
-
     frame_h, frame_w = frame_bgr.shape[:2]
+    anchor_candidate_by_person = {}
+    faces_needing_identity_match = []
     results = []
     used_boxes = []
-    from services.redactor import detect_best_face_bbox, expand_bbox
+    from services.redactor import expand_bbox
 
     for known_face in known_faces:
         person_id = str(known_face.get("person_id") or "").strip()
@@ -535,24 +700,50 @@ def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, toleran
         anchor_candidate = None
         if anchor_bbox is not None:
             search_expand = known_face_search_expand_factor(anchor_gap)
-            refined_bbox = detect_best_face_bbox(
+            anchor_candidate = localize_known_face_in_search_region(
                 frame_bgr,
-                expand_bbox(anchor_bbox, frame_w, frame_h, search_expand),
+                known_face=known_face,
+                search_bbox=expand_bbox(anchor_bbox, frame_w, frame_h, search_expand),
                 preferred_bbox=anchor_bbox,
-                allow_supplemental=True,
+                tolerance=tolerance,
+                allow_geometry_fallback=True,
             )
-            candidate_bbox = normalize_face_bbox(refined_bbox or anchor_bbox)
-            if candidate_bbox is not None and (
+            if anchor_candidate is not None and (
                 anchor_gap is None or anchor_gap <= KNOWN_FACE_STALE_ANCHOR_MAX_GAP_SEC
             ):
-                confidence_penalty = 0.0 if anchor_gap is None else min(0.55, max(0.0, anchor_gap - 0.25) * 0.08)
-                anchor_candidate = {
-                    "bbox": candidate_bbox,
-                    "person_id": person_id,
-                    "match_score": round(max(0.18, 0.98 - confidence_penalty), 4),
-                    "det_score": 0.58 if refined_bbox is not None else 0.34,
-                }
+                confidence_penalty = 0.0 if anchor_gap is None else min(0.48, max(0.0, anchor_gap - 0.25) * 0.07)
+                anchor_candidate["match_score"] = round(
+                    max(float(anchor_candidate.get("match_score", 0.0)), 0.98 - confidence_penalty),
+                    4,
+                )
+                anchor_candidate["det_score"] = round(
+                    max(float(anchor_candidate.get("det_score", 0.0)), 0.34),
+                    4,
+                )
 
+        if anchor_candidate is not None:
+            anchor_candidate_by_person[person_id] = anchor_candidate
+            continue
+
+        if known_face.get("encoding") is not None:
+            faces_needing_identity_match.append(known_face)
+
+    matched_by_person = {}
+    if faces_needing_identity_match:
+        # A nearby saved appearance anchor is much faster than running full
+        # frame-wide face identification. Only fall back to embedding matches
+        # for faces that could not be re-locked from their stored appearances.
+        for det in identify_faces_in_frame(frame_bgr, faces_needing_identity_match, tolerance=tolerance):
+            person_id = str(det.get("person_id") or "").strip()
+            if person_id:
+                matched_by_person[person_id] = det
+
+    for known_face in known_faces:
+        person_id = str(known_face.get("person_id") or "").strip()
+        if not person_id:
+            continue
+
+        anchor_candidate = anchor_candidate_by_person.get(person_id)
         matched_candidate = matched_by_person.get(person_id)
         chosen = None
         if anchor_candidate and matched_candidate:
@@ -776,9 +967,10 @@ def identify_faces_in_frame(frame_bgr, known_faces, tolerance=0.35):
         encoding = face.get("encoding")
         if not person_id or encoding is None:
             continue
-        vec = np.array(encoding, dtype=np.float32)
-        norm = np.linalg.norm(vec)
-        prepared_known.append((person_id, vec / norm if norm > 0 else vec))
+        vec = prepare_face_encoding_vector(encoding)
+        if vec is None:
+            continue
+        prepared_known.append((person_id, vec))
 
     if not prepared_known:
         return []
@@ -789,7 +981,9 @@ def identify_faces_in_frame(frame_bgr, known_faces, tolerance=0.35):
         enc = det.get("encoding")
         if enc is None:
             continue
-        enc_arr = np.array(enc, dtype=np.float32)
+        enc_arr = prepare_face_encoding_vector(enc)
+        if enc_arr is None:
+            continue
         best_person_id = None
         best_sim = -1.0
         for person_id, known_vec in prepared_known:
