@@ -5,7 +5,7 @@ import threading
 
 from flask import Blueprint, request, jsonify
 
-from config import OUTPUT_DIR, TWELVELABS_INDEX_ID  # Fixed index for all indexing (from .env)
+from config import OUTPUT_DIR, TWELVELABS_INDEX_ID
 from services import twelvelabs_service
 
 logger = logging.getLogger("video_redaction.routes.indexing")

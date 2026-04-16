@@ -101,8 +101,6 @@ function ProblemCard({
 export default function OverviewPage() {
   return (
     <div className="w-full max-w-[var(--strand-size-content-max)] mx-auto px-3 sm:px-4 lg:px-5 py-5 sm:py-8">
-
-      {/* Hero */}
       <section className="py-6 sm:py-8">
         <div className="max-w-3xl">
           <p className="text-xs font-brand-xbold text-accent uppercase tracking-widest mb-3">
@@ -145,7 +143,6 @@ export default function OverviewPage() {
         </div>
       </section>
 
-      {/* Problem It Solves */}
       <section className="relative left-1/2 w-screen -translate-x-1/2 border-t border-black/80 bg-surface py-10 sm:py-14">
         <div className="max-w-[1200px] mx-auto px-3 sm:px-4 lg:px-5">
           <div className="max-w-2xl mx-auto text-center">
@@ -194,7 +191,6 @@ export default function OverviewPage() {
         </div>
       </section>
 
-      {/* ─── Architecture Diagram (reference style) ───────────────────── */}
       <section className="relative left-1/2 w-screen -translate-x-1/2 border-t border-black bg-background py-10 sm:py-14">
         <div className="max-w-[1200px] mx-auto px-3 sm:px-4 lg:px-5">
           <div className="text-center mb-6 sm:mb-8">
@@ -225,7 +221,6 @@ export default function OverviewPage() {
         </div>
       </section>
 
-      {/* ─── Demo Video (reference style) ─────────────────────────────── */}
       <section id="demo-video" className="relative left-1/2 w-screen -translate-x-1/2 border-t border-black bg-background py-10 sm:py-14">
         <div className="max-w-[1200px] mx-auto px-3 sm:px-4 lg:px-5">
           <div className="text-center mb-6 sm:mb-8">
@@ -255,7 +250,6 @@ export default function OverviewPage() {
         </div>
       </section>
 
-      {/* Core Features */}
       <section className="relative left-1/2 w-screen -translate-x-1/2 border-t border-black/80 bg-surface py-10 sm:py-14">
         <div className="max-w-[1200px] mx-auto px-3 sm:px-4 lg:px-5">
           <div className="mb-6 sm:mb-8 text-center max-w-2xl mx-auto">
@@ -300,7 +294,6 @@ export default function OverviewPage() {
         </div>
       </section>
 
-      {/* How It Works */}
       <section className="relative left-1/2 w-screen -translate-x-1/2 border-t border-black/80 bg-gradient-to-b from-background via-surface to-card/60 py-10 sm:py-14">
         <div className="max-w-[1200px] mx-auto px-3 sm:px-4 lg:px-5">
           <div className="text-center max-w-2xl mx-auto mb-6 sm:mb-8">

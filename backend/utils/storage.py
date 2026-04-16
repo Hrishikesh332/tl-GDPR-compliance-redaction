@@ -313,6 +313,7 @@ def load_faces_objects_from_disk(job_id):
             name = os.path.splitext(fn)[0]
             unique_faces.append({
                 "person_id": name,
+                "stable_person_id": name,
                 "snap_base64": b64,
                 "description": name.replace("_", " ").title(),
             })

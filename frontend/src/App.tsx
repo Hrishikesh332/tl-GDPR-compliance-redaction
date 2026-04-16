@@ -131,7 +131,6 @@ function Shell() {
   const [isMobileEditorViewport, setIsMobileEditorViewport] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const location = useLocation()
-  const mobileNavItems = navItems
 
   useEffect(() => {
     if (!uploadNotification) return
@@ -237,7 +236,7 @@ function Shell() {
           }`}
         >
           <nav className="flex flex-col p-3 gap-1">
-            <NavLinks items={mobileNavItems} mobile onNavigate={() => setMobileMenuOpen(false)} />
+            <NavLinks items={navItems} mobile onNavigate={() => setMobileMenuOpen(false)} />
           </nav>
         </div>
       </div>

@@ -1608,7 +1608,7 @@ export default function VideoEditorPage() {
   const [detectionLoading, setDetectionLoading] = useState(false)
   const [detectionError, setDetectionError] = useState<string | null>(null)
   const [detectionJobId, setDetectionJobId] = useState<string | null>(null)
-  const [liveRedactionEnabled, setLiveRedactionEnabled] = useState(true)
+  const [liveRedactionEnabled, setLiveRedactionEnabled] = useState(false)
   const [liveBlurInfoExpanded, setLiveBlurInfoExpanded] = useState(false)
   const [liveRedactionDetections, setLiveRedactionDetections] = useState<LiveRedactionDetection[]>([])
   const [liveRedactionLoading, setLiveRedactionLoading] = useState(false)
@@ -1723,10 +1723,7 @@ export default function VideoEditorPage() {
   /* ---- HLS: play m3u8 streams in Chrome/Firefox (TwelveLabs returns HLS) ---- */
   const effectiveStreamUrl = streamUrl
   const useHls = effectiveStreamUrl && isHlsUrl(effectiveStreamUrl) && Hls.isSupported()
-  const liveRedactionPreviewForcedBySelection = hasRunDetection && apiDetections.some(
-    (item) => !excludedFromRedactionIds.includes(item.id),
-  )
-  const liveRedactionReady = (liveRedactionEnabled || liveRedactionPreviewForcedBySelection) && !!streamUrl
+  const liveRedactionReady = liveRedactionEnabled && !!streamUrl
   const liveRedactionActive = liveRedactionReady
   const markLiveRedactionSeekPending = useCallback(() => {
     if (!liveRedactionActive) return
@@ -3584,9 +3581,6 @@ export default function VideoEditorPage() {
     if (isExcluded && personId) {
       ensureFaceTimelineLane(personId)
     }
-    if (isExcluded) {
-      setLiveRedactionEnabled(true)
-    }
     setExcludedFromRedactionIds((previous) => (
       previous.includes(selectionId)
         ? previous.filter((id) => id !== selectionId)
@@ -3598,6 +3592,7 @@ export default function VideoEditorPage() {
     const isExcluded = excludedFromRedactionIds.includes(item.id)
     toggleDetectionSelectionById(item.id, item.kind === 'face' ? item.personId : null)
 
+    if (!liveRedactionEnabled) return
     if (!isExcluded) return
     if (isDetectionItemLikelyVisibleAtTime(item, currentTime)) return
 
@@ -3608,7 +3603,7 @@ export default function VideoEditorPage() {
     window.setTimeout(() => {
       seekToTime(seekTime)
     }, 0)
-  }, [currentTime, excludedFromRedactionIds, seekToTime, toggleDetectionSelectionById])
+  }, [currentTime, excludedFromRedactionIds, liveRedactionEnabled, seekToTime, toggleDetectionSelectionById])
 
   const toggleLiveDetectionSelection = useCallback((detection: LiveRedactionDetection) => {
     const selectionId = getSelectionIdForLiveDetection(detection)
@@ -3741,7 +3736,7 @@ export default function VideoEditorPage() {
                     ? 'bg-accent/15 text-accent border border-accent/25'
                     : 'bg-card text-text-tertiary border border-border'
                 }`}>
-                  {liveRedactionPreviewForcedBySelection && !liveRedactionEnabled ? 'Selection' : liveRedactionEnabled ? 'Enabled' : 'Disabled'}
+                  {liveRedactionEnabled ? 'Enabled' : 'Disabled'}
                 </span>
               </div>
 
@@ -3775,7 +3770,7 @@ export default function VideoEditorPage() {
                 <p className="text-xs text-text-secondary leading-relaxed break-words">
                   {liveRedactionReady
                     ? 'Live blur is previewing directly on the video player. Detect selections apply immediately here and are also reused when you render the redacted download.'
-                    : 'Live blur preview is off in the video player. Your Detect blur and unblur choices are still preserved for render and download, and selecting a target for blur will turn the player preview back on.'}
+                    : 'Live blur preview is off in the video player. Your Detect blur and unblur choices are still preserved for render and download, and the preview stays off until you turn Live Blur on.'}
                 </p>
                 <div className="space-y-2 border-t border-border pt-3 min-w-0">
                   <span className="text-[11px] font-medium uppercase tracking-wider text-text-tertiary">Redaction</span>
@@ -3836,13 +3831,11 @@ export default function VideoEditorPage() {
                       }`}>
                         {!liveRedactionReady
                           ? 'Paused'
-                          : liveRedactionPreviewForcedBySelection && !liveRedactionEnabled
-                            ? (showLiveRedactionSeekLoader ? 'Updating' : liveRedactionLoading ? 'Scanning' : 'Selection preview')
-                            : showLiveRedactionSeekLoader
-                              ? 'Updating'
-                              : liveRedactionLoading
-                                ? 'Scanning'
-                                : 'Running'}
+                          : showLiveRedactionSeekLoader
+                            ? 'Updating'
+                            : liveRedactionLoading
+                              ? 'Scanning'
+                              : 'Running'}
                       </span>
                     </div>
                     <div className="flex items-center justify-between gap-2 min-w-0">
@@ -4932,7 +4925,7 @@ export default function VideoEditorPage() {
                       className="w-full h-8 rounded-md bg-surface border border-border px-3 text-xs text-text-primary placeholder:text-text-tertiary"
                     />
                     <p className="mt-2 text-[10px] leading-relaxed text-text-tertiary">
-                      Use Blur or Unblur to decide exactly which saved faces and objects should stay redacted for this video. With Live Blur on, the preview updates immediately, and if a saved target is not on the current frame the editor can jump to a nearby occurrence so you can verify the blur.
+                      Use Blur or Unblur to decide exactly which saved faces and objects should stay redacted for this video. When Live Blur is on, the preview updates immediately, and if a saved target is not on the current frame the editor can jump to a nearby occurrence so you can verify the blur.
                     </p>
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto">

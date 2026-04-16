@@ -18,6 +18,7 @@ from config import (
     MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR,
     MANUAL_FACE_DETECTION_CONFIDENCE,
 )
+from services.face_identity import get_face_identity
 from utils.image import apply_redaction
 from utils.video import small_frame_for_tracking, reencode_mp4_to_h264
 
@@ -665,14 +666,19 @@ def update_auto_redaction_track(
                 search_bbox=expand_bbox(search_anchor, frame_w, frame_h, search_factor),
                 preferred_bbox=search_anchor,
                 tolerance=identity_tolerance if identity_tolerance is not None else 0.35,
-                allow_geometry_fallback=True,
+                allow_geometry_fallback=known_face.get("encoding") is None,
             ) if search_anchor is not None else None
 
             if relocked_face is not None:
                 resolved_bbox = tuple(relocked_face["bbox"])
                 face_detected = True
                 tracking_success = True
-            elif predicted_bbox is not None and is_face_track_motion_consistent(predicted_bbox, last_bbox):
+            elif (
+                predicted_bbox is not None
+                and last_bbox is not None
+                and bbox_iou(predicted_bbox, last_bbox) >= 0.72
+                and is_face_track_motion_consistent(predicted_bbox, last_bbox)
+            ):
                 resolved_bbox = predicted_bbox
                 tracking_success = True
             else:
@@ -773,6 +779,7 @@ def redact_video(
     collect_custom_track_data=False,
     track_sample_fps=None,
     preview_only=False,
+    progress_callback=None,
 ):
     face_encodings = face_encodings or []
     face_targets = face_targets or []
@@ -799,10 +806,33 @@ def redact_video(
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
+    last_progress_stage = None
+    last_progress_percent = -1
+
+    def emit_progress(stage, progress, *, frames_processed=None, message=None):
+        nonlocal last_progress_stage, last_progress_percent
+        if progress_callback is None:
+            return
+        bounded_progress = max(0.0, min(float(progress), 1.0))
+        percent = int(round(bounded_progress * 100))
+        if stage == last_progress_stage and percent == last_progress_percent:
+            return
+        progress_callback({
+            "stage": stage,
+            "progress": round(bounded_progress, 4),
+            "percent": percent,
+            "frames_processed": int(frames_processed or 0),
+            "total_frames": int(total or 0),
+            "message": message,
+        })
+        last_progress_stage = stage
+        last_progress_percent = percent
+
     if detect_every_seconds is not None and detect_every_seconds > 0:
         detect_every_n = max(1, int(round(fps * detect_every_seconds)))
 
     detect_every_n = max(1, min(detect_every_n, 10))
+    emit_progress("preparing", 0.02, frames_processed=0, message="Preparing redaction job")
 
     logger.info("Redact: %dx%d, %.1f fps, ~%d frames, detect_every=%d, targets: %d face targets, %d face encodings, %d obj_classes, %d custom (tracked)",
                 w, h, fps, total, detect_every_n, len(face_targets), len(face_encodings), len(object_classes), len(custom_regions))
@@ -831,6 +861,7 @@ def redact_video(
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(temp_path, fourcc, fps, (w, h))
+    emit_progress("rendering", 0.05, frames_processed=0, message="Rendering redacted video")
 
     auto_face_mode = (
         isinstance(face_encodings, list)
@@ -1205,13 +1236,13 @@ def redact_video(
                 detected_tracks.extend({"kind": "face", "bbox": box} for box in face_boxes)
             elif face_targets:
                 face_targets_by_person = {
-                    str(face.get("person_id") or "").strip(): face
+                    get_face_identity(face): face
                     for face in face_targets
-                    if str(face.get("person_id") or "").strip()
+                    if get_face_identity(face)
                 }
                 for face in localized_faces:
                     expanded_bbox = expand_face_redaction_bbox(tuple(face["bbox"]), w, h)
-                    person_id = str(face.get("person_id") or "").strip()
+                    person_id = get_face_identity(face)
                     detected_tracks.append({
                         "kind": "face",
                         "bbox": expanded_bbox,
@@ -1275,6 +1306,15 @@ def redact_video(
             writer.write(frame)
         frame_idx += 1
 
+        if total > 0:
+            render_progress = 0.05 + (0.87 * min(frame_idx, total) / max(total, 1))
+            emit_progress(
+                "rendering",
+                render_progress,
+                frames_processed=frame_idx,
+                message="Rendering redacted video",
+            )
+
         if total > 0 and frame_idx % max(1, total // 10) == 0:
             pct = int(100 * frame_idx / total)
             logger.info("Redact progress: %d%% (%d/%d)", pct, frame_idx, total)
@@ -1284,11 +1324,13 @@ def redact_video(
         writer.release()
 
     if not preview_only and temp_path is not None:
+        emit_progress("reencoding", 0.94, frames_processed=frame_idx, message="Re-encoding output")
         reencode_mp4_to_h264(temp_path, output_path)
         try:
             os.remove(temp_path)
         except OSError:
             pass
+        emit_progress("finalizing", 0.99, frames_processed=frame_idx, message="Finalizing output")
 
     logger.info(
         "%s complete: %d frames, %d detection passes%s",
@@ -1308,4 +1350,5 @@ def redact_video(
     }
     if collect_custom_track_data:
         result["custom_tracks"] = sampled_custom_tracks
+    emit_progress("completed", 1.0, frames_processed=frame_idx, message="Redaction complete")
     return result

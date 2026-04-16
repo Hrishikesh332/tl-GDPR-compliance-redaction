@@ -7,6 +7,7 @@ import warnings
 import cv2
 import numpy as np
 
+from services.face_identity import get_face_identity
 from utils.image import crop_to_base64, crop_face_to_base64, crop_with_bbox_to_base64
 
 warnings.filterwarnings("ignore", category=FutureWarning, message=".*rcond.*")
@@ -542,7 +543,7 @@ def localize_known_face_in_search_region(
     if normalized_search_bbox is None:
         return None
 
-    person_id = str(known_face.get("person_id") or "").strip()
+    person_id = get_face_identity(known_face)
     if not person_id:
         return None
 
@@ -690,7 +691,7 @@ def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, toleran
     from services.redactor import expand_bbox
 
     for known_face in known_faces:
-        person_id = str(known_face.get("person_id") or "").strip()
+        person_id = get_face_identity(known_face)
         if not person_id:
             continue
 
@@ -706,7 +707,7 @@ def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, toleran
                 search_bbox=expand_bbox(anchor_bbox, frame_w, frame_h, search_expand),
                 preferred_bbox=anchor_bbox,
                 tolerance=tolerance,
-                allow_geometry_fallback=True,
+                allow_geometry_fallback=known_face.get("encoding") is None,
             )
             if anchor_candidate is not None and (
                 anchor_gap is None or anchor_gap <= KNOWN_FACE_STALE_ANCHOR_MAX_GAP_SEC
@@ -739,7 +740,7 @@ def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, toleran
                 matched_by_person[person_id] = det
 
     for known_face in known_faces:
-        person_id = str(known_face.get("person_id") or "").strip()
+        person_id = get_face_identity(known_face)
         if not person_id:
             continue
 
@@ -963,7 +964,7 @@ def identify_faces_in_frame(frame_bgr, known_faces, tolerance=0.35):
 
     prepared_known = []
     for face in known_faces:
-        person_id = str(face.get("person_id") or "").strip()
+        person_id = get_face_identity(face)
         encoding = face.get("encoding")
         if not person_id or encoding is None:
             continue

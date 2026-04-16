@@ -153,7 +153,6 @@ def list_videos():
             page=page,
             page_limit=page_limit,
         )
-        # Override filename with original upload name when we have it (TwelveLabs stores temp path name)
         for v in result.get("videos") or []:
             job_id = get_job_id_by_video_id(v.get("video_id"))
             if job_id:
@@ -173,7 +172,6 @@ def get_video(video_id):
     index_id = request.args.get("index_id")
     try:
         info = twelvelabs_service.get_video_info(video_id, index_id=index_id)
-        # Use original upload filename when we have it
         job_id = get_job_id_by_video_id(video_id)
         if job_id:
             job = get_job(job_id)

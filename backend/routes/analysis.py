@@ -24,6 +24,7 @@ from services.redactor import (
     translate_bbox,
 )
 from services.pipeline import get_job, get_enriched_faces
+from services.face_identity import ensure_face_identity, get_face_identity
 from services import twelvelabs_service
 from utils.video import extract_frame_at_time, extract_frames_at_timestamps, small_frame_for_tracking
 
@@ -637,9 +638,11 @@ def get_faces(job_id):
 
     faces = result.get("unique_faces", [])
     response_faces = []
-    for f in faces:
+    for index, f in enumerate(faces):
+        stable_person_id = ensure_face_identity(f, fallback_index=index)
         response_faces.append({
-            "person_id": f.get("person_id"),
+            "person_id": stable_person_id,
+            "stable_person_id": stable_person_id,
             "name": f.get("name"),
             "snap_base64": f.get("snap_base64"),
             "description": f.get("description", ""),
@@ -842,19 +845,20 @@ def live_redaction_detect():
             enriched = get_enriched_faces(job_id) or {}
             selected_faces = [
                 face for face in (job.get("unique_faces") or enriched.get("unique_faces") or [])
-                if str(face.get("person_id") or "").strip() in person_ids
+                if get_face_identity(face) in person_ids
             ]
             for sample_time in sample_times:
                 sample_frame = frames_by_time.get(round(sample_time, 3), frame)
                 for face in localize_known_faces_in_frame(sample_frame, selected_faces, time_sec=sample_time):
+                    stable_person_id = get_face_identity(face)
                     expanded_bbox = expand_face_redaction_bbox(face.get("bbox"), frame_w, frame_h)
                     normalized = normalize_bbox(expanded_bbox, frame_w, frame_h)
                     if normalized is None:
                         continue
                     detections.append({
                         "kind": "face",
-                        "label": str(face.get("person_id") or "Face"),
-                        "personId": str(face.get("person_id") or "").strip() or None,
+                        "label": str(face.get("name") or stable_person_id or "Face"),
+                        "personId": stable_person_id or None,
                         "confidence": round((float(face.get("match_score", 0.0)) * 0.65) + (float(face.get("det_score", 0.0)) * 0.35), 4),
                         "match_score": round(float(face.get("match_score", 0.0)), 4),
                         "sample_time": sample_time,

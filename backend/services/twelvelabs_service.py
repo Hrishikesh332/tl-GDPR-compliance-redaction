@@ -11,6 +11,7 @@ from config import (
     TWELVELABS_API_KEY, TWELVELABS_INDEX_ID,
     TWELVELABS_ENTITY_COLLECTION_ID, TWELVELABS_ENTITY_COLLECTION_NAME,
 )
+from services.face_identity import get_face_identity
 
 logger = logging.getLogger("video_redaction.twelvelabs")
 
@@ -1223,16 +1224,17 @@ def create_entities_from_face_snaps(unique_faces, run_dir):
         if not snap_path or not os.path.isfile(snap_path):
             continue
 
-        person_id = face.get("person_id", "unknown")
+        person_id = get_face_identity(face) or "unknown"
+        entity_name = str(face.get("name") or person_id).strip() or person_id
         description = face.get("description", "")
 
         try:
             asset_id = upload_face_asset(snap_path)
 
             entity_result = create_entity(
-                name=person_id,
+                name=entity_name,
                 asset_ids=[asset_id],
-                description=description or f"Detected face: {person_id}",
+                description=description or f"Detected face: {entity_name}",
                 metadata={"person_id": person_id, "source": "video_redaction_pipeline"},
             )
 

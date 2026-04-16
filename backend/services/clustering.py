@@ -102,6 +102,7 @@ def cluster_faces(all_faces, similarity_threshold=None):
     results = []
     for i, c in enumerate(clusters):
         best = c["best_snap"]
+        stable_person_id = f"person_{i}"
         appearances = []
         for a in c["appearances"]:
             appearances.append({
@@ -115,7 +116,9 @@ def cluster_faces(all_faces, similarity_threshold=None):
             centroid = centroid.tolist()
 
         results.append({
-            "person_id": f"person_{i}",
+            "person_id": stable_person_id,
+            "stable_person_id": stable_person_id,
+            "cluster_person_id": stable_person_id,
             "snap_base64": best.get("snap_base64"),
             "bbox": best.get("bbox"),
             "encoding": centroid,

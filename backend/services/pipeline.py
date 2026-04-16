@@ -13,6 +13,7 @@ from config import (
 from services import twelvelabs_service
 from services.detection import detect_faces, detect_objects
 from services.clustering import cluster_faces, cluster_objects
+from services.face_identity import ensure_face_identity, get_face_identity
 from services.redactor import redact_video
 from utils.video import (
     extract_keyframes, extract_frames_at_timestamps,
@@ -851,6 +852,7 @@ def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
     if isinstance(people_desc, list):
         assignments = match_people_descriptions_to_faces(faces, people_desc)
         for i, face in enumerate(faces):
+            ensure_face_identity(face, fallback_index=i)
             desc_index = assignments.get(i)
             if desc_index is None or desc_index >= len(people_desc):
                 continue
@@ -867,11 +869,11 @@ def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
             raw_name = desc_entry.get("name") or desc_entry.get("person_name") or ""
             if raw_name:
                 face["name"] = raw_name
-                face["person_id"] = raw_name
 
     for i, face in enumerate(faces):
+        stable_person_id = ensure_face_identity(face, fallback_index=i)
         if not face.get("name"):
-            face["name"] = face.get("person_id", f"person_{i}")
+            face["name"] = stable_person_id or f"person_{i}"
         if "priority_rank" not in face:
             face["priority_rank"] = len(people_desc) + i if isinstance(people_desc, list) else i
         if "tags" not in face:
@@ -910,6 +912,8 @@ def get_enriched_faces(job_id):
     if job:
         people_desc = job.get("twelvelabs_people")
         faces = job.get("unique_faces", [])
+        for index, face in enumerate(faces):
+            ensure_face_identity(face, fallback_index=index)
         video_id = str(job.get("twelvelabs_video_id") or "").strip()
         if faces and not isinstance(people_desc, list) and video_id:
             try:
@@ -951,6 +955,8 @@ def get_enriched_faces(job_id):
     # Fallback: load from disk when job is not in memory (e.g. after server restart)
     disk = load_faces_objects_from_disk(job_id)
     if disk:
+        for index, face in enumerate(disk["unique_faces"]):
+            ensure_face_identity(face, fallback_index=index)
         return {
             "status": "ready",
             "unique_faces": disk["unique_faces"],
@@ -979,6 +985,7 @@ def run_redaction(
     detect_every_n=DEFAULT_DETECT_EVERY_N,
     detect_every_seconds=None,
     use_temporal_optimization=True,
+    progress_callback=None,
 ):
     job = get_job(job_id)
     if not job:
@@ -1064,6 +1071,7 @@ def run_redaction(
         detect_every_seconds=detect_every_seconds,
         temporal_ranges=temporal_ranges if temporal_ranges else None,
         custom_regions=custom_regions or [],
+        progress_callback=progress_callback,
     )
 
     result["download_url"] = f"/api/download/{os.path.basename(output_path)}"
