@@ -697,13 +697,6 @@ def collect_temporal_ranges_from_face_targets(face_targets):
         if not isinstance(face, dict):
             continue
 
-        face_ranges = normalize_analysis_time_ranges(face.get("time_ranges", []))
-        for start, end in face_ranges:
-            ranges.append((max(0.0, start - 0.35), max(0.0, end + 0.6)))
-
-        if face_ranges:
-            continue
-
         for appearance in face.get("appearances", []) or []:
             if not isinstance(appearance, dict):
                 continue

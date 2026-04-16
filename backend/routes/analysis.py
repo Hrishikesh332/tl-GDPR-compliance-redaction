@@ -318,10 +318,20 @@ def apply_live_motion_to_bbox(bbox, motion, frame_w, frame_h):
     )
 
 
-def build_tracked_live_detections(job_id, time_sec, frame, frame_w, frame_h, reset_tracking=False):
+def build_tracked_live_detections(
+    job_id,
+    time_sec,
+    frame,
+    frame_w,
+    frame_h,
+    reset_tracking=False,
+    known_faces_by_person_id=None,
+    face_tolerance=0.35,
+):
     small_frame, scale_back = small_frame_for_tracking(frame, max_dim=LIVE_TRACK_FRAME_MAX_DIM)
     gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
     previous_state = None
+    known_faces_by_person_id = known_faces_by_person_id or {}
 
     with _live_track_lock:
         previous_state = _live_track_state.get(job_id)
@@ -378,19 +388,32 @@ def build_tracked_live_detections(job_id, time_sec, frame, frame_w, frame_h, res
 
         updated_bbox = small_bbox_to_frame_bbox(updated_small_bbox, scale_back, frame_w, frame_h) if updated_small_bbox is not None else previous_frame_bbox
         if track["kind"] == "face":
+            track_person_id = str(track.get("personId") or "").strip()
             search_anchor = updated_bbox or previous_frame_bbox
             if search_anchor is not None:
                 search_factor = LIVE_TRACK_FACE_SEARCH_EXPAND if updated_bbox is not None else LIVE_TRACK_FACE_LOST_SEARCH_EXPAND
                 search_factor += min(LIVE_TRACK_FACE_SEARCH_MOTION_BONUS, motion_strength * 5.5)
                 search_bbox = expand_bbox(search_anchor, frame_w, frame_h, search_factor)
-                refined_bbox = detect_best_face_bbox(
-                    frame,
-                    search_bbox,
-                    preferred_bbox=updated_bbox or previous_frame_bbox,
-                    allow_supplemental=(tracking_mode != "local" or motion_strength >= 0.025),
-                )
-                if refined_bbox is not None and should_accept_face_relock(refined_bbox, updated_bbox or previous_frame_bbox, search_bbox):
-                    updated_bbox = refined_bbox
+                known_face = known_faces_by_person_id.get(track_person_id) if track_person_id else None
+                if known_face is not None:
+                    from services.detection import localize_known_face_in_search_region
+
+                    relocked_face = localize_known_face_in_search_region(
+                        frame,
+                        known_face=known_face,
+                        search_bbox=search_bbox,
+                        preferred_bbox=updated_bbox or previous_frame_bbox,
+                        tolerance=face_tolerance if face_tolerance is not None else 0.35,
+                        allow_geometry_fallback=known_face.get("encoding") is None,
+                    )
+                    relocked_bbox = tuple(relocked_face["bbox"]) if relocked_face is not None else None
+                    if relocked_bbox is None or not should_accept_face_relock(
+                        relocked_bbox,
+                        updated_bbox or previous_frame_bbox,
+                        search_bbox,
+                    ):
+                        continue
+                    updated_bbox = relocked_bbox
                     updated_small_bbox = frame_bbox_to_small_bbox(
                         updated_bbox,
                         scale_back,
@@ -399,6 +422,23 @@ def build_tracked_live_detections(job_id, time_sec, frame, frame_w, frame_h, res
                     )
                     if updated_small_bbox is not None:
                         updated_points = seed_tracking_points(gray_small, updated_small_bbox)
+                else:
+                    refined_bbox = detect_best_face_bbox(
+                        frame,
+                        search_bbox,
+                        preferred_bbox=updated_bbox or previous_frame_bbox,
+                        allow_supplemental=(tracking_mode != "local" or motion_strength >= 0.025),
+                    )
+                    if refined_bbox is not None and should_accept_face_relock(refined_bbox, updated_bbox or previous_frame_bbox, search_bbox):
+                        updated_bbox = refined_bbox
+                        updated_small_bbox = frame_bbox_to_small_bbox(
+                            updated_bbox,
+                            scale_back,
+                            small_frame.shape[1],
+                            small_frame.shape[0],
+                        )
+                        if updated_small_bbox is not None:
+                            updated_points = seed_tracking_points(gray_small, updated_small_bbox)
         if updated_bbox is None:
             continue
         if updated_small_bbox is None:
@@ -427,7 +467,16 @@ def build_tracked_live_detections(job_id, time_sec, frame, frame_w, frame_h, res
     return tracked, gray_small, scale_back, int(previous_state.get("next_track_id", 0))
 
 
-def merge_live_tracked_detections(job_id, detections, tracked_detections, gray_small, scale_back, frame_w, frame_h, time_sec):
+def merge_live_tracked_detections(
+    job_id,
+    detections,
+    tracked_detections,
+    gray_small,
+    scale_back,
+    frame_w,
+    frame_h,
+    time_sec,
+):
     pairs = []
     used_detections = set()
     used_tracks = set()
@@ -470,6 +519,8 @@ def merge_live_tracked_detections(job_id, detections, tracked_detections, gray_s
             continue
         if float(track_det.get("confidence", 0.0)) < LIVE_TRACK_KEEP_CONFIDENCE:
             continue
+        # Keep strong unmatched tracks (including identified faces) so the
+        # live blur remains stable between detector refreshes.
         merged.append(track_det)
 
     next_tracks = []
@@ -606,6 +657,13 @@ def filter_detections_to_selected_targets(detections, person_ids=None, object_cl
                 continue
             person_id = str(detection.get("personId") or "").strip()
             if person_id and person_id in selected_person_ids:
+                filtered.append(detection)
+                continue
+            # Tracked faces may lack a personId between identity re-lock
+            # cycles; keep them when the request already scoped to specific
+            # person_ids so the blur overlay stays continuous.
+            track_id = detection.get("trackId")
+            if track_id and not person_id:
                 filtered.append(detection)
             continue
         if kind == "object":
@@ -837,16 +895,26 @@ def live_redaction_detect():
         frames_by_time = {round(float(item["timestamp"]), 3): item["frame"] for item in sampled_frames}
 
     detections = []
+    selected_faces = []
+    selected_faces_by_person_id = {}
+
+    if person_ids:
+        enriched = get_enriched_faces(job_id) or {}
+        selected_faces = [
+            face for face in (job.get("unique_faces") or enriched.get("unique_faces") or [])
+            if get_face_identity(face) in person_ids
+        ]
+        selected_faces_by_person_id = {
+            person_id: face
+            for face in selected_faces
+            for person_id in [get_face_identity(face)]
+            if person_id
+        }
 
     if include_faces:
         if person_ids:
             from services.detection import localize_known_faces_in_frame
 
-            enriched = get_enriched_faces(job_id) or {}
-            selected_faces = [
-                face for face in (job.get("unique_faces") or enriched.get("unique_faces") or [])
-                if get_face_identity(face) in person_ids
-            ]
             for sample_time in sample_times:
                 sample_frame = frames_by_time.get(round(sample_time, 3), frame)
                 for face in localize_known_faces_in_frame(sample_frame, selected_faces, time_sec=sample_time):
@@ -924,6 +992,8 @@ def live_redaction_detect():
         frame_w,
         frame_h,
         reset_tracking=reset_tracking,
+        known_faces_by_person_id=selected_faces_by_person_id,
+        face_tolerance=0.35,
     )
     detections = merge_live_tracked_detections(
         job_id,

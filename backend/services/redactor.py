@@ -583,6 +583,7 @@ def update_auto_redaction_track(
     tracker = track.get("tracker")
     kind = str(track.get("kind") or "object").strip().lower()
     known_face = track.get("known_face")
+    requires_identity_lock = kind == "face" and known_face is not None
     identity_tolerance = track.get("identity_tolerance")
     last_bbox = track.get("last_bbox")
     prev_smoothed = track.get("smoothed_bbox") or last_bbox
@@ -673,16 +674,11 @@ def update_auto_redaction_track(
                 resolved_bbox = tuple(relocked_face["bbox"])
                 face_detected = True
                 tracking_success = True
-            elif (
-                predicted_bbox is not None
-                and last_bbox is not None
-                and bbox_iou(predicted_bbox, last_bbox) >= 0.72
-                and is_face_track_motion_consistent(predicted_bbox, last_bbox)
-            ):
-                resolved_bbox = predicted_bbox
-                tracking_success = True
             else:
-                resolved_bbox = last_bbox
+                # When the user selected a specific saved person, prefer briefly
+                # losing the blur over letting a tracker drift onto a different
+                # face that happens to cross the same area.
+                resolved_bbox = None
                 tracking_success = False
         else:
             search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
@@ -732,7 +728,9 @@ def update_auto_redaction_track(
     else:
         next_points = seed_tracking_points(gray_small, resolved_small_bbox) if resolved_small_bbox is not None else None
 
-    display_bbox = smooth_bbox(resolved_bbox, prev_smoothed, TRACKER_SMOOTHING_ALPHA, frame_w, frame_h) if resolved_bbox is not None else prev_smoothed
+    display_bbox = smooth_bbox(resolved_bbox, prev_smoothed, TRACKER_SMOOTHING_ALPHA, frame_w, frame_h) if resolved_bbox is not None else (
+        None if requires_identity_lock else prev_smoothed
+    )
 
     if not tracking_success and tracker is not None and fail_count >= reinit_after_fails and last_bbox:
         try:
@@ -749,7 +747,7 @@ def update_auto_redaction_track(
         except (cv2.error, AttributeError, Exception):
             pass
 
-    final_bbox = display_bbox or last_bbox
+    final_bbox = display_bbox or (None if requires_identity_lock else last_bbox)
     final_small_bbox = frame_bbox_to_small_bbox(final_bbox, scale_back, small_w, small_h) if final_bbox is not None else None
     return {
         **track,

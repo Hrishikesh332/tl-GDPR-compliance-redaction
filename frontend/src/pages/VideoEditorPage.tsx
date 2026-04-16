@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback, useMemo, useLayoutEffect } from 'react'
+import React, { useState, useRef, useEffect, useCallback, useMemo, useLayoutEffect, useId } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import Hls from 'hls.js'
@@ -8,6 +8,7 @@ import { DEMO_EDITOR_VIDEO_ID, storeLastEditorVideoId } from '../lib/editorRouti
 import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
+import documentListIconUrl from '../../strand/icons/document-list.svg?url'
 
 const ANALYZE_SUGGESTIONS: string[] = [
   'Courtroom summary with key timestamps',
@@ -446,9 +447,9 @@ const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
   { id: 'captions', label: 'Analyze/Transcript', iconUrl: analyzeIconUrl },
 ]
 
-const LIVE_DETECTION_POLL_MS = 120
-const LIVE_DETECTION_HOLD_MS = 1500
-const LIVE_IDENTIFIED_FACE_HOLD_MS = 2800
+const LIVE_DETECTION_POLL_MS = 180
+const LIVE_DETECTION_HOLD_MS = 3200
+const LIVE_IDENTIFIED_FACE_HOLD_MS = 7000
 const LIVE_FACE_PADDING = 0.2
 const LIVE_OBJECT_PADDING = 0.08
 const LIVE_DETECTION_SMOOTHING = 0.34
@@ -1161,13 +1162,24 @@ function filterLiveDetectionsToSelections(
   const selectedFaces = new Set(options.selectedFacePersonIds)
   const selectedObjects = new Set(options.selectedObjectClasses.map((item) => normalizeObjectClass(item)).filter(Boolean) as string[])
 
+  const hasFaceSelection = selectedFaces.size > 0
+  const hasObjectSelection = selectedObjects.size > 0
+
   return detections.filter((detection) => {
     if (detection.kind === 'face') {
-      return !!detection.personId && selectedFaces.has(detection.personId)
+      if (!hasFaceSelection) return false
+      if (detection.personId && selectedFaces.has(detection.personId)) return true
+      // The backend already filters by person_ids server-side and tracking
+      // may carry faces without a personId; keep them so blur stays visible
+      // between identity re-lock cycles.
+      if (!detection.personId && hasFaceSelection) return true
+      return false
     }
     if (detection.kind === 'object') {
       const objectClass = normalizeObjectClass(detection.objectClass)
-      return !!objectClass && selectedObjects.has(objectClass)
+      if (!objectClass) return false
+      if (hasObjectSelection) return selectedObjects.has(objectClass)
+      return true
     }
     return false
   })
@@ -1342,31 +1354,36 @@ function buildFaceTimelineSegmentsFromAppearances(appearances?: DetectionAppeara
   )
 }
 
+function buildFaceTimelineSegmentsFromRanges(ranges?: DetectionTimeRange[]): FaceTimelineSegment[] {
+  return mergeFaceTimelineSegments(
+    (ranges || [])
+      .map((range) => normalizeFaceTimelineSegment(range))
+      .filter((segment): segment is FaceTimelineSegment => segment !== null),
+  )
+}
+
 function buildFaceTimelineSegments(
   item: DetectionItem,
   marengoRanges?: DetectionTimeRange[],
 ): FaceTimelineSegment[] {
-  // Sidebar face `time_ranges` come from descriptive analysis and are not
-  // reliably tied to a clustered face identity. Only trust entity-search
-  // ranges when we have a matching entity; otherwise stay on clustered
-  // appearance timestamps for this person.
-  const preferredRanges = marengoRanges && marengoRanges.length > 0 ? marengoRanges : []
-  const rangedSegments = mergeFaceTimelineSegments(
-    preferredRanges
-      .map((range) => normalizeFaceTimelineSegment(range))
-      .filter((segment): segment is FaceTimelineSegment => segment !== null),
-  )
+  // Local clustered appearances are the most reliable source for a saved
+  // person lane. Broad descriptive ranges and remote entity-search ranges are
+  // UI hints only and must not override person-specific appearance anchors.
+  const appearanceSegments = buildFaceTimelineSegmentsFromAppearances(item.appearances)
+  if (appearanceSegments.length > 0) return appearanceSegments
 
-  if (rangedSegments.length > 0) return rangedSegments
-  return buildFaceTimelineSegmentsFromAppearances(item.appearances)
+  const localRangeSegments = buildFaceTimelineSegmentsFromRanges(item.timeRanges)
+  if (localRangeSegments.length > 0) return localRangeSegments
+
+  return buildFaceTimelineSegmentsFromRanges(marengoRanges)
 }
 
 function getDetectionItemTimelineSegments(item: DetectionItem): FaceTimelineSegment[] {
-  const rangedSegments = mergeFaceTimelineSegments(
-    (item.timeRanges || [])
-      .map((range) => normalizeFaceTimelineSegment(range))
-      .filter((segment): segment is FaceTimelineSegment => segment !== null),
-  )
+  if (item.kind === 'face') {
+    return buildFaceTimelineSegments(item)
+  }
+
+  const rangedSegments = buildFaceTimelineSegmentsFromRanges(item.timeRanges)
   if (rangedSegments.length > 0) return rangedSegments
   return buildFaceTimelineSegmentsFromAppearances(item.appearances)
 }
@@ -1582,12 +1599,15 @@ export default function VideoEditorPage() {
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const liveBlurCanvasRef = useRef<HTMLCanvasElement>(null)
+  const liveBlurOverlayVideoRef = useRef<HTMLVideoElement>(null)
   const timelineRef = useRef<HTMLDivElement>(null)
   const videoContainerRef = useRef<HTMLDivElement>(null)
   const videoStageRef = useRef<HTMLDivElement>(null)
   const editorCenterRef = useRef<HTMLDivElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const hlsLoadedUrlRef = useRef<string | null>(null)
+  const liveBlurOverlayHlsRef = useRef<Hls | null>(null)
+  const liveBlurOverlayLoadedUrlRef = useRef<string | null>(null)
   const detectionLoadRequestIdRef = useRef(0)
   const readyRedactionJobIdsRef = useRef<Record<string, true>>({})
 
@@ -1666,6 +1686,7 @@ export default function VideoEditorPage() {
   const liveBlurVideoFrameCallbackRef = useRef<number | null>(null)
   const visibleLiveRedactionDetectionsRef = useRef<LiveRedactionDetection[]>([])
   const requestedFaceLaneEntityIdsRef = useRef<Record<string, boolean>>({})
+  const liveBlurClipPathId = useId().replace(/:/g, '')
 
   const getPlaybackAnchorTime = useCallback(() => videoRef.current?.currentTime ?? currentTime, [currentTime])
   const updateVideoViewport = useCallback(() => {
@@ -1723,12 +1744,19 @@ export default function VideoEditorPage() {
   /* ---- HLS: play m3u8 streams in Chrome/Firefox (TwelveLabs returns HLS) ---- */
   const effectiveStreamUrl = streamUrl
   const useHls = effectiveStreamUrl && isHlsUrl(effectiveStreamUrl) && Hls.isSupported()
+  const selectedDetectionCount = useMemo(
+    () => apiDetections.filter((item) => !excludedFromRedactionIds.includes(item.id)).length,
+    [apiDetections, excludedFromRedactionIds]
+  )
   const liveRedactionReady = liveRedactionEnabled && !!streamUrl
   const liveRedactionActive = liveRedactionReady
+  const selectionPreviewActive = !liveRedactionEnabled && !!effectiveStreamUrl && hasRunDetection && selectedDetectionCount > 0
+  const liveRedactionPreviewActive = liveRedactionActive || selectionPreviewActive
+  const liveRedactionOverlayVisible = liveRedactionPreviewActive
   const markLiveRedactionSeekPending = useCallback(() => {
-    if (!liveRedactionActive) return
+    if (!liveRedactionPreviewActive) return
     setLiveRedactionSeekPending(true)
-  }, [liveRedactionActive])
+  }, [liveRedactionPreviewActive])
 
   useEffect(() => {
     detectionLoadRequestIdRef.current += 1
@@ -1847,6 +1875,52 @@ export default function VideoEditorPage() {
       hlsLoadedUrlRef.current = null
     }
   }, [effectiveStreamUrl])
+
+  useEffect(() => {
+    if (!effectiveStreamUrl || !liveRedactionOverlayVisible || redactionStyle !== 'blur' || !liveBlurOverlayVideoRef.current) {
+      if (liveBlurOverlayHlsRef.current) {
+        liveBlurOverlayHlsRef.current.destroy()
+        liveBlurOverlayHlsRef.current = null
+        liveBlurOverlayLoadedUrlRef.current = null
+      }
+      return
+    }
+    if (!isHlsUrl(effectiveStreamUrl)) {
+      if (liveBlurOverlayHlsRef.current) {
+        liveBlurOverlayHlsRef.current.destroy()
+        liveBlurOverlayHlsRef.current = null
+        liveBlurOverlayLoadedUrlRef.current = null
+      }
+      return
+    }
+    if (!Hls.isSupported()) return
+    if (liveBlurOverlayHlsRef.current && liveBlurOverlayLoadedUrlRef.current === effectiveStreamUrl) return
+
+    const video = liveBlurOverlayVideoRef.current
+    if (liveBlurOverlayHlsRef.current) {
+      liveBlurOverlayHlsRef.current.destroy()
+      liveBlurOverlayHlsRef.current = null
+      liveBlurOverlayLoadedUrlRef.current = null
+    }
+
+    const hls = new Hls()
+    liveBlurOverlayHlsRef.current = hls
+    liveBlurOverlayLoadedUrlRef.current = effectiveStreamUrl
+    hls.loadSource(effectiveStreamUrl)
+    hls.attachMedia(video)
+    hls.on(Hls.Events.ERROR, (_, data) => {
+      if (data.fatal) {
+        hls.destroy()
+        liveBlurOverlayHlsRef.current = null
+        liveBlurOverlayLoadedUrlRef.current = null
+      }
+    })
+    return () => {
+      hls.destroy()
+      liveBlurOverlayHlsRef.current = null
+      liveBlurOverlayLoadedUrlRef.current = null
+    }
+  }, [effectiveStreamUrl, liveRedactionDetections.length, liveRedactionOverlayVisible, redactionStyle])
 
   /* Reset timeline thumbnails and waveform when video source changes */
   useEffect(() => {
@@ -2100,14 +2174,18 @@ export default function VideoEditorPage() {
     v.currentTime = fraction * v.duration
   }, [markLiveRedactionSeekPending])
 
-  const seekToTime = useCallback((seconds: number) => {
+  const seekToTime = useCallback((seconds: number, options?: { play?: boolean }) => {
     const v = videoRef.current
     if (!v) return
     const t = Math.max(0, Number.isFinite(v.duration) ? Math.min(v.duration, seconds) : seconds)
     markLiveRedactionSeekPending()
     v.currentTime = t
     setCurrentTime(t)
-    if (v.paused) v.play().catch(() => {})
+    if (options?.play ?? true) {
+      if (v.paused) v.play().catch(() => {})
+    } else if (!v.paused) {
+      v.pause()
+    }
   }, [markLiveRedactionSeekPending])
 
   const scrubFromEvent = useCallback((e: MouseEvent | React.MouseEvent) => {
@@ -2456,10 +2534,6 @@ export default function VideoEditorPage() {
         .map((item) => item.objectClass as string),
     [apiDetections, excludedFromRedactionIds]
   )
-  const selectedDetectionCount = useMemo(
-    () => apiDetections.filter((item) => !excludedFromRedactionIds.includes(item.id)).length,
-    [apiDetections, excludedFromRedactionIds]
-  )
   const faceDetectionItemsByPersonId = useMemo(() => {
     const map: Record<string, DetectionItem> = {}
     for (const item of apiDetections) {
@@ -2584,12 +2658,16 @@ export default function VideoEditorPage() {
       if (!item) return []
 
       const marengoRanges = faceLaneEntityRangesByPersonId[personId]
+      const localAppearanceSegments = buildFaceTimelineSegmentsFromAppearances(item.appearances)
+      const localRangeSegments = buildFaceTimelineSegmentsFromRanges(item.timeRanges)
       return [{
         personId,
         item,
         active: !excludedFromRedactionIds.includes(item.id),
         segments: buildFaceTimelineSegments(item, marengoRanges),
-        source: marengoRanges && marengoRanges.length > 0 ? 'marengo' : 'appearances',
+        source: localAppearanceSegments.length > 0 || localRangeSegments.length > 0 || !marengoRanges || marengoRanges.length === 0
+          ? 'appearances'
+          : 'marengo',
       }]
     })
   ), [excludedFromRedactionIds, faceDetectionItemsByPersonId, faceLaneEntityRangesByPersonId, personLaneIds])
@@ -2652,7 +2730,7 @@ export default function VideoEditorPage() {
   }, [detectionJobId, videoId, waitForRedactionJobReady])
 
   const requestLiveRedaction = useCallback(async (requestedTime: number, options?: { force?: boolean; resetTracking?: boolean }) => {
-    if (!liveRedactionActive || !effectiveStreamUrl) return
+    if (!liveRedactionPreviewActive || !effectiveStreamUrl) return
     if (!Number.isFinite(requestedTime) || requestedTime < 0) return
 
     const lastResolvedTime = liveRedactionLastResolvedTimeRef.current
@@ -2694,31 +2772,30 @@ export default function VideoEditorPage() {
         object_detection_error?: string | null
       }
 
-      if (requestId !== liveRedactionRequestIdRef.current) return
+      const stale = requestId !== liveRedactionRequestIdRef.current
+      const rawDetections = Array.isArray(data.detections) ? data.detections : []
+      if (stale) return
       if (!res.ok) {
         throw new Error(data.error || `Live redaction failed (${res.status})`)
       }
 
       const resolvedTime = typeof data.time_sec === 'number' ? data.time_sec : requestedTime
       const filteredDetections = filterLiveDetectionsToSelections(
-        Array.isArray(data.detections) ? data.detections : [],
+        rawDetections,
         {
           hasRunDetection,
           selectedFacePersonIds,
           selectedObjectClasses,
         },
       )
-      setLiveRedactionDetections((previous) =>
-        stabilizeLiveDetections(
-          previous,
-          filteredDetections,
-          resolvedTime,
-        )
-      )
+      setLiveRedactionDetections((previous) => {
+        return stabilizeLiveDetections(previous, filteredDetections, resolvedTime)
+      })
       setLiveRedactionSeekPending(false)
       setLiveRedactionError(data.object_detection_error || null)
       liveRedactionLastResolvedTimeRef.current = resolvedTime
     } catch (e) {
+      console.error('[LiveBlur] Error:', e)
       if (requestId !== liveRedactionRequestIdRef.current) return
       setLiveRedactionSeekPending(false)
       setLiveRedactionError(e instanceof Error ? e.message : 'Live redaction failed')
@@ -2730,42 +2807,40 @@ export default function VideoEditorPage() {
       liveRedactionInFlightRef.current = false
       const pendingTime = liveRedactionPendingTimeRef.current
       liveRedactionPendingTimeRef.current = null
-      if (
-        pendingTime !== null &&
-        Number.isFinite(pendingTime) &&
-        Math.abs(pendingTime - requestedTime) >= 0.05
-      ) {
+      if (pendingTime !== null && Number.isFinite(pendingTime)) {
         window.setTimeout(() => {
           requestLiveRedaction(pendingTime)
         }, 0)
       }
     }
-  }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionActive, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
+  }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionPreviewActive, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
+
+  const requestLiveRedactionRef = useRef(requestLiveRedaction)
+  requestLiveRedactionRef.current = requestLiveRedaction
 
   const syncLiveRedactionFrame = useCallback((options?: { force?: boolean; clearDetections?: boolean; resetTracking?: boolean; time?: number }) => {
-    if (!liveRedactionActive || !effectiveStreamUrl) return
+    if (!liveRedactionPreviewActive || !effectiveStreamUrl) return
 
     const video = videoRef.current
-    const targetTime = options?.time ?? video?.currentTime ?? currentTime
+    const targetTime = options?.time ?? video?.currentTime ?? 0
     if (!Number.isFinite(targetTime) || targetTime < 0) return
 
     liveRedactionLastResolvedTimeRef.current = null
 
-    // When the user jumps around the timeline, ignore stale in-flight results
-    // so the overlay always re-locks to the newly requested frame.
-    if (liveRedactionInFlightRef.current) {
-      liveRedactionRequestIdRef.current += 1
-    }
-
     if (options?.clearDetections) {
       setLiveRedactionDetections([])
+      // Only invalidate in-flight requests when explicitly clearing (user
+      // jumped timeline), not during normal playback polling.
+      if (liveRedactionInFlightRef.current) {
+        liveRedactionRequestIdRef.current += 1
+      }
     }
 
-    requestLiveRedaction(targetTime, {
+    requestLiveRedactionRef.current(targetTime, {
       force: !!options?.force,
       resetTracking: !!options?.resetTracking,
     })
-  }, [currentTime, effectiveStreamUrl, liveRedactionActive, requestLiveRedaction])
+  }, [effectiveStreamUrl, liveRedactionPreviewActive])
 
   const buildCustomRegionPayload = useCallback((regions: TrackingRegion[]) => (
     regions.map((r) => ({
@@ -2856,7 +2931,7 @@ export default function VideoEditorPage() {
   }, [exportRedactDownloadUrl, exportRedactFilename])
 
   useEffect(() => {
-    if (!liveRedactionActive || !effectiveStreamUrl) {
+    if (!liveRedactionPreviewActive || !effectiveStreamUrl) {
       setLiveRedactionDetections([])
       setLiveRedactionLoading(false)
       setLiveRedactionSeekPending(false)
@@ -2867,23 +2942,23 @@ export default function VideoEditorPage() {
     }
 
     if (isPlaying) return
-    requestLiveRedaction(videoRef.current?.currentTime ?? currentTime)
-  }, [currentTime, effectiveStreamUrl, isPlaying, liveRedactionActive, requestLiveRedaction])
+    requestLiveRedactionRef.current(videoRef.current?.currentTime ?? currentTime)
+  }, [currentTime, effectiveStreamUrl, isPlaying, liveRedactionPreviewActive])
 
   useEffect(() => {
-    if (!liveRedactionActive || !effectiveStreamUrl || !isPlaying) return
+    if (!liveRedactionPreviewActive || !effectiveStreamUrl || !isPlaying) return
 
     const pollMs = playbackRate > 1
       ? Math.max(90, Math.round(LIVE_DETECTION_POLL_MS / playbackRate))
       : LIVE_DETECTION_POLL_MS
 
-    requestLiveRedaction(videoRef.current?.currentTime ?? 0)
+    requestLiveRedactionRef.current(videoRef.current?.currentTime ?? 0)
     const intervalId = window.setInterval(() => {
-      requestLiveRedaction(videoRef.current?.currentTime ?? 0)
+      requestLiveRedactionRef.current(videoRef.current?.currentTime ?? 0)
     }, pollMs)
 
     return () => window.clearInterval(intervalId)
-  }, [effectiveStreamUrl, isPlaying, liveRedactionActive, playbackRate, requestLiveRedaction])
+  }, [effectiveStreamUrl, isPlaying, liveRedactionPreviewActive, playbackRate])
 
   useEffect(() => {
     if (!trackingRegions.length) {
@@ -3378,15 +3453,105 @@ export default function VideoEditorPage() {
       return true
     })
   }, [liveRedactionDetections])
-  const liveBackdropBlurSupported = useMemo(() => supportsLiveBackdropBlur(), [])
   const renderedLiveRedactionDetections = useMemo(() => {
     const playbackTime = videoRef.current?.currentTime ?? currentTime
     return visibleLiveRedactionDetections.map((entry) => predictLiveDetection(entry, playbackTime))
   }, [currentTime, visibleLiveRedactionDetections])
-  const showLiveRedactionSeekLoader = liveRedactionActive && liveRedactionSeekPending
+  const domVideoBlurSupported = supportsLiveBackdropBlur()
+  const useDomVideoBlurOverlay = (
+    liveRedactionOverlayVisible &&
+    redactionStyle === 'blur' &&
+    renderedLiveRedactionDetections.length > 0 &&
+    domVideoBlurSupported &&
+    !useHls
+  )
+  const liveBlurOverlayVideoStyle = useMemo<React.CSSProperties>(() => ({
+    filter: `blur(${getLiveRedactionBlurPx(blurIntensity)}px) saturate(0.72)`,
+    clipPath: `url(#${liveBlurClipPathId})`,
+    WebkitClipPath: `url(#${liveBlurClipPathId})`,
+    transform: 'translateZ(0) scale(1.03)',
+    transformOrigin: '50% 50%',
+  }), [blurIntensity, liveBlurClipPathId])
+  const showLiveRedactionSeekLoader = liveRedactionPreviewActive && liveRedactionSeekPending && (!isPlaying || isScrubbing)
+  const livePreviewModeLabel = liveRedactionEnabled ? 'Live blur' : 'Selection preview'
+  const liveRedactionStatusLabel = !liveRedactionReady && !selectionPreviewActive
+    ? 'Paused'
+    : showLiveRedactionSeekLoader
+      ? 'Updating'
+      : liveRedactionLoading
+        ? 'Scanning'
+        : liveRedactionReady
+          ? 'Running'
+          : 'Selection preview'
+  const liveRedactionStatusClassName = !liveRedactionReady && !selectionPreviewActive
+    ? 'text-text-tertiary'
+    : showLiveRedactionSeekLoader
+      ? 'text-white'
+      : liveRedactionLoading
+        ? 'text-text-secondary'
+        : liveRedactionReady
+          ? 'text-accent'
+          : 'text-text-primary'
+  const liveRedactionFrameLabel = !liveRedactionReady && !selectionPreviewActive
+    ? 'Paused'
+    : showLiveRedactionSeekLoader
+      ? 'Updating...'
+      : liveRedactionLoading && visibleLiveRedactionDetections.length === 0
+        ? 'Scanning...'
+        : `${visibleLiveRedactionDetections.length} blur region${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`
   useEffect(() => {
     visibleLiveRedactionDetectionsRef.current = visibleLiveRedactionDetections
   }, [visibleLiveRedactionDetections])
+
+  useEffect(() => {
+    const mainVideo = videoRef.current
+    const overlayVideo = liveBlurOverlayVideoRef.current
+    if (!mainVideo || !overlayVideo || !useDomVideoBlurOverlay) return
+
+    let cancelled = false
+    let frameId: number | null = null
+
+    const syncOverlay = () => {
+      if (cancelled) return
+
+      overlayVideo.defaultMuted = true
+      overlayVideo.muted = true
+      overlayVideo.volume = 0
+      overlayVideo.playbackRate = mainVideo.playbackRate || playbackRate
+
+      const mainTime = mainVideo.currentTime ?? currentTime
+      const driftThreshold = mainVideo.paused || mainVideo.seeking ? 0.02 : 0.08
+      if (
+        Number.isFinite(mainTime) &&
+        (!Number.isFinite(overlayVideo.currentTime) || Math.abs(overlayVideo.currentTime - mainTime) > driftThreshold)
+      ) {
+        try {
+          overlayVideo.currentTime = mainTime
+        } catch {
+          /* ignore currentTime sync failures while media is still warming up */
+        }
+      }
+
+      if (mainVideo.paused || mainVideo.ended || mainVideo.seeking) {
+        if (!overlayVideo.paused) {
+          overlayVideo.pause()
+        }
+      } else if (overlayVideo.readyState >= 2) {
+        overlayVideo.play().catch(() => {})
+      }
+
+      frameId = window.requestAnimationFrame(syncOverlay)
+    }
+
+    syncOverlay()
+    return () => {
+      cancelled = true
+      if (frameId !== null) {
+        window.cancelAnimationFrame(frameId)
+      }
+      overlayVideo.pause()
+    }
+  }, [currentTime, playbackRate, useDomVideoBlurOverlay])
 
   /* Strand shared classes */
   const btnBase = 'inline-flex items-center justify-center rounded-md border border-border bg-surface text-text-primary hover:bg-card transition-colors'
@@ -3453,7 +3618,8 @@ export default function VideoEditorPage() {
     ctx.clearRect(0, 0, width, height)
 
     if (
-      !liveRedactionActive ||
+      useDomVideoBlurOverlay ||
+      !liveRedactionOverlayVisible ||
       width <= 0 ||
       height <= 0 ||
       video.readyState < 2 ||
@@ -3470,11 +3636,11 @@ export default function VideoEditorPage() {
     blurIntensity,
     currentTime,
     isPlaying,
-    liveBackdropBlurSupported,
-    liveRedactionActive,
+    liveRedactionOverlayVisible,
     overlayViewport.height,
     overlayViewport.width,
     redactionStyle,
+    useDomVideoBlurOverlay,
     visibleLiveRedactionDetections,
   ])
   useLayoutEffect(() => {
@@ -3505,14 +3671,19 @@ export default function VideoEditorPage() {
       const height = Math.max(0, overlayViewport.height)
       ctx.clearRect(0, 0, width, height)
       if (
-        liveRedactionActive &&
+        !useDomVideoBlurOverlay &&
+        liveRedactionOverlayVisible &&
         width > 0 &&
         height > 0 &&
         video.readyState >= 2 &&
         visibleLiveRedactionDetectionsRef.current.length > 0
       ) {
-        for (const detection of visibleLiveRedactionDetectionsRef.current.map((entry) => predictLiveDetection(entry, playbackTime))) {
-          drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
+        try {
+          for (const detection of visibleLiveRedactionDetectionsRef.current.map((entry) => predictLiveDetection(entry, playbackTime))) {
+            drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
+          }
+        } catch {
+          // Keep the loop alive even if one frame draw fails.
         }
       }
     }
@@ -3521,15 +3692,6 @@ export default function VideoEditorPage() {
       if (cancelled) return
 
       if (isPlaying) {
-        const frameVideo = video as VideoFrameCallbackCapableElement
-        if (typeof frameVideo.requestVideoFrameCallback === 'function') {
-          liveBlurVideoFrameCallbackRef.current = frameVideo.requestVideoFrameCallback((_, metadata) => {
-            drawFrame(metadata.mediaTime ?? video.currentTime ?? 0)
-            scheduleNextFrame()
-          })
-          return
-        }
-
         liveBlurAnimationFrameRef.current = window.requestAnimationFrame(() => {
           drawFrame(video.currentTime ?? 0)
           scheduleNextFrame()
@@ -3547,20 +3709,16 @@ export default function VideoEditorPage() {
         window.cancelAnimationFrame(liveBlurAnimationFrameRef.current)
         liveBlurAnimationFrameRef.current = null
       }
-      const frameVideo = video as VideoFrameCallbackCapableElement
-      if (
-        liveBlurVideoFrameCallbackRef.current !== null &&
-        typeof frameVideo.cancelVideoFrameCallback === 'function'
-      ) {
-        frameVideo.cancelVideoFrameCallback(liveBlurVideoFrameCallbackRef.current)
-        liveBlurVideoFrameCallbackRef.current = null
-      }
+      liveBlurVideoFrameCallbackRef.current = null
       ctx.clearRect(0, 0, Math.max(0, overlayViewport.width), Math.max(0, overlayViewport.height))
     }
-  }, [blurIntensity, isPlaying, liveBackdropBlurSupported, liveRedactionActive, overlayViewport.height, overlayViewport.width, redactionStyle])
+  }, [blurIntensity, isPlaying, liveRedactionOverlayVisible, overlayViewport.height, overlayViewport.width, redactionStyle, useDomVideoBlurOverlay])
+
+  const syncLiveRedactionFrameRef = useRef(syncLiveRedactionFrame)
+  syncLiveRedactionFrameRef.current = syncLiveRedactionFrame
 
   useEffect(() => {
-    if (!liveRedactionActive || !hasRunDetection) return
+    if (!liveRedactionPreviewActive || !hasRunDetection) return
 
     setLiveRedactionDetections((previous) =>
       previous.filter((detection) => {
@@ -3570,11 +3728,11 @@ export default function VideoEditorPage() {
     )
 
     const timer = window.setTimeout(() => {
-      syncLiveRedactionFrame({ force: true, clearDetections: true, resetTracking: true })
+      syncLiveRedactionFrameRef.current({ force: true, clearDetections: true, resetTracking: true })
     }, 0)
 
     return () => window.clearTimeout(timer)
-  }, [excludedFromRedactionIds, hasRunDetection, liveRedactionActive, syncLiveRedactionFrame])
+  }, [excludedFromRedactionIds, hasRunDetection, liveRedactionPreviewActive])
 
   const toggleDetectionSelectionById = useCallback((selectionId: string, personId?: string | null) => {
     const isExcluded = excludedFromRedactionIds.includes(selectionId)
@@ -3590,10 +3748,14 @@ export default function VideoEditorPage() {
 
   const handleDetectionListToggle = useCallback((item: DetectionItem) => {
     const isExcluded = excludedFromRedactionIds.includes(item.id)
+    const isActivatingBlur = isExcluded
+    const wasPlaying = !!videoRef.current && !videoRef.current.paused
     toggleDetectionSelectionById(item.id, item.kind === 'face' ? item.personId : null)
 
-    if (!liveRedactionEnabled) return
-    if (!isExcluded) return
+    if (!isActivatingBlur || !effectiveStreamUrl) return
+
+    setLiveRedactionSeekPending(true)
+
     if (isDetectionItemLikelyVisibleAtTime(item, currentTime)) return
 
     const seekTime = getDetectionItemSeekTime(item, currentTime)
@@ -3601,9 +3763,9 @@ export default function VideoEditorPage() {
     if (Math.abs(seekTime - currentTime) < 0.35) return
 
     window.setTimeout(() => {
-      seekToTime(seekTime)
+      seekToTime(seekTime, { play: wasPlaying || liveRedactionEnabled })
     }, 0)
-  }, [currentTime, excludedFromRedactionIds, liveRedactionEnabled, seekToTime, toggleDetectionSelectionById])
+  }, [currentTime, effectiveStreamUrl, excludedFromRedactionIds, liveRedactionEnabled, seekToTime, toggleDetectionSelectionById])
 
   const toggleLiveDetectionSelection = useCallback((detection: LiveRedactionDetection) => {
     const selectionId = getSelectionIdForLiveDetection(detection)
@@ -3770,7 +3932,9 @@ export default function VideoEditorPage() {
                 <p className="text-xs text-text-secondary leading-relaxed break-words">
                   {liveRedactionReady
                     ? 'Live blur is previewing directly on the video player. Detect selections apply immediately here and are also reused when you render the redacted download.'
-                    : 'Live blur preview is off in the video player. Your Detect blur and unblur choices are still preserved for render and download, and the preview stays off until you turn Live Blur on.'}
+                    : selectionPreviewActive
+                      ? 'Live Blur stays off. The selected Detect item keeps previewing only that identity on the player, and the same selection is reused when you download the redacted video.'
+                      : 'Live Blur stays off until you turn it on. Detect blur choices are still preserved for download, and selecting a Detect item starts a selected-identity preview.'}
                 </p>
                 <div className="space-y-2 border-t border-border pt-3 min-w-0">
                   <span className="text-[11px] font-medium uppercase tracking-wider text-text-tertiary">Redaction</span>
@@ -3820,34 +3984,14 @@ export default function VideoEditorPage() {
                   <div className="space-y-2 border-t border-border pt-2">
                     <div className="flex items-center justify-between gap-2 min-w-0">
                       <span className="text-xs text-text-tertiary truncate min-w-0">Status</span>
-                      <span className={`text-xs font-medium ${
-                        !liveRedactionReady
-                          ? 'text-text-tertiary'
-                          : showLiveRedactionSeekLoader
-                            ? 'text-white'
-                          : liveRedactionLoading
-                            ? 'text-text-secondary'
-                            : 'text-accent'
-                      }`}>
-                        {!liveRedactionReady
-                          ? 'Paused'
-                          : showLiveRedactionSeekLoader
-                            ? 'Updating'
-                            : liveRedactionLoading
-                              ? 'Scanning'
-                              : 'Running'}
+                      <span className={`text-xs font-medium ${liveRedactionStatusClassName}`}>
+                        {liveRedactionStatusLabel}
                       </span>
                     </div>
                     <div className="flex items-center justify-between gap-2 min-w-0">
                       <span className="text-xs text-text-tertiary truncate min-w-0">Current frame</span>
                       <span className="text-xs text-text-primary tabular-nums shrink-0">
-                        {!liveRedactionReady
-                          ? 'Paused'
-                          : showLiveRedactionSeekLoader
-                          ? 'Updating...'
-                          : liveRedactionLoading && visibleLiveRedactionDetections.length === 0
-                          ? 'Scanning...'
-                          : `${visibleLiveRedactionDetections.length} blur region${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
+                        {liveRedactionFrameLabel}
                       </span>
                     </div>
                     <div className="flex items-center justify-between gap-2 min-w-0">
@@ -3943,7 +4087,7 @@ export default function VideoEditorPage() {
                     <IconDownload className="w-4 h-4" />
                     {exportRedactLoading
                       ? 'Rendering redacted video...'
-                      : 'Render and download redacted video'}
+                      : 'Download Redacted'}
                   </button>
                   {exportRedactLoading && (
                     <p className="px-3 py-2 text-xs text-text-secondary border-b border-border">
@@ -3965,6 +4109,7 @@ export default function VideoEditorPage() {
                     className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-card transition-colors flex items-center gap-2"
                     onClick={() => { setExportMenuOpen(false); /* TODO: report */ }}
                   >
+                    <img src={documentListIconUrl} alt="" className="w-4 h-4 opacity-80" aria-hidden />
                     Report
                   </button>
                 </div>
@@ -4013,7 +4158,10 @@ export default function VideoEditorPage() {
                       loop={false}
                     onLoadedMetadata={onLoadedMetadata}
                     onTimeUpdate={onTimeUpdate}
-                    onPlay={() => setIsPlaying(true)}
+                    onPlay={() => {
+                      setIsPlaying(true)
+                      setLiveRedactionSeekPending(false)
+                    }}
                     onPause={() => {
                       setIsPlaying(false)
                       window.setTimeout(() => syncLiveRedactionFrame({ force: true }), 0)
@@ -4050,14 +4198,48 @@ export default function VideoEditorPage() {
                 )}
 
                 {/* Live blur overlay from backend detections */}
-                {effectiveStreamUrl && liveRedactionActive && (
+                {effectiveStreamUrl && liveRedactionOverlayVisible && (
                   <div className="absolute inset-0 z-10 pointer-events-none">
                     <div className="absolute" style={overlayFrameStyle}>
-                      <canvas
-                        ref={liveBlurCanvasRef}
-                        className="absolute inset-0 w-full h-full pointer-events-none"
-                      />
-                      {!showLiveRedactionSeekLoader && liveBackdropBlurSupported && renderedLiveRedactionDetections.map((detection, index) => (
+                      {false && !useDomVideoBlurOverlay && redactionStyle === 'blur' && (
+                        <canvas
+                          ref={liveBlurCanvasRef}
+                          className="absolute inset-0 w-full h-full pointer-events-none"
+                        />
+                      )}
+                      {!showLiveRedactionSeekLoader && useDomVideoBlurOverlay && (
+                        <>
+                          <svg className="absolute h-0 w-0 pointer-events-none" aria-hidden focusable="false">
+                            <defs>
+                              <clipPath id={liveBlurClipPathId} clipPathUnits="objectBoundingBox">
+                                {renderedLiveRedactionDetections.map((detection, index) => {
+                                  const renderBox = getLiveRedactionRenderBox(detection)
+                                  return (
+                                    <rect
+                                      key={`live-clip-${detection.trackId || detection.id || `${detection.kind}-${index}`}`}
+                                      x={renderBox.x}
+                                      y={renderBox.y}
+                                      width={renderBox.width}
+                                      height={renderBox.height}
+                                    />
+                                  )
+                                })}
+                              </clipPath>
+                            </defs>
+                          </svg>
+                          <video
+                            ref={liveBlurOverlayVideoRef}
+                            src={useHls ? undefined : effectiveStreamUrl}
+                            className="absolute inset-0 h-full w-full pointer-events-none"
+                            style={liveBlurOverlayVideoStyle}
+                            crossOrigin="anonymous"
+                            playsInline
+                            muted
+                            aria-hidden
+                          />
+                        </>
+                      )}
+                      {!showLiveRedactionSeekLoader && renderedLiveRedactionDetections.length > 0 && renderedLiveRedactionDetections.map((detection, index) => (
                         <div
                           key={`live-region-${detection.trackId || detection.id || `${detection.kind}-${index}`}`}
                           className="absolute z-10"
@@ -4077,12 +4259,14 @@ export default function VideoEditorPage() {
                             </span>
                             <div className="space-y-1">
                               <p className="text-sm font-medium text-white">
-                                {isScrubbing ? 'Updating blur while you scrub' : 'Updating live blur preview'}
+                                {isScrubbing ? 'Updating blur while you scrub' : liveRedactionEnabled ? 'Updating live blur preview' : 'Updating selected blur preview'}
                               </p>
                               <p className="text-[11px] leading-relaxed text-white/68">
                                 {isScrubbing
                                   ? 'The blur will lock onto the selected frame as soon as detection finishes.'
-                                  : 'This frame needs a fresh detection pass after the timeline jump.'}
+                                  : liveRedactionEnabled
+                                    ? 'This frame needs a fresh detection pass after the timeline jump.'
+                                    : 'This frame needs a fresh identity check for the selected item.'}
                               </p>
                             </div>
                           </div>
@@ -4107,12 +4291,14 @@ export default function VideoEditorPage() {
                           <button
                             key={`live-hit-${selectionId}`}
                             type="button"
-                            className="absolute z-20 pointer-events-auto border-2 p-0 cursor-pointer rounded-sm shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
-                            style={overlayStyle}
+                            className="absolute z-20 pointer-events-auto cursor-pointer rounded-sm border-0 bg-transparent p-0 outline-none focus:outline-none focus:ring-0"
+                            style={{ ...overlayStyle, borderWidth: 0, boxShadow: 'none', backgroundColor: 'transparent', borderColor: 'transparent' }}
                             onClick={(event) => {
                               event.stopPropagation()
                               toggleLiveDetectionSelection(detection)
                             }}
+                            onMouseDown={(event) => event.preventDefault()}
+                            tabIndex={-1}
                             aria-label={`Toggle blur for ${detection.label}`}
                             title={`Toggle blur for ${detection.label}`}
                           />
@@ -4126,7 +4312,7 @@ export default function VideoEditorPage() {
                           : 'Updating blur preview...'
                         : liveRedactionLoading && visibleLiveRedactionDetections.length === 0
                         ? 'Scanning current frame...'
-                        : `Live blur: ${visibleLiveRedactionDetections.length} detection${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
+                        : `${livePreviewModeLabel}: ${visibleLiveRedactionDetections.length} detection${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
                     </div>
                     {liveRedactionError && (
                       <div className="absolute top-12 right-3 max-w-xs rounded-md border border-error/40 bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-red-200 shadow-lg">
@@ -4275,7 +4461,7 @@ export default function VideoEditorPage() {
                   </div>
 
                   <div className={`h-[64px] shrink-0 relative border-b border-border ${trackMuted.video ? 'opacity-40' : ''}`}>
-                    <div className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden border border-accent/25 bg-gradient-to-r from-brand-charcoal via-[#123228] to-brand-charcoal shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                    <div className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden border border-accent/25 bg-gradient-to-r from-brand-charcoal via-[#123228] to-brand-charcoal shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                       <div className="absolute inset-0 flex">
                         {timelineThumbnails.length > 0 ? (
                           timelineThumbnails.map((src, i) => (
@@ -4318,7 +4504,7 @@ export default function VideoEditorPage() {
                   {orderedSearchClips.length > 0 && (
                     <div className="h-[48px] shrink-0 relative border-b border-border">
                       <div
-                        className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                        className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
                         style={{
                           border: `1px solid ${ENTITY_SEARCH_LANE_BORDER}`,
                           background: ENTITY_SEARCH_LANE_BACKGROUND,
@@ -4446,7 +4632,7 @@ export default function VideoEditorPage() {
                         className={`h-[52px] shrink-0 relative border-b border-border ${lane.active ? '' : 'opacity-70'}`}
                       >
                         <div
-                          className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                          className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
                           style={{
                             border: `1px solid ${lane.active ? `${accentColor}42` : 'rgba(148,163,184,0.22)'}`,
                             background: lane.active
@@ -4537,7 +4723,7 @@ export default function VideoEditorPage() {
 
                   {SHOW_AUDIO_WAVEFORM && (
                     <div className={`h-[48px] shrink-0 relative border-b border-border ${trackMuted.audio ? 'opacity-40' : ''}`}>
-                      <div className="absolute inset-x-2 inset-y-1.5 rounded-lg overflow-hidden border border-highlight/25 bg-gradient-to-r from-highlight/[0.14] via-surface to-highlight/[0.14] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+                      <div className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden border border-highlight/25 bg-gradient-to-r from-highlight/[0.14] via-surface to-highlight/[0.14] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                         <div className="absolute inset-0 bg-gradient-to-b from-white/[0.03] via-transparent to-highlight/[0.05] pointer-events-none" />
                         <div className="absolute inset-x-3 top-1/2 h-px -translate-y-1/2 bg-highlight/15" />
                         {audioWaveformPath ? (
@@ -4906,10 +5092,12 @@ export default function VideoEditorPage() {
             /* Detection sidebar (Tracker or Detection selected) — same flex pattern as Analyze so video player middle behaves identically */
             <>
               <div className="px-3 h-10 flex items-center justify-between border-b border-border shrink-0 gap-1">
-                <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider truncate min-w-0">Detections</span>
-                {hasRunDetection && (
-                  <span className="text-xs text-text-tertiary tabular-nums shrink-0">({filteredDetections.length})</span>
-                )}
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider truncate min-w-0">Detections</span>
+                  {hasRunDetection && (
+                    <span className="text-xs text-text-tertiary tabular-nums shrink-0">({filteredDetections.length})</span>
+                  )}
+                </div>
                 <button type="button" onClick={() => setRightSidebarOpen(false)} className={`h-7 w-7 shrink-0 rounded-md ${btnBase}`} aria-label="Collapse sidebar" title="Collapse sidebar">
                   <IconChevronRight className="w-4 h-4" />
                 </button>
