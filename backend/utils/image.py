@@ -81,6 +81,18 @@ def crop_with_bbox_to_base64(img_bgr, box, label=None, confidence=None,
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
+def _build_elliptical_mask(roi_h, roi_w):
+    """Build an elliptical alpha mask: 1.0 at center, fading to 0.0 at edges."""
+    cy, cx = roi_h / 2.0, roi_w / 2.0
+    ys = np.arange(roi_h, dtype=np.float32)
+    xs = np.arange(roi_w, dtype=np.float32)
+    yy, xx = np.meshgrid(ys, xs, indexing="ij")
+    dist = np.sqrt(((xx - cx) / max(cx, 1)) ** 2 + ((yy - cy) / max(cy, 1)) ** 2)
+    mask = np.clip(1.0 - dist, 0.0, 1.0)
+    mask = (mask ** 1.3).astype(np.float32)
+    return mask
+
+
 def apply_blur(frame, bbox, blur_strength=51):
     x1, y1, x2, y2 = [int(v) for v in bbox]
     h, w = frame.shape[:2]
@@ -101,8 +113,13 @@ def apply_blur(frame, bbox, blur_strength=51):
     expanded = cv2.resize(reduced, (roi_w, roi_h), interpolation=cv2.INTER_CUBIC)
 
     kernel = max(9, min(max(roi_w, roi_h) | 1, (strength + 21) | 1))
-    softened = cv2.GaussianBlur(expanded, (kernel, kernel), 0)
-    frame[y1:y2, x1:x2] = softened
+    blurred = cv2.GaussianBlur(expanded, (kernel, kernel), 0)
+
+    mask = _build_elliptical_mask(roi_h, roi_w)
+    mask_3ch = mask[:, :, np.newaxis]
+    blended = (blurred.astype(np.float32) * mask_3ch +
+               roi.astype(np.float32) * (1.0 - mask_3ch))
+    frame[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
     return frame
 
 

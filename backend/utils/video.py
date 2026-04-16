@@ -174,8 +174,12 @@ def timestamps_from_time_ranges(time_ranges, sample_interval=None):
     return result
 
 
-def reencode_mp4_to_h264(input_path, output_path=None):
-    """Re-encode an MP4 (e.g. mp4v) to H.264 for universal playback (QuickTime, browsers, etc.)."""
+def reencode_mp4_to_h264(input_path, output_path=None, original_path=None):
+    """Re-encode an MP4 (e.g. mp4v) to H.264 for universal playback.
+
+    If *original_path* is provided, the audio stream from that file is muxed
+    into the output so the redacted video keeps its soundtrack.
+    """
     if output_path is None:
         output_path = input_path
     if input_path == output_path:
@@ -186,13 +190,17 @@ def reencode_mp4_to_h264(input_path, output_path=None):
         final_path = output_path
 
     try:
-        cmd = [
-            "ffmpeg", "-y", "-i", input_path,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        cmd = ["ffmpeg", "-y", "-i", input_path]
+        if original_path and os.path.isfile(original_path):
+            cmd += ["-i", original_path]
+        cmd += [
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
             "-movflags", "+faststart",
             "-pix_fmt", "yuv420p",
-            final_path,
         ]
+        if original_path and os.path.isfile(original_path):
+            cmd += ["-map", "0:v:0", "-map", "1:a:0?", "-c:a", "aac", "-shortest"]
+        cmd.append(final_path)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
         if result.returncode != 0:
             logger.warning("ffmpeg re-encode failed: %s", result.stderr[-500:] if result.stderr else "unknown")

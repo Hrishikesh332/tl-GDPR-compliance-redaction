@@ -109,9 +109,9 @@ def build_redaction_request(data):
         redaction_style = "blur"
 
     try:
-        detect_every_n = int(data.get("detect_every_n", request.form.get("detect_every_n", 3)))
+        detect_every_n = int(data.get("detect_every_n", request.form.get("detect_every_n", 5)))
     except (TypeError, ValueError):
-        detect_every_n = 3
+        detect_every_n = 5
 
     detect_every_seconds = data.get("detect_every_seconds")
     if detect_every_seconds is None:

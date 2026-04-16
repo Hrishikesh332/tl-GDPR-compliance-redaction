@@ -1323,7 +1323,7 @@ def redact_video(
 
     if not preview_only and temp_path is not None:
         emit_progress("reencoding", 0.94, frames_processed=frame_idx, message="Re-encoding output")
-        reencode_mp4_to_h264(temp_path, output_path)
+        reencode_mp4_to_h264(temp_path, output_path, original_path=input_path)
         try:
             os.remove(temp_path)
         except OSError:

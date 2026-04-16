@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import Hls from 'hls.js'
 import { useVideoCache } from '../contexts/VideoCache'
 import { API_BASE } from '../lib/api'
-import { DEMO_EDITOR_VIDEO_ID, storeLastEditorVideoId } from '../lib/editorRouting'
+import { storeLastEditorVideoId } from '../lib/editorRouting'
 import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
@@ -658,6 +658,9 @@ function getLiveRedactionOverlayStyle(
 ): React.CSSProperties {
   const renderBox = getLiveRedactionRenderBox(detection)
   const blurCss = `blur(${getLiveRedactionBlurPx(blurStrength)}px) saturate(0.72)`
+  const blurMask = detection.kind === 'face'
+    ? 'radial-gradient(ellipse at center, rgba(0,0,0,1) 38%, rgba(0,0,0,0.86) 58%, rgba(0,0,0,0.42) 78%, rgba(0,0,0,0.12) 92%, rgba(0,0,0,0) 100%)'
+    : 'radial-gradient(ellipse at center, rgba(0,0,0,1) 44%, rgba(0,0,0,0.82) 68%, rgba(0,0,0,0.34) 88%, rgba(0,0,0,0) 100%)'
 
   return {
     left: `${renderBox.x * 100}%`,
@@ -672,12 +675,15 @@ function getLiveRedactionOverlayStyle(
     transition: 'left 120ms linear, top 120ms linear, width 120ms linear, height 120ms linear',
     backgroundColor: style === 'black'
       ? 'rgba(5, 6, 8, 0.96)'
-      : detection.kind === 'face'
-        ? 'rgba(12, 14, 18, 0.10)'
-        : 'rgba(12, 14, 18, 0.07)',
+      : 'transparent',
     backdropFilter: style === 'black' ? undefined : blurCss,
     WebkitBackdropFilter: style === 'black' ? undefined : blurCss,
-    boxShadow: style === 'black' ? 'none' : 'inset 0 0 0 1px rgba(255,255,255,0.04)',
+    maskImage: style === 'black' ? undefined : blurMask,
+    WebkitMaskImage: style === 'black' ? undefined : blurMask,
+    maskMode: style === 'black' ? undefined : 'alpha',
+    WebkitMaskRepeat: style === 'black' ? undefined : 'no-repeat',
+    maskRepeat: style === 'black' ? undefined : 'no-repeat',
+    boxShadow: 'none',
   }
 }
 
@@ -1646,6 +1652,7 @@ export default function VideoEditorPage() {
   const [exportRedactError, setExportRedactError] = useState<string | null>(null)
   const [exportRedactDownloadUrl, setExportRedactDownloadUrl] = useState<string | null>(null)
   const [exportRedactFilename, setExportRedactFilename] = useState('redacted-video.mp4')
+  const [exportRedactProgress, setExportRedactProgress] = useState<{ percent: number; message: string } | null>(null)
   const [trackingPreviewByRegion, setTrackingPreviewByRegion] = useState<Record<string, TrackingPreviewSample[]>>({})
   const [trackingPreviewLoading, setTrackingPreviewLoading] = useState(false)
   const [trackingPreviewError, setTrackingPreviewError] = useState<string | null>(null)
@@ -1739,7 +1746,7 @@ export default function VideoEditorPage() {
 
   const streamUrl = cached?.stream_url || videoInfo?.hls?.video_url || undefined
   const title = cached?.metadata?.filename || videoInfo?.system_metadata?.filename || videoId || 'Untitled'
-  const isDemoEditorVideo = videoId === DEMO_EDITOR_VIDEO_ID
+
 
   /* ---- HLS: play m3u8 streams in Chrome/Firefox (TwelveLabs returns HLS) ---- */
   const effectiveStreamUrl = streamUrl
@@ -2809,7 +2816,7 @@ export default function VideoEditorPage() {
       liveRedactionPendingTimeRef.current = null
       if (pendingTime !== null && Number.isFinite(pendingTime)) {
         window.setTimeout(() => {
-          requestLiveRedaction(pendingTime)
+          requestLiveRedactionRef.current(pendingTime, { force: true })
         }, 0)
       }
     }
@@ -2862,12 +2869,13 @@ export default function VideoEditorPage() {
     setExportRedactDownloadUrl(null)
     setExportRedactFilename('redacted-video.mp4')
     setExportRedactLoading(true)
+    setExportRedactProgress({ percent: 0, message: 'Starting...' })
     try {
       const jobId = await resolveRedactionJobId()
       const shouldUseTemporalOptimization = selectedFacePersonIds.length > 0
       const body: any = {
         job_id: jobId,
-        detect_every_n: 3,
+        detect_every_n: 5,
         use_temporal_optimization: shouldUseTemporalOptimization,
         blur_strength: blurIntensity,
         redaction_style: redactionStyle,
@@ -2888,34 +2896,56 @@ export default function VideoEditorPage() {
         body.object_classes = LIVE_REDACTION_OBJECT_CLASSES
       }
 
-      const res = await fetch(`${API_BASE}/api/redact`, {
+      const startRes = await fetch(`${API_BASE}/api/redact/jobs`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error((err as { error?: string }).error || res.statusText)
+      if (!startRes.ok) {
+        const err = await startRes.json().catch(() => ({}))
+        throw new Error((err as { error?: string }).error || startRes.statusText)
       }
-      const result = (await res.json()) as { download_url?: string; output_path?: string }
-      let resolvedDownloadUrl: string | null = null
-      let resolvedFilename = 'redacted-video.mp4'
-      if (result.download_url) {
-        resolvedDownloadUrl = result.download_url.startsWith('http') ? result.download_url : `${API_BASE}${result.download_url}`
-        setExportRedactDownloadUrl(resolvedDownloadUrl)
-      }
-      if (result.output_path) {
-        resolvedFilename = result.output_path.split('/').pop() || 'redacted-video.mp4'
-        setExportRedactFilename(resolvedFilename)
-      }
-      if (resolvedDownloadUrl) {
-        await triggerFileDownload(resolvedDownloadUrl, resolvedFilename)
-        setExportMenuOpen(false)
+      const startData = (await startRes.json()) as { redaction_job_id: string }
+      const redactionJobId = startData.redaction_job_id
+
+      let resolved = false
+      while (!resolved) {
+        await new Promise((r) => setTimeout(r, 1200))
+        const pollRes = await fetch(`${API_BASE}/api/redact/jobs/${redactionJobId}`)
+        if (!pollRes.ok) throw new Error('Failed to check render status')
+        const poll = (await pollRes.json()) as {
+          status: string; percent?: number; message?: string; error?: string
+          result?: { download_url?: string; output_path?: string }
+        }
+        setExportRedactProgress({ percent: poll.percent ?? 0, message: poll.message ?? 'Rendering...' })
+
+        if (poll.status === 'completed') {
+          resolved = true
+          const result = poll.result
+          let resolvedDownloadUrl: string | null = null
+          let resolvedFilename = 'redacted-video.mp4'
+          if (result?.download_url) {
+            resolvedDownloadUrl = result.download_url.startsWith('http') ? result.download_url : `${API_BASE}${result.download_url}`
+            setExportRedactDownloadUrl(resolvedDownloadUrl)
+          }
+          if (result?.output_path) {
+            resolvedFilename = result.output_path.split('/').pop() || 'redacted-video.mp4'
+            setExportRedactFilename(resolvedFilename)
+          }
+          setExportRedactProgress({ percent: 100, message: 'Done!' })
+          if (resolvedDownloadUrl) {
+            await triggerFileDownload(resolvedDownloadUrl, resolvedFilename)
+            setExportMenuOpen(false)
+          }
+        } else if (poll.status === 'failed') {
+          throw new Error(poll.error || 'Redaction failed on the server')
+        }
       }
     } catch (e) {
       setExportRedactError(e instanceof Error ? e.message : 'Export failed')
     } finally {
       setExportRedactLoading(false)
+      setTimeout(() => setExportRedactProgress(null), 3000)
     }
   }, [blurIntensity, buildCustomRegionPayload, hasRunDetection, redactionStyle, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses, trackingRegions])
 
@@ -4085,14 +4115,21 @@ export default function VideoEditorPage() {
                     disabled={exportRedactLoading}
                   >
                     <IconDownload className="w-4 h-4" />
-                    {exportRedactLoading
-                      ? 'Rendering redacted video...'
-                      : 'Download Redacted'}
+                    {exportRedactLoading ? 'Rendering...' : 'Download Redacted'}
                   </button>
-                  {exportRedactLoading && (
-                    <p className="px-3 py-2 text-xs text-text-secondary border-b border-border">
-                      Long videos can take a bit. We now render with tracking and selected-person time ranges to speed this up.
-                    </p>
+                  {exportRedactLoading && exportRedactProgress && (
+                    <div className="px-3 py-2 border-b border-border space-y-1">
+                      <div className="flex items-center justify-between text-[11px] text-text-secondary">
+                        <span className="truncate">{exportRedactProgress.message}</span>
+                        <span className="tabular-nums ml-2">{exportRedactProgress.percent}%</span>
+                      </div>
+                      <div className="h-1 w-full rounded-full bg-border overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-accent transition-all duration-500"
+                          style={{ width: `${Math.max(0, Math.min(100, exportRedactProgress.percent))}%` }}
+                        />
+                      </div>
+                    </div>
                   )}
                   {exportRedactDownloadUrl && (
                     <button
@@ -4117,26 +4154,6 @@ export default function VideoEditorPage() {
             </div>
           </header>
 
-          {isDemoEditorVideo && (
-            <div className="shrink-0 border-b border-border bg-[rgba(0,220,130,0.08)] px-5 py-3">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-[11px] font-brand-xbold uppercase tracking-[0.14em] text-accent">
-                    Demo Mode
-                  </p>
-                  <p className="mt-1 text-sm leading-6 text-text-secondary">
-                    You are exploring the sample editor session. Index a video from the dashboard to use and explore your own footage.
-                  </p>
-                </div>
-                <Link
-                  to="/dashboard"
-                  className="inline-flex shrink-0 items-center justify-center rounded-lg border border-accent/20 bg-background px-3 py-2 text-sm font-medium text-text-primary transition-colors hover:border-accent/35 hover:text-accent"
-                >
-                  Go to dashboard
-                </Link>
-              </div>
-            </div>
-          )}
 
           {/* Video viewport: must get enough space to show the player; timeline can shrink when space is tight */}
           <div className="flex-1 min-h-[140px] px-4 pt-4 pb-2 flex items-center justify-center">
@@ -4312,7 +4329,7 @@ export default function VideoEditorPage() {
                           : 'Updating blur preview...'
                         : liveRedactionLoading && visibleLiveRedactionDetections.length === 0
                         ? 'Scanning current frame...'
-                        : `${livePreviewModeLabel}: ${visibleLiveRedactionDetections.length} detection${visibleLiveRedactionDetections.length === 1 ? '' : 's'}`}
+                        : livePreviewModeLabel}
                     </div>
                     {liveRedactionError && (
                       <div className="absolute top-12 right-3 max-w-xs rounded-md border border-error/40 bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-red-200 shadow-lg">
