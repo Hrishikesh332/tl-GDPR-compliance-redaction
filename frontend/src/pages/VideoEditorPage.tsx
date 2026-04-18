@@ -4,7 +4,7 @@ import ReactMarkdown from 'react-markdown'
 import Hls from 'hls.js'
 import { useVideoCache } from '../contexts/VideoCache'
 import { API_BASE } from '../lib/api'
-import { storeLastEditorVideoId } from '../lib/editorRouting'
+import { storeLastEditorVideoId, DEMO_EDITOR_VIDEO_ID } from '../lib/editorRouting'
 import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
@@ -1682,6 +1682,8 @@ export default function VideoEditorPage() {
   const hlsPreviewRef = useRef<InstanceType<typeof Hls> | null>(null)
   const hlsPreviewLoadedUrlRef = useRef<string | null>(null)
   const [previewVideoReady, setPreviewVideoReady] = useState(false)
+  const [demoBannerDismissed, setDemoBannerDismissed] = useState(false)
+  const isDemoMode = videoId === DEMO_EDITOR_VIDEO_ID && !demoBannerDismissed
   const [videoViewport, setVideoViewport] = useState<VideoViewport>({ left: 0, top: 0, width: 0, height: 0 })
   const [playerAspectRatio, setPlayerAspectRatio] = useState<number>(16 / 9)
   const [videoStageSize, setVideoStageSize] = useState({ width: 0, height: 0 })
@@ -4076,6 +4078,27 @@ export default function VideoEditorPage() {
 
         {/* ============ CENTER (Editor) ============ */}
         <div ref={editorCenterRef} className="flex-1 flex flex-col min-w-0 min-h-0 bg-background overflow-hidden">
+
+          {isDemoMode && (
+            <div className="shrink-0 px-5 py-2.5 bg-gradient-to-r from-accent/10 via-accent/5 to-transparent border-b border-accent/20 flex items-center gap-3">
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-accent/15 text-accent border border-accent/25 shrink-0">
+                Demo Mode
+              </span>
+              <p className="text-xs text-text-secondary leading-snug min-w-0">
+                You are viewing a pre-loaded demo video. Head to the{' '}
+                <Link to="/dashboard" className="font-semibold text-accent hover:underline">Dashboard</Link>{' '}
+                to explore your uploaded videos — clicking any video will open it here in the editor for redaction.
+              </p>
+              <button
+                type="button"
+                onClick={() => setDemoBannerDismissed(true)}
+                className="ml-auto shrink-0 h-6 w-6 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-card transition-colors"
+                aria-label="Dismiss demo mode notice"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+          )}
 
           {/* Editor header */}
           <header className="shrink-0 h-14 px-5 flex items-center gap-4 border-b border-border bg-surface">

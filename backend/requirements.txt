@@ -1,4 +1,5 @@
 flask
+apscheduler
 flask-cors
 python-dotenv
 opencv-contrib-python-headless
@@ -10,3 +11,4 @@ insightface
 onnxruntime
 requests
 twelvelabs
+gunicorn

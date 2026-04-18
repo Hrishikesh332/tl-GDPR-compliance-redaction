@@ -194,8 +194,8 @@ function Shell() {
               >
                 <h1 className="text-base md:text-h5 font-medium truncate">GDPR Compliance [Video REDACTION]</h1>
               </Link>
-              <span className="hidden md:inline-flex items-center px-2 py-1 rounded-sm border border-border bg-transparent text-text-secondary text-xs font-medium shrink-0 uppercase tracking-wide pointer-events-none select-none">
-                SAMPLE APP
+              <span className="hidden md:inline-flex items-center px-2 py-1 rounded-sm border border-accent/25 bg-accent/10 text-accent text-xs font-medium shrink-0 uppercase tracking-wide pointer-events-none select-none">
+                DEMO
               </span>
             </div>
 
