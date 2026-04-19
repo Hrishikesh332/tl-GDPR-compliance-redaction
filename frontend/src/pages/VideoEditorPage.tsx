@@ -8,7 +8,6 @@ import { storeLastEditorVideoId, DEMO_EDITOR_VIDEO_ID } from '../lib/editorRouti
 import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
-import documentListIconUrl from '../../strand/icons/document-list.svg?url'
 
 const ANALYZE_SUGGESTIONS: string[] = [
   'Courtroom summary with key timestamps',
@@ -4177,14 +4176,6 @@ export default function VideoEditorPage() {
                       Download redacted video
                     </button>
                   )}
-                  <button
-                    type="button"
-                    className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-card transition-colors flex items-center gap-2"
-                    onClick={() => { setExportMenuOpen(false); /* TODO: report */ }}
-                  >
-                    <img src={documentListIconUrl} alt="" className="w-4 h-4 opacity-80" aria-hidden />
-                    Report
-                  </button>
                 </div>
               )}
             </div>
