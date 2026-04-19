@@ -21,12 +21,10 @@ _RUNTIME_CACHE_DIR = os.path.join(_BACKEND_DIR, ".cache")
 
 
 def is_git_lfs_pointer(path: str) -> bool:
-    """Return True if the file looks like a Git LFS pointer stub (not real weights)."""
     try:
         if not os.path.isfile(path):
             return False
-        # LFS pointer files are tiny and start with: "version https://git-lfs.github.com/spec/v1"
-        if os.path.getsize(path) < 1024:  # real YOLO weights are many MB
+        if os.path.getsize(path) < 1024:  
             with open(path, "rb") as f:
                 head = f.read(64)
             return head.startswith(b"version https://git-lfs.github.com/")
@@ -43,8 +41,6 @@ def build_yolo_model_candidates():
             configured,
         ]
 
-    # Default to the checked-in local weights for responsiveness and offline use.
-    # Newer Ultralytics weights can still be opted into via YOLO_OBJECT_MODEL.
     return [
         os.path.join(_BACKEND_DIR, "yolov8n.pt"),
         "yolov8n.pt",
@@ -98,7 +94,6 @@ def get_object_detection_error():
 
 
 def get_face_net():
-    """Load the res10_300x300_ssd face detector (~10.7 MB Caffe model)."""
     global _face_net
     if _face_net is None:
         _face_net = cv2.dnn.readNetFromCaffe(_PROTOTXT, _CAFFEMODEL)
@@ -107,7 +102,6 @@ def get_face_net():
 
 
 def ensure_runtime_cache_dirs():
-    """Give model-side helpers a writable cache directory inside the project."""
     cache_dirs = {
         "MPLCONFIGDIR": os.path.join(_RUNTIME_CACHE_DIR, "matplotlib"),
         "XDG_CACHE_HOME": os.path.join(_RUNTIME_CACHE_DIR, "xdg-cache"),
@@ -127,8 +121,6 @@ def build_insightface_provider_candidates():
         parsed = [item.strip() for item in configured.split(",") if item.strip()]
         candidates = [parsed] if parsed else []
     elif sys.platform == "darwin":
-        # CoreML has been unstable here and can leak runtime resources on shutdown.
-        # Default to CPU on macOS and let CoreML be opt-in via INSIGHTFACE_PROVIDERS.
         candidates = [["CPUExecutionProvider"]]
     else:
         candidates = [["CUDAExecutionProvider", "CPUExecutionProvider"], ["CPUExecutionProvider"]]
@@ -158,7 +150,6 @@ def build_insightface_provider_candidates():
 
 
 def get_face_app():
-    """Load InsightFace buffalo_l for primary face detection plus ArcFace embeddings."""
     global _face_app, _face_app_load_failed
     if _face_app_load_failed:
         return None
@@ -305,9 +296,10 @@ def iou(box_a, box_b):
 
 
 def get_embeddings_for_boxes(img_bgr, res10_boxes):
-    """Run InsightFace on the frame, then match its detections to res10 boxes by IoU
-    to assign 512-d ArcFace embeddings to each res10 detection.
-    Also returns unmatched InsightFace detections (faces res10 missed)."""
+
+    # Run InsightFace on the frame, then match its detections to res10 boxes by IoU
+    # to assign 512-d ArcFace embeddings to each res10 detection.
+    # Also returns unmatched InsightFace detections (faces res10 missed).
     insight_faces = get_insightface_detections(img_bgr, with_encodings=True)
     if not insight_faces:
         return [None] * len(res10_boxes), []
@@ -374,7 +366,7 @@ def get_insightface_detections(img_bgr, with_encodings=False):
 
 
 def detect_face_boxes(img_bgr, confidence_threshold=RES10_CONFIDENCE, include_supplemental=False):
-    """Return face boxes with confidence metadata, without encoding snapshots."""
+
     insight_detections = get_insightface_detections(img_bgr, with_encodings=False)
     if insight_detections:
         results = []
@@ -531,8 +523,7 @@ def localize_known_face_in_search_region(
     tolerance=0.35,
     allow_geometry_fallback=False,
 ):
-    """Relock a specific known face inside a search region.
-
+    """
     This keeps person-specific blur efficient by only searching a cropped area,
     while still requiring the selected person's embedding when available.
     """

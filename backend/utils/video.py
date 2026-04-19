@@ -175,7 +175,7 @@ def timestamps_from_time_ranges(time_ranges, sample_interval=None):
 
 
 def reencode_mp4_to_h264(input_path, output_path=None, original_path=None):
-    """Re-encode an MP4 (e.g. mp4v) to H.264 for universal playback.
+    """Re-encode an MP4  to H.264 for universal playback.
 
     If *original_path* is provided, the audio stream from that file is muxed
     into the output so the redacted video keeps its soundtrack.

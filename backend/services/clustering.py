@@ -10,11 +10,11 @@ COSINE_SIM_THRESHOLD = 0.55
 def cosine_sim(a, b):
     return float(np.dot(a, b))
 
-
+"""Cluster face detections into unique identities using cosine similarity
+    on InsightFace 512-d ArcFace embeddings. Two pass merge for robustness.
+"""
 def cluster_faces(all_faces, similarity_threshold=None):
-    """Cluster face detections into unique identities using cosine similarity
-    on InsightFace 512-d ArcFace embeddings. Two-pass merge for robustness.
-    """
+
     if similarity_threshold is None:
         similarity_threshold = COSINE_SIM_THRESHOLD
 
