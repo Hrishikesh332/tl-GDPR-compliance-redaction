@@ -480,6 +480,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
 
   const allVideos = useMemo(() => [...apiVideos], [apiVideos])
 
+  const PINNED_VIDEO_IDS = ['699fa0975ce336753bf904c2', '69b677662fc4a03916fba00e']
   const filteredVideos = useMemo(() => {
     if (searchResults) return searchResults.results
     let list = allVideos
@@ -489,7 +490,10 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
     if (sortBy === 'name') {
       list = [...list].sort((a, b) => a.title.localeCompare(b.title))
     }
-    return list
+    const pinnedSet = new Set(PINNED_VIDEO_IDS)
+    const pinned = PINNED_VIDEO_IDS.map((id) => list.find((v) => v.id === id)).filter(Boolean) as VideoItem[]
+    const rest = list.filter((v) => !pinnedSet.has(v.id))
+    return [...pinned, ...rest]
   }, [allVideos, sortBy, activeCategory, searchResults])
 
   async function handleSearch() {
@@ -958,13 +962,16 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
                   className="group block focus:outline-none focus:ring-2 focus:ring-accent/30 rounded-xl min-w-0"
                 >
                   <div className="relative aspect-video rounded-xl overflow-hidden bg-brand-charcoal">
-                    {v.thumbnailUrl ? (
-                      <img
-                        src={v.thumbnailUrl}
-                        alt=""
-                        className="absolute inset-0 w-full h-full object-cover z-0"
-                      />
-                    ) : v.streamUrl ? (
+                    <img
+                      src={`/generated-thumbnails/${v.id}.jpg`}
+                      alt={v.title}
+                      loading="eager"
+                      decoding="sync"
+                      className="absolute inset-0 w-full h-full object-cover"
+                      style={{ zIndex: 5 }}
+                      onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+                    />
+                    {v.streamUrl && (
                       <>
                         <div
                           className={`absolute inset-0 flex items-center justify-center bg-brand-charcoal z-[1] transition-opacity duration-200 ${videoLoaded[v.id] && !videoLoadFailed[v.id] ? 'opacity-0 pointer-events-none' : 'opacity-100'}`}
@@ -999,8 +1006,8 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
                           }}
                         />
                       </>
-                    ) : null}
-                    <div className="absolute inset-0 flex items-center justify-center bg-transparent group-hover:bg-brand-charcoal/40 z-[2] pointer-events-none transition-colors duration-200">
+                    )}
+                    <div className="absolute inset-0 flex items-center justify-center bg-transparent group-hover:bg-brand-charcoal/40 pointer-events-none transition-colors duration-200" style={{ zIndex: 10 }}>
                       <div className="w-12 h-12 rounded-full bg-white/10 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200">
                         <IconPlay className="w-5 h-5 text-white ml-0.5" />
                       </div>
@@ -1008,12 +1015,12 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
                     {(() => {
                       const rel = relevanceLabel(v.clips)
                       return rel.label ? (
-                        <span className={`absolute top-2 left-2 z-[3] inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${rel.color}`}>
+                        <span className={`absolute top-2 left-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${rel.color}`} style={{ zIndex: 11 }}>
                           {rel.label}
                         </span>
                       ) : null
                     })()}
-                    <span className="absolute left-1/2 -translate-x-1/2 bottom-1.5 px-3 py-1 text-sm font-mono font-medium text-white rounded border border-white/90 tabular-nums bg-black/50 [text-shadow:0_0_2px_rgba(0,0,0,0.9)]">
+                    <span className="absolute left-1/2 -translate-x-1/2 bottom-1.5 px-3 py-1 text-sm font-mono font-medium text-white rounded border border-white/90 tabular-nums bg-black/50 [text-shadow:0_0_2px_rgba(0,0,0,0.9)]" style={{ zIndex: 11 }}>
                       {videoDurations[v.id] != null ? formatSecondsToTimestamp(videoDurations[v.id]) : v.duration !== '—' ? formatDurationHHMMSS(v.duration) : '—'}
                     </span>
                   </div>

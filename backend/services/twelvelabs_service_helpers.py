@@ -7,6 +7,7 @@ import requests
 TWELVELABS_API_BASE = "https://api.twelvelabs.io"
 TWELVELABS_API_VERSION = "v1.3"
 ENTITY_PAGE_LIMIT = 50
+PREFERRED_THUMBNAIL_URL_KEY = "preferred_thumbnail_url"
 
 
 def parse_json_markdown_response(raw_text):
@@ -422,9 +423,24 @@ def serialize_video_system_metadata(system_metadata):
     }
 
 
-def first_thumbnail_url(thumbnail_urls):
+def metadata_preferred_thumbnail_url(user_metadata):
+    if not isinstance(user_metadata, dict):
+        return None
+    value = user_metadata.get(PREFERRED_THUMBNAIL_URL_KEY)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def preferred_thumbnail_url(thumbnail_urls, user_metadata=None):
+    metadata_url = metadata_preferred_thumbnail_url(user_metadata)
+    if metadata_url:
+        return metadata_url
     if isinstance(thumbnail_urls, (list, tuple)):
-        return thumbnail_urls[0] if thumbnail_urls else None
+        if not thumbnail_urls:
+            return None
+        midpoint_index = len(thumbnail_urls) // 2
+        return thumbnail_urls[midpoint_index]
     if isinstance(thumbnail_urls, str):
         return thumbnail_urls
     return None

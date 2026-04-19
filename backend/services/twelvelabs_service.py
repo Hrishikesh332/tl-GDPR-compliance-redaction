@@ -20,7 +20,7 @@ from services.twelvelabs_service_helpers import (
     extract_api_error,
     extract_list_items,
     extract_next_page_token,
-    first_thumbnail_url,
+    preferred_thumbnail_url,
     get_twelvelabs_api_url,
     get_value,
     merge_search_results,
@@ -417,18 +417,27 @@ def list_indexed_videos(index_id=None, page=1, page_limit=10):
     for video in response:
         hls_url = None
         thumbnail_url = None
+        raw_user_metadata = getattr(video, "user_metadata", None)
         if hasattr(video, "hls") and video.hls:
             hls_url = getattr(video.hls, "video_url", None)
-            thumbnail_url = first_thumbnail_url(getattr(video.hls, "thumbnail_urls", None))
+            thumbnail_url = preferred_thumbnail_url(
+                getattr(video.hls, "thumbnail_urls", None),
+                user_metadata=raw_user_metadata,
+            )
 
-        if (not hls_url or not thumbnail_url) and video.id:
+        if (not hls_url or not thumbnail_url or raw_user_metadata is None) and video.id:
             try:
                 info = get_video_info(video.id, index_id=idx)
                 if info.get("hls"):
                     if not hls_url:
                         hls_url = info["hls"].get("video_url")
-                    if not thumbnail_url:
-                        thumbnail_url = first_thumbnail_url(info["hls"].get("thumbnail_urls"))
+                    enriched_user_metadata = info.get("user_metadata")
+                    enriched_thumbnail = preferred_thumbnail_url(
+                        info["hls"].get("thumbnail_urls"),
+                        user_metadata=enriched_user_metadata,
+                    )
+                    if enriched_thumbnail:
+                        thumbnail_url = enriched_thumbnail
             except Exception as exc:
                 logger.debug("Enrich video %s thumbnail: %s", video.id, exc)
 
