@@ -1044,17 +1044,30 @@ def detect_faces_endpoint():
         if img is None:
             return jsonify({"error": "could not read image"}), 400
 
-        from services.detection import detect_faces as _detect
-        raw_faces = _detect(img, with_encodings=False)
+        from services.detection import detect_uploaded_reference_faces
+
+        raw_faces = detect_uploaded_reference_faces(img, with_encodings=False)
 
         faces = []
         h_img, w_img = img.shape[:2]
         for i, face in enumerate(raw_faces):
-            bbox = face.get("bbox", face.get("box", {}))
-            x = int(bbox.get("x", bbox.get("left", 0)))
-            y = int(bbox.get("y", bbox.get("top", 0)))
-            w = int(bbox.get("w", bbox.get("width", 0)))
-            bh = int(bbox.get("h", bbox.get("height", 0)))
+            raw_bbox = face.get("bbox", face.get("box"))
+            if isinstance(raw_bbox, dict):
+                x = int(round(float(raw_bbox.get("x", raw_bbox.get("left", 0)))))
+                y = int(round(float(raw_bbox.get("y", raw_bbox.get("top", 0)))))
+                w = int(round(float(raw_bbox.get("w", raw_bbox.get("width", 0)))))
+                bh = int(round(float(raw_bbox.get("h", raw_bbox.get("height", 0)))))
+            elif isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) >= 4:
+                x1_raw, y1_raw, x2_raw, y2_raw = [int(round(float(value))) for value in raw_bbox[:4]]
+                x = x1_raw
+                y = y1_raw
+                w = max(0, x2_raw - x1_raw)
+                bh = max(0, y2_raw - y1_raw)
+            else:
+                continue
+
+            if w <= 0 or bh <= 0:
+                continue
 
             pad = int(max(w, bh) * 0.2)
             x1 = max(0, x - pad)
@@ -1071,12 +1084,16 @@ def detect_faces_endpoint():
 
             faces.append({
                 "index": i,
-                "confidence": face.get("confidence", 0.9),
+                "confidence": round(float(face.get("det_score", face.get("confidence", 0.0)) or 0.0), 4),
                 "bbox": {"x": x, "y": y, "w": w, "h": bh},
                 "image_base64": b64,
+                "source": face.get("source"),
             })
 
         return jsonify({"faces": faces})
+    except Exception as error:
+        logger.exception("detect_faces_endpoint failed")
+        return jsonify({"error": str(error)}), 500
     finally:
         if os.path.exists(tmp.name):
             os.remove(tmp.name)

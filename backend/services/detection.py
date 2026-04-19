@@ -858,6 +858,66 @@ def detect_faces(img_bgr, with_encodings=False):
     return results
 
 
+def detect_uploaded_reference_faces(img_bgr, with_encodings=False, confidence_threshold=RES10_CONFIDENCE):
+
+    try:
+        res10_boxes = detect_faces_res10(img_bgr, confidence_threshold=confidence_threshold)
+    except Exception as error:
+        logger.warning("Uploaded-face ResNet-10 detection failed; falling back to general detector: %s", error)
+        fallback_results = detect_faces(img_bgr, with_encodings=with_encodings)
+        for result in fallback_results:
+            result.setdefault("source", "fallback")
+        return fallback_results
+
+    embeddings = [None] * len(res10_boxes)
+    unmatched_insight = []
+    if with_encodings:
+        if res10_boxes:
+            embeddings, unmatched_insight = get_embeddings_for_boxes(img_bgr, res10_boxes)
+        else:
+            _, unmatched_insight = get_embeddings_for_boxes(img_bgr, [])
+
+    results = []
+    for index, (x1, y1, x2, y2, confidence) in enumerate(res10_boxes):
+        sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
+        if sharpness < MIN_FACE_SHARPNESS:
+            continue
+
+        entry = {
+            "bbox": [x1, y1, x2, y2],
+            "det_score": round(float(confidence), 4),
+            "sharpness": round(sharpness, 1),
+            "source": "res10",
+        }
+        if with_encodings:
+            entry["encoding"] = embeddings[index]
+        results.append(entry)
+
+    for extra in unmatched_insight:
+        x1, y1, x2, y2 = extra["bbox"]
+        sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
+        if sharpness < MIN_FACE_SHARPNESS:
+            continue
+
+        entry = {
+            "bbox": [x1, y1, x2, y2],
+            "det_score": round(float(extra.get("det_score", 0.0)), 4),
+            "sharpness": round(sharpness, 1),
+            "source": "insightface_supplemental",
+        }
+        if with_encodings:
+            entry["encoding"] = extra.get("embedding")
+        results.append(entry)
+
+    if results:
+        return results
+
+    fallback_results = detect_faces(img_bgr, with_encodings=with_encodings)
+    for result in fallback_results:
+        result.setdefault("source", "fallback")
+    return fallback_results
+
+
 def detect_objects(img_bgr, conf_threshold=0.25, forensic_only=True, strict=True):
     try:
         model = get_obj_model()
