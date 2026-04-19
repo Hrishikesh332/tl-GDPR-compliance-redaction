@@ -1,5 +1,6 @@
 import logging
 import os
+import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -36,6 +37,39 @@ _jobs = {}
 _lock = threading.Lock()
 
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm")
+
+
+def download_video_from_hls(hls_url, video_id, filename=None):
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    safe_name = filename or f"input_{video_id}.mp4"
+    dest = os.path.join(OUTPUT_DIR, safe_name)
+    if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+        logger.info("Video already downloaded: %s", dest)
+        return dest
+    logger.info("Downloading video %s from HLS to %s", video_id, dest)
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", hls_url, "-c", "copy", "-movflags", "+faststart", dest],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode != 0:
+            logger.warning("ffmpeg HLS download failed (rc=%d): %s", result.returncode, (result.stderr or "")[-500:])
+            if os.path.isfile(dest):
+                os.remove(dest)
+            return None
+        if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+            logger.info("Downloaded video to %s (%.1f MB)", dest, os.path.getsize(dest) / 1e6)
+            return dest
+        return None
+    except FileNotFoundError:
+        logger.error("ffmpeg not found — cannot download HLS stream")
+        return None
+    except Exception as e:
+        logger.error("HLS download failed for %s: %s", video_id, e)
+        if os.path.isfile(dest):
+            os.remove(dest)
+        return None
 
 
 def parse_iso_timestamp(value):
@@ -409,7 +443,14 @@ def ensure_job_for_video(video_id, interval_sec=None, force=False):
 
     video_path = infer_video_path_for_video(video_id, info=info)
     if not video_path or not os.path.isfile(video_path):
-        return None
+        hls_info = info.get("hls") or {}
+        hls_url = hls_info.get("video_url")
+        if hls_url:
+            target_meta = info.get("system_metadata") or {}
+            filename_hint = target_meta.get("filename")
+            video_path = download_video_from_hls(hls_url, video_id, filename=filename_hint)
+        if not video_path or not os.path.isfile(video_path):
+            return None
 
     target_meta = info.get("system_metadata") or {}
     video_filename = target_meta.get("filename") or os.path.basename(video_path)
