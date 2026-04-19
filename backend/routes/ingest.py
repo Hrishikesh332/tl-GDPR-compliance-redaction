@@ -13,6 +13,7 @@ from services.pipeline import (
     get_exact_job_id_by_video_id,
     get_job_id_by_video_id,
     ensure_job_for_video,
+    recover_job_id_for_video,
 )
 from services import twelvelabs_service
 
@@ -100,6 +101,10 @@ def job_by_video(video_id):
     exact = request.args.get("exact", "false").lower() in ("true", "1", "yes")
     force = request.args.get("force", "false").lower() in ("true", "1", "yes")
     job_id = get_exact_job_id_by_video_id(video_id) if exact or ensure else get_job_id_by_video_id(video_id)
+    if not job_id and not ensure:
+        job_id = get_job_id_by_video_id(video_id)
+    if not job_id and not ensure:
+        job_id = recover_job_id_for_video(video_id)
     created = False
     if ensure and (force or not job_id):
         job_id = ensure_job_for_video(video_id, force=force)

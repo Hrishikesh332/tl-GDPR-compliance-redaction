@@ -25,6 +25,15 @@ function isHlsUrl(url: string): boolean {
   return /\.m3u8(\?|$)/i.test(url) || url.includes('m3u8')
 }
 
+function toHlsProxyUrl(hlsUrl: string): string {
+  try {
+    const u = new URL(hlsUrl)
+    return `${API_BASE}/api/hls-proxy/${u.host}${u.pathname}${u.search}`
+  } catch {
+    return hlsUrl
+  }
+}
+
 /** Parse "m:ss" or "mm:ss" or "h:mm:ss" to seconds */
 function parseTimestampToSeconds(timestamp: string): number {
   const parts = timestamp.trim().split(':').map((s) => parseInt(s, 10))
@@ -1751,7 +1760,7 @@ export default function VideoEditorPage() {
 
 
   /* ---- HLS: play m3u8 streams in Chrome/Firefox (TwelveLabs returns HLS) ---- */
-  const effectiveStreamUrl = streamUrl
+  const effectiveStreamUrl = streamUrl && isHlsUrl(streamUrl) ? toHlsProxyUrl(streamUrl) : streamUrl
   const useHls = effectiveStreamUrl && isHlsUrl(effectiveStreamUrl) && Hls.isSupported()
   const selectedDetectionCount = useMemo(
     () => apiDetections.filter((item) => !excludedFromRedactionIds.includes(item.id)).length,
@@ -1873,6 +1882,7 @@ export default function VideoEditorPage() {
     hls.attachMedia(video)
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (data.fatal) {
+        console.error('[HLS] Fatal error', data.type, data.details, data.reason ?? '')
         hls.destroy()
         hlsRef.current = null
         hlsLoadedUrlRef.current = null
@@ -2163,7 +2173,7 @@ export default function VideoEditorPage() {
     const v = videoRef.current
     if (!v) return
     if (v.paused || v.ended) {
-      v.play()
+      v.play().catch(() => {})
     } else {
       v.pause()
     }
@@ -2464,8 +2474,11 @@ export default function VideoEditorPage() {
     }
 
     try {
-      const params = new URLSearchParams({ exact: 'true' })
-      if (ensure) params.set('ensure', 'true')
+      const params = new URLSearchParams()
+      if (ensure) {
+        params.set('exact', 'true')
+        params.set('ensure', 'true')
+      }
       const response = await fetch(`${API_BASE}/api/jobs/by-video/${encodeURIComponent(videoId)}?${params.toString()}`)
       const data = await response.json().catch(() => ({})) as {
         job_id?: string
@@ -3549,9 +3562,9 @@ export default function VideoEditorPage() {
       overlayVideo.defaultMuted = true
       overlayVideo.muted = true
       overlayVideo.volume = 0
-      overlayVideo.playbackRate = mainVideo.playbackRate || playbackRate
+      overlayVideo.playbackRate = mainVideo.playbackRate || 1
 
-      const mainTime = mainVideo.currentTime ?? currentTime
+      const mainTime = mainVideo.currentTime
       const driftThreshold = mainVideo.paused || mainVideo.seeking ? 0.02 : 0.08
       if (
         Number.isFinite(mainTime) &&
@@ -3583,7 +3596,7 @@ export default function VideoEditorPage() {
       }
       overlayVideo.pause()
     }
-  }, [currentTime, playbackRate, useDomVideoBlurOverlay])
+  }, [useDomVideoBlurOverlay])
 
   /* Strand shared classes */
   const btnBase = 'inline-flex items-center justify-center rounded-md border border-border bg-surface text-text-primary hover:bg-card transition-colors'
@@ -4192,7 +4205,6 @@ export default function VideoEditorPage() {
                     ref={videoRef}
                     src={useHls ? undefined : effectiveStreamUrl}
                     className="absolute inset-0 w-full h-full object-contain z-0"
-                      crossOrigin="anonymous"
                       playsInline
                       muted={isMuted}
                       loop={false}
@@ -4220,7 +4232,6 @@ export default function VideoEditorPage() {
                       ref={timelinePreviewVideoRef}
                       src={useHls ? undefined : effectiveStreamUrl}
                       className="absolute opacity-0 pointer-events-none w-0 h-0"
-                      crossOrigin="anonymous"
                       muted
                       playsInline
                       onLoadedMetadata={() => setPreviewVideoReady(true)}
@@ -4272,7 +4283,6 @@ export default function VideoEditorPage() {
                             src={useHls ? undefined : effectiveStreamUrl}
                             className="absolute inset-0 h-full w-full pointer-events-none"
                             style={liveBlurOverlayVideoStyle}
-                            crossOrigin="anonymous"
                             playsInline
                             muted
                             aria-hidden

@@ -53,7 +53,7 @@ def index_video():
         video_file.save(tmp.name)
         tmp.close()
 
-        logger.info("Indexing uploaded video: %s -> %s (index=%s)", video_file.filename, tmp.name, TWELVELABS_INDEX_ID)
+        logger.info("Indexing uploaded video: %s -> %s", video_file.filename, tmp.name)
         result = twelvelabs_service.index_video_from_file(tmp.name, index_id=TWELVELABS_INDEX_ID)
         result["source"] = "upload"
         result["filename"] = video_file.filename
@@ -64,14 +64,14 @@ def index_video():
         video_path = data.get("video_path")
 
         if video_url:
-            logger.info("Indexing video from URL: %s (index=%s)", video_url, TWELVELABS_INDEX_ID)
+            logger.info("Indexing video from URL: %s", video_url)
             result = twelvelabs_service.index_video_from_url(video_url, index_id=TWELVELABS_INDEX_ID)
             result["source"] = "url"
 
         elif video_path:
             if not os.path.isfile(video_path):
                 return jsonify({"error": f"file not found: {video_path}"}), 400
-            logger.info("Indexing local video: %s (index=%s)", video_path, TWELVELABS_INDEX_ID)
+            logger.info("Indexing local video: %s", video_path)
             result = twelvelabs_service.index_video_from_file(video_path, index_id=TWELVELABS_INDEX_ID)
             result["source"] = "local"
             result["video_path"] = video_path
@@ -119,7 +119,7 @@ def index_local_file():
     if not os.path.isfile(video_path):
         return jsonify({"error": f"file not found: {video_path}"}), 400
 
-    logger.info("Indexing local file: %s (index=%s)", video_path, TWELVELABS_INDEX_ID)
+    logger.info("Indexing local file: %s", video_path)
     result = twelvelabs_service.index_video_from_file(video_path, index_id=TWELVELABS_INDEX_ID)
 
     tracking_id = result["task_id"]

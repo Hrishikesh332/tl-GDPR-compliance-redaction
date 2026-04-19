@@ -1,11 +1,12 @@
 import logging
 import os
+import re
 import threading
 from atexit import register as register_atexit
 
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify
+from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 from config import (
@@ -15,8 +16,6 @@ from config import (
     SELF_APP_PING_INTERVAL_MINUTES,
     SELF_APP_PING_TIMEOUT_SEC,
     SELF_APP_PING_URL,
-    TWELVELABS_API_KEY,
-    TWELVELABS_INDEX_ID,
 )
 from routes import register_blueprints
 
@@ -30,12 +29,15 @@ file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format=LOG_FORMAT,
-    datefmt=LOG_DATEFMT,
-)
-logging.getLogger().addHandler(file_handler)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+for h in root_logger.handlers[:]:
+    root_logger.removeHandler(h)
+root_logger.addHandler(file_handler)
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 logger = logging.getLogger("video_redaction")
 _self_ping_scheduler = None
@@ -102,18 +104,59 @@ def create_app():
     os.makedirs(SNAPS_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    if TWELVELABS_API_KEY:
-        logger.info("Config: TWELVELABS_API_KEY loaded (length=%d)", len(TWELVELABS_API_KEY))
-        logger.info("Config: TWELVELABS_INDEX_ID=%s", TWELVELABS_INDEX_ID)
-    else:
-        logger.warning("Config: TWELVELABS_API_KEY is empty — set it in backend/.env for TwelveLabs indexing")
-
     register_blueprints(app)
     _start_self_ping_scheduler()
 
     @app.route("/")
     def health():
         return jsonify({"status": "ok", "service": "video-redaction-api"})
+
+    _HLS_PROXY_ALLOWED_SUFFIXES = (".cloudfront.net", ".twelvelabs.io")
+
+    @app.route("/api/hls-proxy/<host>/<path:rest>")
+    def hls_proxy(host, rest):
+        """Proxy HLS streams so the browser avoids CORS blocks from the CDN."""
+        if not any(host.endswith(s) for s in _HLS_PROXY_ALLOWED_SUFFIXES):
+            return jsonify({"error": "host not allowed"}), 403
+
+        url = f"https://{host}/{rest}"
+        qs = request.query_string.decode("utf-8")
+        if qs:
+            url += f"?{qs}"
+
+        try:
+            upstream = requests.get(url, stream=True, timeout=30)
+        except requests.RequestException as exc:
+            logger.warning("HLS proxy fetch failed for %s: %s", url, exc)
+            return jsonify({"error": "upstream fetch failed"}), 502
+
+        ct = upstream.headers.get("Content-Type", "application/octet-stream")
+
+        if "mpegurl" in ct.lower() or rest.endswith(".m3u8"):
+            body = upstream.text
+            body = re.sub(
+                r"https://([\w.\-]+)(/\S+)",
+                lambda m: (
+                    f"/api/hls-proxy/{m.group(1)}{m.group(2)}"
+                    if any(m.group(1).endswith(s) for s in _HLS_PROXY_ALLOWED_SUFFIXES)
+                    else m.group(0)
+                ),
+                body,
+            )
+            return Response(body, status=upstream.status_code, content_type=ct)
+
+        hdrs = {}
+        for key in ("Cache-Control", "Content-Length", "Accept-Ranges"):
+            val = upstream.headers.get(key)
+            if val:
+                hdrs[key] = val
+
+        return Response(
+            upstream.iter_content(chunk_size=65536),
+            status=upstream.status_code,
+            content_type=ct,
+            headers=hdrs,
+        )
 
     @app.errorhandler(404)
     def not_found(e):

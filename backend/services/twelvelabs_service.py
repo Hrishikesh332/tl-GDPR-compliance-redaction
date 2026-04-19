@@ -172,7 +172,7 @@ def analyze_video_to_json(video_id, prompt, *, fallback_key, warning_message, lo
 def ingest_video(video_path, callback=None):
     client = get_client()
     idx = get_index_id()
-    logger.info("Uploading video to TwelveLabs index %s", idx)
+    logger.info("Uploading video to TwelveLabs index")
 
     with open(video_path, "rb") as video_file:
         task = client.tasks.create(
@@ -252,8 +252,7 @@ def search_segments(query=None, index_id=None, image_paths=None, image_url=None,
         raise ValueError("query text or image is required")
 
     logger.info(
-        "Searching index %s (text=%s, image_count=%s, image_url=%s, operator=%s)",
-        idx,
+        "Searching index (text=%s, image_count=%s, image_url=%s, operator=%s)",
         bool(query),
         len(normalized_image_paths),
         bool(image_url),
@@ -321,7 +320,7 @@ def analyze_video_custom(video_id, prompt):
 def index_video_from_file(video_path, index_id=None, enable_stream=True):
     client = get_client()
     idx = resolve_index_id(index_id)
-    logger.info("Submitting indexing task for %s -> index %s", video_path, idx)
+    logger.info("Submitting indexing task for %s", video_path)
 
     with open(video_path, "rb") as video_file:
         task = client.tasks.create(
@@ -342,7 +341,7 @@ def index_video_from_file(video_path, index_id=None, enable_stream=True):
 def index_video_from_url(video_url, index_id=None, enable_stream=True):
     client = get_client()
     idx = resolve_index_id(index_id)
-    logger.info("Submitting indexing task for URL %s -> index %s", video_url, idx)
+    logger.info("Submitting indexing task for URL")
 
     task = client.tasks.create(
         index_id=idx,
@@ -403,7 +402,7 @@ def list_indexing_tasks(index_id=None, status_filter=None, page=1, page_limit=10
 def list_indexed_videos(index_id=None, page=1, page_limit=10):
     client = get_client()
     idx = resolve_index_id(index_id)
-    logger.info("Listing videos in index %s", idx)
+    logger.info("Listing videos in index")
 
     response = client.indexes.videos.list(
         index_id=idx,
@@ -460,7 +459,7 @@ def update_video_user_metadata(video_id, user_metadata, index_id=None):
     """Update user_metadata for a video (e.g. overview)."""
     client = get_client()
     idx = resolve_index_id(index_id)
-    logger.info("Updating user_metadata for video %s in index %s", video_id, idx)
+    logger.info("Updating user_metadata for video %s", video_id)
     client.indexes.videos.update(
         index_id=idx,
         video_id=video_id,
@@ -510,7 +509,7 @@ def set_video_overview(video_id, about=None, topics=None, categories=None, index
 def get_video_info(video_id, index_id=None):
     client = get_client()
     idx = resolve_index_id(index_id)
-    logger.info("Retrieving video %s from index %s", video_id, idx)
+    logger.info("Retrieving video %s", video_id)
 
     video = client.indexes.videos.retrieve(index_id=idx, video_id=video_id)
     return {
@@ -527,14 +526,14 @@ def get_video_info(video_id, index_id=None):
 def delete_indexed_video(video_id, index_id=None):
     client = get_client()
     idx = resolve_index_id(index_id)
-    logger.info("Deleting video %s from index %s", video_id, idx)
+    logger.info("Deleting video %s", video_id)
     client.indexes.videos.delete(index_id=idx, video_id=video_id)
 
 
 def get_index_info(index_id=None):
     client = get_client()
     idx = resolve_index_id(index_id)
-    logger.info("Retrieving index info for %s", idx)
+    logger.info("Retrieving index info")
     index = client.indexes.retrieve(index_id=idx)
 
     models = []
@@ -828,7 +827,7 @@ def entity_search(entity_id, query_suffix="", index_id=None):
     if query_suffix:
         query_text = f"<@{entity_id}> {query_suffix}"
 
-    logger.info("Entity search in index %s: %s", idx, query_text)
+    logger.info("Entity search: %s", query_text)
     response = client.search.query(
         index_id=idx,
         search_options=["visual"],
