@@ -2396,61 +2396,71 @@ export default function VideoEditorPage() {
     requestId: number,
     interactive: boolean,
   ): Promise<boolean> => {
-    const [facesRes, objectsRes] = await Promise.all([
-      fetch(`${API_BASE}/api/faces/${encodeURIComponent(jobId)}`),
-      fetch(`${API_BASE}/api/objects/${encodeURIComponent(jobId)}`),
-    ])
-    const facesJson = await facesRes.json().catch(() => ({})) as {
-      unique_faces?: FaceDetectionApiRecord[]
-      error?: string
-      message?: string
-    }
-    const objectsJson = await objectsRes.json().catch(() => ({})) as {
-      unique_objects?: ObjectDetectionApiRecord[]
-      error?: string
-      message?: string
-    }
+    const startedAt = Date.now()
+    const waitForReadyMs = interactive ? 30000 : 0
 
-    if (detectionLoadRequestIdRef.current !== requestId) return false
-
-    if (facesRes.status === 202 || objectsRes.status === 202) {
-      if (interactive) {
-        clearDetectionResults('Analysis still in progress. Try again in a moment.', requestId)
+    while (true) {
+      const [facesRes, objectsRes] = await Promise.all([
+        fetch(`${API_BASE}/api/faces/${encodeURIComponent(jobId)}`),
+        fetch(`${API_BASE}/api/objects/${encodeURIComponent(jobId)}`),
+      ])
+      const facesJson = await facesRes.json().catch(() => ({})) as {
+        unique_faces?: FaceDetectionApiRecord[]
+        error?: string
+        message?: string
       }
-      return false
-    }
-    if (facesRes.status === 404 || objectsRes.status === 404) {
-      if (interactive) {
-        clearDetectionResults('Detection data is not ready for this video yet. Run processing for this video and try again.', requestId)
+      const objectsJson = await objectsRes.json().catch(() => ({})) as {
+        unique_objects?: ObjectDetectionApiRecord[]
+        error?: string
+        message?: string
       }
-      return false
-    }
-    if (!facesRes.ok || !objectsRes.ok) {
-      if (interactive) {
-        const faceError = facesJson.error || facesJson.message
-        const objectError = objectsJson.error || objectsJson.message
-        clearDetectionResults(faceError || objectError || 'Detection request failed.', requestId)
+
+      if (detectionLoadRequestIdRef.current !== requestId) return false
+
+      if (facesRes.status === 202 || objectsRes.status === 202) {
+        const shouldKeepPolling = waitForReadyMs > 0 && Date.now() - startedAt < waitForReadyMs
+        if (shouldKeepPolling) {
+          await delay(1200)
+          continue
+        }
+        if (interactive) {
+          clearDetectionResults('Analysis still in progress. Try again in a moment.', requestId)
+        }
+        return false
       }
-      return false
-    }
+      if (facesRes.status === 404 || objectsRes.status === 404) {
+        if (interactive) {
+          clearDetectionResults('Detection data is not ready for this video yet. Run processing for this video and try again.', requestId)
+        }
+        return false
+      }
+      if (!facesRes.ok || !objectsRes.ok) {
+        if (interactive) {
+          const faceError = facesJson.error || facesJson.message
+          const objectError = objectsJson.error || objectsJson.message
+          clearDetectionResults(faceError || objectError || 'Detection request failed.', requestId)
+        }
+        return false
+      }
 
-    const items = buildDetectionItemsFromApi(
-      Array.isArray(facesJson.unique_faces) ? facesJson.unique_faces : [],
-      Array.isArray(objectsJson.unique_objects) ? objectsJson.unique_objects : [],
-    )
-    if (detectionLoadRequestIdRef.current !== requestId) return false
+      const items = buildDetectionItemsFromApi(
+        Array.isArray(facesJson.unique_faces) ? facesJson.unique_faces : [],
+        Array.isArray(objectsJson.unique_objects) ? objectsJson.unique_objects : [],
+      )
+      if (detectionLoadRequestIdRef.current !== requestId) return false
 
-    setDetectionJobId(jobId)
-    readyRedactionJobIdsRef.current[jobId] = true
-    setApiDetections(items)
-    setExcludedFromRedactionIds(items.map((item) => item.id))
-    setHasRunDetection(true)
-    if (interactive && items.length === 0) {
-      setDetectionError('No faces or objects found for this video.')
-    } else {
-      setDetectionError(null)
+      setDetectionJobId(jobId)
+      readyRedactionJobIdsRef.current[jobId] = true
+      setApiDetections(items)
+      setExcludedFromRedactionIds(items.map((item) => item.id))
+      setHasRunDetection(true)
+      if (interactive && items.length === 0) {
+        setDetectionError('No faces or objects found for this video.')
+      } else {
+        setDetectionError(null)
+      }
+      return true
     }
-    return true
   }, [clearDetectionResults])
 
   const hydrateStoredDetections = useCallback(async ({
@@ -3500,6 +3510,12 @@ export default function VideoEditorPage() {
     () => (searchSessionResult?.entities || []).filter((entity) => entity?.id && entity?.name),
     [searchSessionResult]
   )
+  const clearSearchTimelineLane = useCallback(() => {
+    setSearchSessionResult(null)
+    try {
+      sessionStorage.removeItem(EDITOR_LAST_SEARCH_SESSION_KEY)
+    } catch {}
+  }, [])
   const visibleTimelineSearchEntities = useMemo(
     () => searchEntities.slice(0, 3),
     [searchEntities]
@@ -4681,7 +4697,7 @@ export default function VideoEditorPage() {
                           style={{ backgroundColor: ENTITY_SEARCH_LANE_BASELINE }}
                         />
                         {visibleTimelineSearchEntities.length > 0 && (
-                          <div className="absolute left-3 top-2 right-3 z-[4] flex items-center gap-1.5 overflow-hidden pointer-events-none">
+                          <div className="absolute left-3 top-2 right-12 z-[4] flex items-center gap-1.5 overflow-hidden pointer-events-none">
                             {visibleTimelineSearchEntities.map((entity) => (
                               <SearchEntityChip
                                 key={`timeline-search-entity-${entity.id}`}
@@ -4699,6 +4715,17 @@ export default function VideoEditorPage() {
                             )}
                           </div>
                         )}
+                        <button
+                          type="button"
+                          className="absolute right-3 top-2 z-[5] inline-flex h-5 w-5 items-center justify-center rounded-md border border-white/18 bg-black/20 text-white/80 transition hover:border-white/32 hover:bg-black/35 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/45"
+                          onClick={clearSearchTimelineLane}
+                          title="Remove entity lane"
+                          aria-label="Remove entity lane"
+                        >
+                          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" aria-hidden>
+                            <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                          </svg>
+                        </button>
                         {searchLaneBars.length > 0 ? (
                           <>
                             <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
