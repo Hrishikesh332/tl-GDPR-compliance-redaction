@@ -490,6 +490,7 @@ const ENTITY_SEARCH_LANE_SEGMENT_RING = 'rgba(0, 220, 130, 0.28)'
 const ENTITY_SEARCH_LANE_EDGE_LEFT = 'rgba(0, 220, 130, 0.55)'
 const ENTITY_SEARCH_LANE_EDGE_RIGHT = 'rgba(0, 220, 130, 0.35)'
 const FACE_LANE_DEBUG_CACHE_KEY = 'video_redaction_face_lane_debug_cache_v1'
+const EDITOR_LAST_SEARCH_SESSION_KEY = 'video_redaction_editor_last_search'
 const LIVE_REDACTION_OBJECT_CLASSES = [
   'backpack',
   'bicycle',
@@ -1817,7 +1818,7 @@ export default function VideoEditorPage() {
 
   useEffect(() => {
     try {
-      const raw = sessionStorage.getItem('video_redaction_last_search')
+      const raw = sessionStorage.getItem(EDITOR_LAST_SEARCH_SESSION_KEY)
       if (!raw) {
         setSearchSessionResult(null)
         return
@@ -3809,46 +3810,111 @@ export default function VideoEditorPage() {
     const isExcluded = excludedFromRedactionIds.includes(item.id)
     const isActivatingBlur = isExcluded
     const wasPlaying = !!videoRef.current && !videoRef.current.paused
+    if (!isActivatingBlur && item.kind === 'face' && item.personId) {
+      removeFaceTimelineLane(item.personId)
+    }
     toggleDetectionSelectionById(item.id, item.kind === 'face' ? item.personId : null)
 
-    if (isActivatingBlur && item.kind === 'face' && item.entityId && videoId) {
-      fetch(`${API_BASE}/api/entities/${encodeURIComponent(item.entityId)}/time-ranges`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ video_id: videoId }),
-      })
-        .then(async (res) => {
-          const data = await res.json().catch(() => ({})) as { time_ranges?: DetectionTimeRange[] }
-          if (!res.ok) return
-          const scopedSegments = buildFaceTimelineSegments(item, data.time_ranges || [])
-          if (scopedSegments.length === 0) return
-          const scopedSearchResult: SearchSessionResult = {
-            query: `Entity: ${item.label}`,
-            queryText: item.label,
-            entities: [{
-              id: item.entityId as string,
-              name: item.label,
-              previewUrl: item.snapBase64 ? `data:image/png;base64,${item.snapBase64}` : undefined,
-            }],
-            results: [{
-              id: videoId,
-              video_id: videoId,
-              title: item.label,
-              clips: scopedSegments.map((segment, index) => ({
-                start: segment.start,
-                end: segment.end,
-                rank: index + 1,
-              })),
-            }],
-          }
-          setSearchSessionResult(scopedSearchResult)
-          setActiveTool('search')
-          setRightSidebarOpen(true)
-          try {
-            sessionStorage.setItem('video_redaction_last_search', JSON.stringify(scopedSearchResult))
-          } catch {}
+    if (isActivatingBlur && videoId) {
+      const showScopedSearchResult = (scopedSearchResult: SearchSessionResult) => {
+        setSearchSessionResult(scopedSearchResult)
+        setActiveTool('search')
+        setRightSidebarOpen(true)
+        try {
+          sessionStorage.setItem(EDITOR_LAST_SEARCH_SESSION_KEY, JSON.stringify(scopedSearchResult))
+        } catch {}
+      }
+
+      const fallbackToEntityRanges = () => {
+        if (item.kind !== 'face' || !item.entityId) return
+        fetch(`${API_BASE}/api/entities/${encodeURIComponent(item.entityId)}/time-ranges`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ video_id: videoId }),
         })
-        .catch(() => {})
+          .then(async (res) => {
+            const data = await res.json().catch(() => ({})) as { time_ranges?: DetectionTimeRange[] }
+            if (!res.ok) return
+            const scopedSegments = buildFaceTimelineSegments(item, data.time_ranges || [])
+            if (scopedSegments.length === 0) return
+            showScopedSearchResult({
+              query: `Entity: ${item.label}`,
+              queryText: item.label,
+              entities: [{
+                id: item.entityId as string,
+                name: item.label,
+                previewUrl: item.snapBase64 ? `data:image/png;base64,${item.snapBase64}` : undefined,
+              }],
+              results: [{
+                id: videoId,
+                video_id: videoId,
+                title: item.label,
+                clips: scopedSegments.map((segment, index) => ({
+                  start: segment.start,
+                  end: segment.end,
+                  rank: index + 1,
+                })),
+              }],
+            })
+          })
+          .catch(() => {})
+      }
+
+      if (item.snapBase64) {
+        fetch(`data:image/png;base64,${item.snapBase64}`)
+          .then((response) => response.blob())
+          .then((blob) => {
+            const formData = new FormData()
+            formData.append('query', item.label)
+            formData.append('image', blob, `${item.id || 'selection'}.png`)
+            return fetch(`${API_BASE}/api/search`, {
+              method: 'POST',
+              body: formData,
+            })
+          })
+          .then(async (res) => {
+            const payload = await res.json().catch(() => ({})) as { results?: SearchVideoResult[] }
+            if (!res.ok) {
+              fallbackToEntityRanges()
+              return
+            }
+            const videoResult = (payload.results || []).find((entry) => (
+              entry?.id === videoId || entry?.video_id === videoId
+            ))
+            const scopedClips = Array.isArray(videoResult?.clips)
+              ? videoResult.clips.filter((clip) => (
+                !!clip &&
+                Number.isFinite(clip.start) &&
+                Number.isFinite(clip.end)
+              ))
+              : []
+            if (!videoResult || scopedClips.length === 0) {
+              fallbackToEntityRanges()
+              return
+            }
+            showScopedSearchResult({
+              query: `Image search: ${item.label}`,
+              queryText: item.label,
+              entities: [{
+                id: item.entityId || item.id,
+                name: item.label,
+                previewUrl: `data:image/png;base64,${item.snapBase64}`,
+              }],
+              results: [{
+                ...videoResult,
+                id: videoId,
+                video_id: videoId,
+                title: videoResult.title || item.label,
+                clips: scopedClips,
+              }],
+            })
+          })
+          .catch(() => {
+            fallbackToEntityRanges()
+          })
+      } else {
+        fallbackToEntityRanges()
+      }
     }
 
     if (!isActivatingBlur || !effectiveStreamUrl) return
@@ -3864,7 +3930,7 @@ export default function VideoEditorPage() {
     window.setTimeout(() => {
       seekToTime(seekTime, { play: wasPlaying || liveRedactionEnabled })
     }, 0)
-  }, [currentTime, effectiveStreamUrl, excludedFromRedactionIds, liveRedactionEnabled, seekToTime, toggleDetectionSelectionById, videoId])
+  }, [currentTime, effectiveStreamUrl, excludedFromRedactionIds, liveRedactionEnabled, removeFaceTimelineLane, seekToTime, toggleDetectionSelectionById, videoId])
 
   const toggleLiveDetectionSelection = useCallback((detection: LiveRedactionDetection) => {
     const selectionId = getSelectionIdForLiveDetection(detection)

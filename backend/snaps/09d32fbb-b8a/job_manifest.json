@@ -1,0 +1,20 @@
+{
+  "job_id": "09d32fbb-b8a",
+  "status": "ready",
+  "created_at": "2026-04-20T10:20:55.892138+00:00",
+  "video_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/output/index_5gs6v6oe.mp4",
+  "video_filename": "index_5gs6v6oe.mp4",
+  "twelvelabs_video_id": "69b67a2968f910812bf38503",
+  "video_metadata": {
+    "fps": 25.0,
+    "width": 1920,
+    "height": 1080,
+    "total_frames": 22061,
+    "duration_sec": 882.44
+  },
+  "twelvelabs_status": "analysis_failed: headers: {'date': 'Mon, 20 Apr 2026 10:20:56 GMT', 'content-type': 'application/json', 'content-length': '152', 'connection': 'keep-alive', 'content-encoding': 'gzip', 'retry-after': '40899', 'tl-report': 'backend', 'vary': 'Accept-Encoding', 'x-ratelimit-dimensions': 'OutputToken', 'x-ratelimit-outputtoken-limit': '25000', 'x-ratelimit-outputtoken-remaining': '0', 'x-ratelimit-outputtoken-reset': '1776721355', 'x-trace-id': '9ff2161a2794c3243b58009fce5bfbbd'}, status_code: 429, body: {'code': 'too_many_requests', 'message': 'You have exceeded the rate limit (25000token/1day). Please try again later after 2026-04-20T21:42:35Z.'}",
+  "local_status": "done",
+  "twelvelabs_people": null,
+  "twelvelabs_objects": null,
+  "twelvelabs_scene_summary": null
+}
