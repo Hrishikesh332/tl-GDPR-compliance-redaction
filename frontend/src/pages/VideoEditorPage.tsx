@@ -4476,7 +4476,7 @@ export default function VideoEditorPage() {
             <div className="flex flex-1 min-h-0">
               <div
                 ref={timelineRef}
-                className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden bg-background"
+                className="flex-1 min-h-0 overflow-x-auto overflow-y-auto bg-background"
                 onMouseDown={handleTimelineMouseDown}
                 onMouseMove={handleTimelineHover}
                 onMouseLeave={() => setHoverTime(null)}
@@ -4657,110 +4657,125 @@ export default function VideoEditorPage() {
                     </div>
                   )}
 
-                  {personTimelineLanes.map((lane) => {
-                    const accentColor = lane.item.color || '#F59E0B'
-                    const clampedSegments = lane.segments.map((segment) => ({
-                      start: Math.max(0, duration > 0 ? Math.min(duration, segment.start) : segment.start),
-                      end: Math.max(0, duration > 0 ? Math.min(duration, segment.end) : segment.end),
-                    })).filter((segment) => segment.end >= segment.start)
-                    const activeSegmentIndex = clampedSegments.findIndex(
-                      (segment) => currentTime >= segment.start && currentTime <= segment.end,
-                    )
-
-                    return (
+                  {personTimelineLanes.length > 0 && (
+                    <div
+                      className="shrink-0 relative"
+                      style={{ maxHeight: personTimelineLanes.length > 3 ? 3 * 52 + 8 : undefined }}
+                    >
                       <div
-                        key={`face-lane-${lane.personId}`}
-                        className={`h-[52px] shrink-0 relative border-b border-border ${lane.active ? '' : 'opacity-70'}`}
+                        className={personTimelineLanes.length > 3 ? 'overflow-y-auto overflow-x-hidden lane-scroller' : ''}
+                        style={personTimelineLanes.length > 3 ? { maxHeight: 3 * 52 + 8 } : undefined}
                       >
-                        <div
-                          className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
-                          style={{
-                            border: `1px solid ${lane.active ? `${accentColor}42` : 'rgba(148,163,184,0.22)'}`,
-                            background: lane.active
-                              ? `linear-gradient(90deg, ${accentColor}14 0%, rgba(255,255,255,0.02) 48%, ${accentColor}10 100%)`
-                              : 'linear-gradient(90deg, rgba(148,163,184,0.08) 0%, rgba(148,163,184,0.04) 100%)',
-                          }}
-                        >
-                          <div className="absolute inset-0 pointer-events-none bg-gradient-to-b from-white/[0.03] via-transparent to-black/[0.08]" />
-                          <div
-                            className="absolute inset-x-3 bottom-[9px] h-px"
-                            style={{ backgroundColor: lane.active ? `${accentColor}30` : 'rgba(148,163,184,0.18)' }}
-                          />
-                          <div className="absolute left-3 top-2 right-3 z-[4] flex items-center justify-between gap-2 pointer-events-none">
-                            <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/22 px-2 py-1 shadow-[0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-sm">
-                              <div className="h-6 w-6 shrink-0 overflow-hidden rounded-full border border-white/12 bg-white/10">
-                                {lane.item.snapBase64 ? (
-                                  <img
-                                    src={`data:image/png;base64,${lane.item.snapBase64}`}
-                                    alt=""
-                                    className="h-full w-full object-cover"
-                                  />
-                                ) : (
-                                  <div className="flex h-full w-full items-center justify-center text-[10px] font-semibold text-white/82">
-                                    {lane.item.label.charAt(0).toUpperCase()}
+                        {personTimelineLanes.map((lane) => {
+                          const accentColor = lane.item.color || '#F59E0B'
+                          const clampedSegments = lane.segments.map((segment) => ({
+                            start: Math.max(0, duration > 0 ? Math.min(duration, segment.start) : segment.start),
+                            end: Math.max(0, duration > 0 ? Math.min(duration, segment.end) : segment.end),
+                          })).filter((segment) => segment.end >= segment.start)
+                          const activeSegmentIndex = clampedSegments.findIndex(
+                            (segment) => currentTime >= segment.start && currentTime <= segment.end,
+                          )
+
+                          return (
+                            <div
+                              key={`face-lane-${lane.personId}`}
+                              className={`h-[52px] shrink-0 relative border-b border-border ${lane.active ? '' : 'opacity-70'}`}
+                            >
+                              <div
+                                className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                                style={{
+                                  border: `1px solid ${lane.active ? `${accentColor}42` : 'rgba(148,163,184,0.22)'}`,
+                                  background: lane.active
+                                    ? `linear-gradient(90deg, ${accentColor}14 0%, rgba(255,255,255,0.02) 48%, ${accentColor}10 100%)`
+                                    : 'linear-gradient(90deg, rgba(148,163,184,0.08) 0%, rgba(148,163,184,0.04) 100%)',
+                                }}
+                              >
+                                <div className="absolute inset-0 pointer-events-none bg-gradient-to-b from-white/[0.03] via-transparent to-black/[0.08]" />
+                                <div
+                                  className="absolute inset-x-3 bottom-[9px] h-px"
+                                  style={{ backgroundColor: lane.active ? `${accentColor}30` : 'rgba(148,163,184,0.18)' }}
+                                />
+                                <div className="absolute left-3 top-2 right-3 z-[4] flex items-center justify-between gap-2 pointer-events-none">
+                                  <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/22 px-2 py-1 shadow-[0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-sm">
+                                    <div className="h-6 w-6 shrink-0 overflow-hidden rounded-full border border-white/12 bg-white/10">
+                                      {lane.item.snapBase64 ? (
+                                        <img
+                                          src={`data:image/png;base64,${lane.item.snapBase64}`}
+                                          alt=""
+                                          className="h-full w-full object-cover"
+                                        />
+                                      ) : (
+                                        <div className="flex h-full w-full items-center justify-center text-[10px] font-semibold text-white/82">
+                                          {lane.item.label.charAt(0).toUpperCase()}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <span className={`rounded-full border px-2 py-1 text-[9px] font-medium uppercase tracking-[0.12em] ${
+                                    lane.active
+                                      ? 'border-white/10 bg-black/24 text-white/78'
+                                      : 'border-border bg-background/70 text-text-tertiary'
+                                  }`}>
+                                    {lane.active ? 'Blur on' : 'Blur off'}
+                                  </span>
+                                </div>
+                                {clampedSegments.length > 0 ? clampedSegments.map((segment, index) => {
+                                  const startPct = duration > 0 ? (segment.start / duration) * 100 : 0
+                                  const endPct = duration > 0 ? (segment.end / duration) * 100 : 0
+                                  const widthPct = Math.max(1.8, endPct - startPct)
+                                  const isActive = activeSegmentIndex === index
+                                  return (
+                                    <button
+                                      key={`face-lane-segment-${lane.personId}-${segment.start}-${segment.end}-${index}`}
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        seekToTime(segment.start)
+                                      }}
+                                      className="absolute inset-y-0 z-[3] bg-transparent"
+                                      style={{
+                                        left: `${Math.max(0, Math.min(100, startPct))}%`,
+                                        width: `${Math.max(widthPct, 2)}%`,
+                                      }}
+                                      title={`${fmtShort(segment.start)} - ${fmtShort(segment.end)}`}
+                                    >
+                                      <span
+                                        className="absolute inset-y-2 rounded-full transition-all"
+                                        style={{
+                                          left: 0,
+                                          right: 0,
+                                          backgroundColor: isActive ? `${accentColor}34` : `${accentColor}1f`,
+                                          boxShadow: isActive ? `0 0 0 1px ${accentColor}55` : undefined,
+                                          opacity: isActive ? 1 : lane.active ? 0.94 : 0.58,
+                                        }}
+                                      />
+                                    </button>
+                                  )
+                                }) : (
+                                  <div className="absolute inset-0 z-[1] flex items-center justify-center pt-2">
+                                    <span className="rounded-full border border-white/10 bg-black/24 px-2.5 py-1 text-[10px] font-medium text-white/68">
+                                      Waiting for saved face ranges
+                                    </span>
                                   </div>
                                 )}
+                                <div
+                                  className="absolute left-0 top-0 bottom-0 w-1.5"
+                                  style={{ backgroundColor: lane.active ? `${accentColor}cc` : 'rgba(148,163,184,0.44)' }}
+                                />
+                                <div
+                                  className="absolute right-0 top-0 bottom-0 w-1.5"
+                                  style={{ backgroundColor: lane.active ? `${accentColor}70` : 'rgba(148,163,184,0.22)' }}
+                                />
                               </div>
                             </div>
-                            <span className={`rounded-full border px-2 py-1 text-[9px] font-medium uppercase tracking-[0.12em] ${
-                              lane.active
-                                ? 'border-white/10 bg-black/24 text-white/78'
-                                : 'border-border bg-background/70 text-text-tertiary'
-                            }`}>
-                              {lane.active ? 'Blur on' : 'Blur off'}
-                            </span>
-                          </div>
-                          {clampedSegments.length > 0 ? clampedSegments.map((segment, index) => {
-                            const startPct = duration > 0 ? (segment.start / duration) * 100 : 0
-                            const endPct = duration > 0 ? (segment.end / duration) * 100 : 0
-                            const widthPct = Math.max(1.8, endPct - startPct)
-                            const isActive = activeSegmentIndex === index
-                            return (
-                              <button
-                                key={`face-lane-segment-${lane.personId}-${segment.start}-${segment.end}-${index}`}
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  seekToTime(segment.start)
-                                }}
-                                className="absolute inset-y-0 z-[3] bg-transparent"
-                                style={{
-                                  left: `${Math.max(0, Math.min(100, startPct))}%`,
-                                  width: `${Math.max(widthPct, 2)}%`,
-                                }}
-                                title={`${fmtShort(segment.start)} - ${fmtShort(segment.end)}`}
-                              >
-                                <span
-                                  className="absolute inset-y-2 rounded-full transition-all"
-                                  style={{
-                                    left: 0,
-                                    right: 0,
-                                    backgroundColor: isActive ? `${accentColor}34` : `${accentColor}1f`,
-                                    boxShadow: isActive ? `0 0 0 1px ${accentColor}55` : undefined,
-                                    opacity: isActive ? 1 : lane.active ? 0.94 : 0.58,
-                                  }}
-                                />
-                              </button>
-                            )
-                          }) : (
-                            <div className="absolute inset-0 z-[1] flex items-center justify-center pt-2">
-                              <span className="rounded-full border border-white/10 bg-black/24 px-2.5 py-1 text-[10px] font-medium text-white/68">
-                                Waiting for saved face ranges
-                              </span>
-                            </div>
-                          )}
-                          <div
-                            className="absolute left-0 top-0 bottom-0 w-1.5"
-                            style={{ backgroundColor: lane.active ? `${accentColor}cc` : 'rgba(148,163,184,0.44)' }}
-                          />
-                          <div
-                            className="absolute right-0 top-0 bottom-0 w-1.5"
-                            style={{ backgroundColor: lane.active ? `${accentColor}70` : 'rgba(148,163,184,0.22)' }}
-                          />
-                        </div>
+                          )
+                        })}
                       </div>
-                    )
-                  })}
+                      {personTimelineLanes.length > 3 && (
+                        <div className="absolute bottom-0 inset-x-0 h-5 pointer-events-none bg-gradient-to-t from-background/80 to-transparent z-10" />
+                      )}
+                    </div>
+                  )}
 
                   {SHOW_AUDIO_WAVEFORM && (
                     <div className={`h-[48px] shrink-0 relative border-b border-border ${trackMuted.audio ? 'opacity-40' : ''}`}>

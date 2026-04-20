@@ -326,7 +326,7 @@ def build_tracked_live_detections(
     frame_h,
     reset_tracking=False,
     known_faces_by_person_id=None,
-    face_tolerance=0.35,
+    face_tolerance=0.55,
 ):
     small_frame, scale_back = small_frame_for_tracking(frame, max_dim=LIVE_TRACK_FRAME_MAX_DIM)
     gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
@@ -403,7 +403,7 @@ def build_tracked_live_detections(
                         known_face=known_face,
                         search_bbox=search_bbox,
                         preferred_bbox=updated_bbox or previous_frame_bbox,
-                        tolerance=face_tolerance if face_tolerance is not None else 0.35,
+                        tolerance=face_tolerance if face_tolerance is not None else 0.55,
                         allow_geometry_fallback=known_face.get("encoding") is None,
                     )
                     relocked_bbox = tuple(relocked_face["bbox"]) if relocked_face is not None else None
@@ -993,7 +993,7 @@ def live_redaction_detect():
         frame_h,
         reset_tracking=reset_tracking,
         known_faces_by_person_id=selected_faces_by_person_id,
-        face_tolerance=0.35,
+        face_tolerance=0.55,
     )
     detections = merge_live_tracked_detections(
         job_id,

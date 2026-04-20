@@ -96,16 +96,32 @@ def jobs():
 
 @index_bp.route("/jobs/by-video/<video_id>", methods=["GET"])
 def job_by_video(video_id):
-    """Return the best matching job_id for this video (used by the editor Detect flow)."""
+    """Return the best matching job_id for this video (used by the editor Detect flow).
+
+    Lookup precedence:
+      1. Exact manifest match (``twelvelabs_video_id == video_id``)
+      2. Conservative recovery (unbound job with exact filename match) — only
+         when ``recover=true`` or ``ensure=true``
+      3. Create a new job — only when ``ensure=true``
+
+    The non-interactive auto-hydrate call should NEVER return a job belonging
+    to a different video; it only returns 404 if no explicit match exists.
+    """
     ensure = request.args.get("ensure", "false").lower() in ("true", "1", "yes")
     exact = request.args.get("exact", "false").lower() in ("true", "1", "yes")
     force = request.args.get("force", "false").lower() in ("true", "1", "yes")
-    job_id = get_exact_job_id_by_video_id(video_id) if exact or ensure else get_job_id_by_video_id(video_id)
-    if not job_id and not ensure:
-        job_id = get_job_id_by_video_id(video_id)
-    if not job_id and not ensure:
+    recover = request.args.get("recover", "false").lower() in ("true", "1", "yes")
+
+    job_id = get_exact_job_id_by_video_id(video_id) if (exact or ensure) else get_job_id_by_video_id(video_id)
+
+    if not job_id and (recover or ensure):
         job_id = recover_job_id_for_video(video_id)
+
     created = False
+    if ensure and job_id and not force:
+        existing = get_job(job_id)
+        if existing and existing.get("status") == "failed":
+            force = True
     if ensure and (force or not job_id):
         job_id = ensure_job_for_video(video_id, force=force)
         created = bool(job_id)

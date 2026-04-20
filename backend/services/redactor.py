@@ -666,7 +666,7 @@ def update_auto_redaction_track(
                 known_face=known_face,
                 search_bbox=expand_bbox(search_anchor, frame_w, frame_h, search_factor),
                 preferred_bbox=search_anchor,
-                tolerance=identity_tolerance if identity_tolerance is not None else 0.35,
+                tolerance=identity_tolerance if identity_tolerance is not None else 0.55,
                 allow_geometry_fallback=known_face.get("encoding") is None,
             ) if search_anchor is not None else None
 
@@ -1211,7 +1211,7 @@ def redact_video(
                     frame,
                     face_targets,
                     time_sec=current_sec,
-                    tolerance=face_tolerance if face_tolerance is not None else 0.35,
+                    tolerance=face_tolerance if face_tolerance is not None else 0.55,
                 )
                 face_boxes = [
                     expand_face_redaction_bbox(tuple(face["bbox"]), w, h)
@@ -1224,7 +1224,7 @@ def redact_video(
                         match_faces_in_frame(
                             frame,
                             face_encodings,
-                            tolerance=face_tolerance if face_tolerance is not None else 0.35,
+                            tolerance=face_tolerance if face_tolerance is not None else 0.55,
                         ) if face_encodings else []
                     )
                 ]
@@ -1246,7 +1246,7 @@ def redact_video(
                         "bbox": expanded_bbox,
                         "person_id": person_id or None,
                         "known_face": face_targets_by_person.get(person_id),
-                        "identity_tolerance": face_tolerance if face_tolerance is not None else 0.35,
+                        "identity_tolerance": face_tolerance if face_tolerance is not None else 0.55,
                     })
             else:
                 detected_tracks.extend({"kind": "face", "bbox": box} for box in face_boxes)

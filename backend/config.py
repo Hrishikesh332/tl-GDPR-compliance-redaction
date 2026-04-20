@@ -34,7 +34,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SNAPS_DIR = os.path.join(BASE_DIR, "snaps")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
-FACE_COSINE_SIM_THRESHOLD = 0.55
+FACE_COSINE_SIM_THRESHOLD = 0.42
 OBJECT_CONF_THRESHOLD = 0.25
 DEFAULT_BLUR_STRENGTH = 51
 DEFAULT_DETECT_EVERY_N = 10

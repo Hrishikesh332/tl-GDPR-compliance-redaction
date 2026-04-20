@@ -35,8 +35,71 @@ logger = logging.getLogger("video_redaction.pipeline")
 
 _jobs = {}
 _lock = threading.Lock()
+_manifests_cleaned = False
 
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm")
+
+
+def cleanup_orphan_temp_files():
+    """Remove incomplete temp files left behind by interrupted pipelines."""
+    if not os.path.isdir(OUTPUT_DIR):
+        return
+    removed = 0
+    for fn in os.listdir(OUTPUT_DIR):
+        lower = fn.lower()
+        if not lower.startswith("tmp"):
+            continue
+        if not lower.endswith(VIDEO_EXTENSIONS):
+            continue
+        path = os.path.join(OUTPUT_DIR, fn)
+        if not os.path.isfile(path):
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        logger.info("Cleaned up %d orphan temp files from output directory", removed)
+
+
+def cleanup_duplicate_video_id_mappings():
+    """Ensure each ``twelvelabs_video_id`` is claimed by at most one job.
+
+    When multiple jobs share the same video_id (usually caused by the old
+    heuristic recovery), keep only the newest job's mapping and clear the
+    rest.  This runs once on first lookup.
+    """
+    global _manifests_cleaned
+    if _manifests_cleaned:
+        return
+    _manifests_cleaned = True
+    cleanup_orphan_temp_files()
+
+    video_to_jobs = {}
+    for jid in list_run_ids():
+        manifest = load_job_manifest(jid)
+        if not manifest:
+            continue
+        vid = str(manifest.get("twelvelabs_video_id") or "").strip()
+        if not vid:
+            continue
+        mtime = run_dir_mtime(jid) or 0.0
+        video_to_jobs.setdefault(vid, []).append((jid, mtime, manifest))
+
+    for vid, entries in video_to_jobs.items():
+        if len(entries) <= 1:
+            continue
+        entries.sort(key=lambda e: e[1], reverse=True)
+        winner_jid = entries[0][0]
+        for jid, _mtime, manifest in entries[1:]:
+            logger.info(
+                "Clearing stale video_id mapping: job %s had video_id %s (belongs to job %s)",
+                jid, vid, winner_jid,
+            )
+            manifest["twelvelabs_video_id"] = ""
+            run_dir = get_run_dir(jid)
+            save_job_manifest(run_dir, manifest)
 
 
 def download_video_from_hls(hls_url, video_id, filename=None):
@@ -100,7 +163,7 @@ def candidate_source_videos():
         lower = fn.lower()
         if not lower.endswith(VIDEO_EXTENSIONS):
             continue
-        if lower.startswith("redacted_") or lower.startswith("person_"):
+        if lower.startswith("redacted_") or lower.startswith("person_") or lower.startswith("tmp"):
             continue
         candidates.append(path)
     return sorted(candidates)
@@ -263,8 +326,21 @@ def load_job_from_disk(job_id):
     if not created_at and run_mtime is not None:
         created_at = datetime.fromtimestamp(run_mtime, tz=timezone.utc).isoformat()
 
+    stored_status = (manifest or {}).get("status", "ready")
+    if stored_status == "processing":
+        if disk and disk.get("unique_faces"):
+            stored_status = "ready"
+        else:
+            stored_status = "failed"
+        logger.info(
+            "Job %s was stuck in 'processing' on disk (server restart); "
+            "recovering as '%s'", job_id, stored_status,
+        )
+        if manifest:
+            manifest["status"] = stored_status
+
     job = {
-        "status": (manifest or {}).get("status", "ready"),
+        "status": stored_status,
         "video_path": video_path,
         "video_filename": (manifest or {}).get("video_filename"),
         "created_at": created_at,
@@ -287,6 +363,17 @@ def load_job_from_disk(job_id):
 
 
 def recover_job_id_for_video(video_id):
+    """Try to find an existing job that belongs to this video.
+
+    Only returns a job when there is strong evidence of a match:
+      - The manifest already has ``twelvelabs_video_id`` set to *this* video, OR
+      - The manifest has NO ``twelvelabs_video_id`` yet AND the filename matches exactly.
+
+    Never steals a job that is already bound to a *different* video.
+    """
+    if not video_id:
+        return None
+
     try:
         info = twelvelabs_service.get_video_info(video_id)
     except Exception as e:
@@ -294,59 +381,38 @@ def recover_job_id_for_video(video_id):
         info = {}
 
     target_meta = info.get("system_metadata") or {}
-    target_filename = target_meta.get("filename")
-    target_time = parse_iso_timestamp(info.get("indexed_at")) or parse_iso_timestamp(info.get("created_at"))
-    if target_time is None and not target_filename and not target_meta:
+    target_filename = str(target_meta.get("filename") or "").strip().lower()
+    if not target_filename and not target_meta:
         return None
-
-    best_job_id = None
-    best_score = float("inf")
 
     for job_id in list_run_ids():
         manifest = load_job_manifest(job_id) or {}
-        if manifest.get("twelvelabs_video_id") == video_id:
+        existing_vid = str(manifest.get("twelvelabs_video_id") or "").strip()
+
+        if existing_vid == video_id:
             return job_id
 
-        score = 0.0
-        run_time = run_dir_mtime(job_id)
-        if target_time is not None and run_time is not None:
-            score += abs(run_time - target_time)
-        if target_filename:
-            filename = manifest.get("video_filename")
-            if filename:
-                score += 0 if filename == target_filename else 3600.0
-            else:
-                score += 900.0
+        if existing_vid:
+            continue
 
-        inferred_path = manifest.get("video_path")
-        if not inferred_path or not os.path.isfile(inferred_path):
-            inferred_path = infer_video_path_for_job(job_id, target_meta=target_meta)
-        if inferred_path:
-            score -= 120.0
-        else:
-            score += 1e6
+        manifest_filename = str(manifest.get("video_filename") or "").strip().lower()
+        if not target_filename or not manifest_filename:
+            continue
+        if manifest_filename != target_filename:
+            continue
 
-        if score < best_score:
-            best_score = score
-            best_job_id = job_id
+        recovered_manifest = {
+            "job_id": job_id,
+            "twelvelabs_video_id": video_id,
+        }
+        persist_job_manifest(job_id, overrides=recovered_manifest)
+        logger.info(
+            "Recovered unbound job %s for video %s (filename match: %s)",
+            job_id, video_id, target_filename,
+        )
+        return job_id
 
-    if not best_job_id:
-        return None
-
-    recovered_manifest = {
-        "job_id": best_job_id,
-        "status": "ready",
-        "created_at": datetime.fromtimestamp(run_dir_mtime(best_job_id), tz=timezone.utc).isoformat() if run_dir_mtime(best_job_id) else None,
-        "video_path": infer_video_path_for_job(best_job_id, target_meta=target_meta),
-        "video_filename": target_filename,
-        "twelvelabs_video_id": video_id,
-        "video_metadata": target_meta or None,
-        "twelvelabs_status": "done",
-        "local_status": "done",
-    }
-    persist_job_manifest(best_job_id, overrides=recovered_manifest)
-    logger.info("Recovered disk job %s for video %s using persisted snaps/output files", best_job_id, video_id)
-    return best_job_id
+    return None
 
 
 def new_job_id():
@@ -370,6 +436,7 @@ def get_job_id_by_video_id(video_id):
     """Return the best explicitly-mapped job_id for a video, preferring the most recent run."""
     if not video_id:
         return None
+    cleanup_duplicate_video_id_mappings()
 
     def _candidate_key(job_id, source):
         created_at = parse_iso_timestamp((source or {}).get("created_at"))
@@ -433,7 +500,15 @@ def ensure_job_for_video(video_id, interval_sec=None, force=False):
     if not force:
         job_id = get_exact_job_id_by_video_id(video_id)
         if job_id:
-            return job_id
+            existing = get_job(job_id)
+            if existing and existing.get("status") == "failed":
+                logger.info(
+                    "Existing job %s for video %s is failed; will create a fresh job",
+                    job_id, video_id,
+                )
+                force = True
+            else:
+                return job_id
 
     try:
         info = twelvelabs_service.get_video_info(video_id)

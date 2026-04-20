@@ -520,7 +520,7 @@ def localize_known_face_in_search_region(
     known_face,
     search_bbox,
     preferred_bbox=None,
-    tolerance=0.35,
+    tolerance=0.55,
     allow_geometry_fallback=False,
 ):
     """
@@ -664,7 +664,7 @@ def localize_known_face_in_search_region(
     return None
 
 
-def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, tolerance=0.35):
+def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, tolerance=0.55):
     """Locate specific saved faces in a frame.
 
     Prefers nearby saved appearance boxes as anchors so selected-face blur still
@@ -952,10 +952,11 @@ def detect_objects(img_bgr, conf_threshold=0.25, forensic_only=True, strict=True
     return out
 
 
-def match_faces_in_frame(frame_bgr, target_encodings, tolerance=0.35):
+def match_faces_in_frame(frame_bgr, target_encodings, tolerance=0.55):
     """Match faces in a frame against target encodings.
     Uses the same InsightFace-first detection pipeline as the rest of the
     product so person-specific blur stays aligned with generic face blur.
+    tolerance: max allowed (1 - cosine_similarity).  Higher = more permissive.
     """
     if not target_encodings:
         return []
@@ -972,6 +973,9 @@ def match_faces_in_frame(frame_bgr, target_encodings, tolerance=0.35):
         if enc is None:
             continue
         enc_arr = np.array(enc, dtype=np.float32)
+        norm = np.linalg.norm(enc_arr)
+        if norm > 0:
+            enc_arr = enc_arr / norm
         for t_enc in target_vecs:
             sim = float(np.dot(enc_arr, t_enc))
             if sim >= (1.0 - tolerance):
@@ -1004,11 +1008,12 @@ def match_objects_in_frame(frame_bgr, target_classes, conf_threshold=0.25, stric
     return matched
 
 
-def identify_faces_in_frame(frame_bgr, known_faces, tolerance=0.35):
+def identify_faces_in_frame(frame_bgr, known_faces, tolerance=0.55):
     """Identify faces in a frame against known face encodings.
 
     known_faces: iterable of {"person_id": str, "encoding": [...]}
     Returns [{"bbox": [...], "person_id": str, "match_score": float, "det_score": float}, ...]
+    tolerance: max allowed (1 - cosine_similarity).  Higher = more permissive.
     """
     if not known_faces:
         return []

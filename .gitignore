@@ -24,7 +24,6 @@ htmlcov/
 # Backend outputs and runtime
 backend/logs/
 backend/output/
-backend/snaps/
 backend/uploads/
 backend/test.png
 *.mp4
