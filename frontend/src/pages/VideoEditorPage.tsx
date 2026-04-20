@@ -2627,6 +2627,21 @@ export default function VideoEditorPage() {
     ))
   }, [])
 
+  const removeFaceTimelineLane = useCallback((personId: string) => {
+    setPersonLaneIds((previous) => previous.filter((id) => id !== personId))
+    setFaceLaneEntityRangesByPersonId((previous) => {
+      if (!(personId in previous)) return previous
+      const next = { ...previous }
+      delete next[personId]
+      return next
+    })
+    if (requestedFaceLaneEntityIdsRef.current[personId]) {
+      const nextRequested = { ...requestedFaceLaneEntityIdsRef.current }
+      delete nextRequested[personId]
+      requestedFaceLaneEntityIdsRef.current = nextRequested
+    }
+  }, [])
+
   useEffect(() => {
     if (!videoId || !hasRunDetection || personLaneIds.length === 0) return
 
@@ -3796,6 +3811,46 @@ export default function VideoEditorPage() {
     const wasPlaying = !!videoRef.current && !videoRef.current.paused
     toggleDetectionSelectionById(item.id, item.kind === 'face' ? item.personId : null)
 
+    if (isActivatingBlur && item.kind === 'face' && item.entityId && videoId) {
+      fetch(`${API_BASE}/api/entities/${encodeURIComponent(item.entityId)}/time-ranges`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ video_id: videoId }),
+      })
+        .then(async (res) => {
+          const data = await res.json().catch(() => ({})) as { time_ranges?: DetectionTimeRange[] }
+          if (!res.ok) return
+          const scopedSegments = buildFaceTimelineSegments(item, data.time_ranges || [])
+          if (scopedSegments.length === 0) return
+          const scopedSearchResult: SearchSessionResult = {
+            query: `Entity: ${item.label}`,
+            queryText: item.label,
+            entities: [{
+              id: item.entityId as string,
+              name: item.label,
+              previewUrl: item.snapBase64 ? `data:image/png;base64,${item.snapBase64}` : undefined,
+            }],
+            results: [{
+              id: videoId,
+              video_id: videoId,
+              title: item.label,
+              clips: scopedSegments.map((segment, index) => ({
+                start: segment.start,
+                end: segment.end,
+                rank: index + 1,
+              })),
+            }],
+          }
+          setSearchSessionResult(scopedSearchResult)
+          setActiveTool('search')
+          setRightSidebarOpen(true)
+          try {
+            sessionStorage.setItem('video_redaction_last_search', JSON.stringify(scopedSearchResult))
+          } catch {}
+        })
+        .catch(() => {})
+    }
+
     if (!isActivatingBlur || !effectiveStreamUrl) return
 
     setLiveRedactionSeekPending(true)
@@ -3809,7 +3864,7 @@ export default function VideoEditorPage() {
     window.setTimeout(() => {
       seekToTime(seekTime, { play: wasPlaying || liveRedactionEnabled })
     }, 0)
-  }, [currentTime, effectiveStreamUrl, excludedFromRedactionIds, liveRedactionEnabled, seekToTime, toggleDetectionSelectionById])
+  }, [currentTime, effectiveStreamUrl, excludedFromRedactionIds, liveRedactionEnabled, seekToTime, toggleDetectionSelectionById, videoId])
 
   const toggleLiveDetectionSelection = useCallback((detection: LiveRedactionDetection) => {
     const selectionId = getSelectionIdForLiveDetection(detection)
@@ -4711,13 +4766,26 @@ export default function VideoEditorPage() {
                                       )}
                                     </div>
                                   </div>
-                                  <span className={`rounded-full border px-2 py-1 text-[9px] font-medium uppercase tracking-[0.12em] ${
-                                    lane.active
-                                      ? 'border-white/10 bg-black/24 text-white/78'
-                                      : 'border-border bg-background/70 text-text-tertiary'
-                                  }`}>
-                                    {lane.active ? 'Blur on' : 'Blur off'}
-                                  </span>
+                                  <div className="flex items-center gap-1.5 pointer-events-auto">
+                                    <span className={`rounded-full border px-2 py-1 text-[9px] font-medium uppercase tracking-[0.12em] ${
+                                      lane.active
+                                        ? 'border-white/10 bg-black/24 text-white/78'
+                                        : 'border-border bg-background/70 text-text-tertiary'
+                                    }`}>
+                                      {lane.active ? 'Blur on' : 'Blur off'}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={(event) => {
+                                        event.stopPropagation()
+                                        removeFaceTimelineLane(lane.personId)
+                                      }}
+                                      className="rounded-full border border-white/12 bg-black/24 px-2 py-1 text-[9px] font-medium uppercase tracking-[0.12em] text-white/78 hover:bg-black/38"
+                                      title="Remove lane"
+                                    >
+                                      Remove
+                                    </button>
+                                  </div>
                                 </div>
                                 {clampedSegments.length > 0 ? clampedSegments.map((segment, index) => {
                                   const startPct = duration > 0 ? (segment.start / duration) * 100 : 0

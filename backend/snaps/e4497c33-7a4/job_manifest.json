@@ -1,0 +1,186 @@
+{
+  "job_id": "e4497c33-7a4",
+  "status": "ready",
+  "created_at": "2026-04-20T09:19:24.060055+00:00",
+  "video_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/output/upload_mykn1ood.mp4",
+  "video_filename": "upload_mykn1ood.mp4",
+  "twelvelabs_video_id": "699fa0975ce336753bf904c2",
+  "video_metadata": {
+    "fps": 25.0,
+    "width": 1920,
+    "height": 1080,
+    "total_frames": 10383,
+    "duration_sec": 415.32
+  },
+  "twelvelabs_status": "analysis_failed: headers: {'date': 'Mon, 20 Apr 2026 09:19:24 GMT', 'content-type': 'application/json', 'content-length': '149', 'connection': 'keep-alive', 'content-encoding': 'gzip', 'retry-after': '85', 'tl-report': 'backend', 'vary': 'Accept-Encoding', 'x-ratelimit-dimensions': 'Duration', 'x-ratelimit-duration-limit': '3600', 'x-ratelimit-duration-remaining': '0', 'x-ratelimit-duration-reset': '1776676849', 'x-trace-id': 'c16cffe33690afc9fbfa7acc035c1b84'}, status_code: 429, body: {'code': 'too_many_requests', 'message': 'You have exceeded the rate limit (3600sec/1hour). Please try again later after 2026-04-20T09:20:49Z.'}",
+  "local_status": "done",
+  "twelvelabs_people": [
+    {
+      "name": "",
+      "description": "Hooded individual, fully covered except for eyes, wearing a green hooded jacket, seated at a table in a courtroom-like setting, writing with a red pen. Appears restless at times, occasionally holds a phone to ear.",
+      "time_ranges": [
+        {
+          "start_sec": 43,
+          "end_sec": 416
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Elderly man, white hair, wearing a dark suit with a light-colored shirt, seen placing an object on a table and later writing with a black pen beside the hooded individual. Appears to be a legal or administrative figure.",
+      "time_ranges": [
+        {
+          "start_sec": 43,
+          "end_sec": 416
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with long blonde hair and glasses, seated at a table in a courtroom setting, typing on a laptop. Appears focused, occasionally looks up off-camera. Wears a neutral-colored top and jeans.",
+      "time_ranges": [
+        {
+          "start_sec": 151,
+          "end_sec": 416
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman in a beige jacket pushing a shopping cart filled with papers, seen at the beginning of the video. She stops at a door held open by a man with glasses. Appears to be a staff member or clerk.",
+      "time_ranges": [
+        {
+          "start_sec": 0,
+          "end_sec": 18
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with glasses, wearing a dark jacket over a light-colored shirt, seen holding documents in front of the handcuffed individual during the initial hallway scene. Appears to be a police officer.",
+      "time_ranges": [
+        {
+          "start_sec": 18,
+          "end_sec": 32
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man in a dark jacket over a light shirt, one of three men walking down the hallway. Hands cuffed behind him. Appears to be a detainee or suspect.",
+      "time_ranges": [
+        {
+          "start_sec": 0,
+          "end_sec": 32
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two additional police officers in uniform, one leading the group with a hooded individual, followed by the original trio. Both wear standard police attire and carry equipment.",
+      "time_ranges": [
+        {
+          "start_sec": 32,
+          "end_sec": 43
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Older man in dark clothing, standing near a raised platform with two large computer monitors. Appears to be in a supervisory or technical role. Wears glasses and is seen observing the room.",
+      "time_ranges": [
+        {
+          "start_sec": 145,
+          "end_sec": 416
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with gray hair, wearing dark-colored clothes, seated at a table with hands clasped. Appears to be a legal or administrative official. Seen in multiple shots throughout the video.",
+      "time_ranges": [
+        {
+          "start_sec": 283,
+          "end_sec": 416
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman in black robes, seated at a desk near a computer, writing something down while looking toward the monitors. Appears to be a judge or court official.",
+      "time_ranges": [
+        {
+          "start_sec": 290,
+          "end_sec": 416
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two formally attired men standing in a central area, facing forward, wearing judicial robes. They are part of a group that bows at the end of the proceedings.",
+      "time_ranges": [
+        {
+          "start_sec": 414,
+          "end_sec": 416
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    }
+  ],
+  "twelvelabs_objects": null,
+  "twelvelabs_scene_summary": null
+}
