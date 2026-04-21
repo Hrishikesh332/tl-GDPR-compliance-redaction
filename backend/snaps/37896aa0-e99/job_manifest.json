@@ -1,0 +1,273 @@
+{
+  "job_id": "37896aa0-e99",
+  "status": "ready",
+  "created_at": "2026-04-21T07:30:12.665134+00:00",
+  "video_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/output/index_fai5_hgh.mp4",
+  "video_filename": "index_fai5_hgh.mp4",
+  "twelvelabs_video_id": "69b677662fc4a03916fba00e",
+  "video_metadata": {
+    "fps": 25.0,
+    "width": 1920,
+    "height": 1080,
+    "total_frames": 16833,
+    "duration_sec": 673.32
+  },
+  "twelvelabs_status": "analysis_failed: headers: {'date': 'Tue, 21 Apr 2026 07:30:12 GMT', 'content-type': 'application/json', 'content-length': '151', 'connection': 'keep-alive', 'content-encoding': 'gzip', 'retry-after': '2860', 'tl-report': 'backend', 'vary': 'Accept-Encoding', 'x-ratelimit-dimensions': 'Duration', 'x-ratelimit-duration-limit': '3600', 'x-ratelimit-duration-remaining': '0', 'x-ratelimit-duration-reset': '1776759472', 'x-trace-id': '030ba63ed28fda229467aa1262cb68d9'}, status_code: 429, body: {'code': 'too_many_requests', 'message': 'You have exceeded the rate limit (3600sec/1hour). Please try again later after 2026-04-21T08:17:52Z.'}",
+  "local_status": "done",
+  "twelvelabs_people": [
+    {
+      "name": "",
+      "description": "Man in blue pants and black shoes, wearing ankle cuffs, seated at a table with hands resting on lap, wearing an electronic device on right ear, looking straight ahead",
+      "time_ranges": [
+        {
+          "start_sec": 351,
+          "end_sec": 408
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Handcuffed man being escorted by police officers, wearing a dark-colored suit, facial expression neutral, walking with head down",
+      "time_ranges": [
+        {
+          "start_sec": 197,
+          "end_sec": 215
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with shoulder-length light brown hair, wearing a black jacket over a blue shirt, speaking into a purple microphone, standing against a blurred office backdrop",
+      "time_ranges": [
+        {
+          "start_sec": 504,
+          "end_sec": 665
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": []
+    },
+    {
+      "name": "Dr. Katharina Kopp",
+      "description": "Female interviewee with professional demeanor, wearing a formal outfit, speaking directly to camera with engaged expression",
+      "time_ranges": [
+        {
+          "start_sec": 448,
+          "end_sec": 504
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": []
+    },
+    {
+      "name": "",
+      "description": "Man in suit escorting handcuffed defendant toward judge's bench, flanked by officers, focused on task",
+      "time_ranges": [
+        {
+          "start_sec": 244,
+          "end_sec": 257
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Judge standing near elevated bench, wearing judicial robes, observing proceedings, expression neutral",
+      "time_ranges": [
+        {
+          "start_sec": 281,
+          "end_sec": 305
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Female lawyer in black robe, standing behind defendant, engaged in conversation, attentive posture",
+      "time_ranges": [
+        {
+          "start_sec": 336,
+          "end_sec": 377
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Male lawyer in black robe, standing beside female lawyer, facing off-camera, engaged in legal discussion",
+      "time_ranges": [
+        {
+          "start_sec": 336,
+          "end_sec": 377
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Security guard watching over audience, wearing uniform, standing near the back of the courtroom",
+      "time_ranges": [
+        {
+          "start_sec": 322,
+          "end_sec": 336
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Police officer holding a piece of paper, standing near the exit, observing the scene",
+      "time_ranges": [
+        {
+          "start_sec": 197,
+          "end_sec": 215
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Older gentleman interacting with three computers at a table, wearing casual clothing, using keyboard and mouse",
+      "time_ranges": [
+        {
+          "start_sec": 60,
+          "end_sec": 77
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": []
+    },
+    {
+      "name": "",
+      "description": "Woman at desk reviewing paperwork, wearing professional attire, focused expression, working alone",
+      "time_ranges": [
+        {
+          "start_sec": 82,
+          "end_sec": 120
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": []
+    },
+    {
+      "name": "",
+      "description": "Individual seated at workstation, typing notes on paper laid flat on keyboard, wearing casual clothes",
+      "time_ranges": [
+        {
+          "start_sec": 133,
+          "end_sec": 142
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": []
+    },
+    {
+      "name": "",
+      "description": "Two suited gentlemen discussing near the exit, one departs after conversation, both wearing formal business attire",
+      "time_ranges": [
+        {
+          "start_sec": 142,
+          "end_sec": 168
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": []
+    },
+    {
+      "name": "",
+      "description": "Four men gathered closely in conversation, wearing business attire, exchanging words before parting",
+      "time_ranges": [
+        {
+          "start_sec": 94,
+          "end_sec": 113
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": []
+    },
+    {
+      "name": "",
+      "description": "Man with glasses and dark hair, standing to the left of a table, gesturing while speaking, holding papers",
+      "time_ranges": [
+        {
+          "start_sec": 179,
+          "end_sec": 190
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": []
+    },
+    {
+      "name": "",
+      "description": "Third individual sitting at a desk behind the man with glasses, seemingly working on a computer, face not clearly visible",
+      "time_ranges": [
+        {
+          "start_sec": 179,
+          "end_sec": 190
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": []
+    },
+    {
+      "name": "",
+      "description": "Police personnel remaining inside courtroom after proceedings, observing departing crowd, wearing standard uniforms",
+      "time_ranges": [
+        {
+          "start_sec": 435,
+          "end_sec": 445
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    }
+  ],
+  "twelvelabs_objects": null,
+  "twelvelabs_scene_summary": null
+}
