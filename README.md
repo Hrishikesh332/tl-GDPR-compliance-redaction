@@ -1,4 +1,4 @@
-<h1 align="center">GDPR Video Redaction</h1>
+# GDPR Video Redaction
 
 Detect, track, and redact faces, people, objects, and custom regions in video footage to support GDPR and privacy-first review workflows from a single application.
 
@@ -30,20 +30,11 @@ Everything you need for privacy safe video review and redaction:
 
 ### Frontend
 
-React  
-TypeScript  
-Vite  
-Tailwind CSS
+React, TypeScript, Vite, Tailwind CSS
 
 ### Backend
 
-TwelveLabs  
-Python  
-Flask  
-OpenCV  
-InsightFace  
-Ultralytics  
-FFmpeg
+TwelveLabs, Python, Flask, OpenCV, InsightFace, Ultralytics, FFmpeg
 
 ---
 
