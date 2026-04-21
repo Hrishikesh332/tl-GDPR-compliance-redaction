@@ -1,4 +1,4 @@
-# GDPR Video Redaction
+<h1 align="center">GDPR Video Redaction</h1>
 
 Detect, track, and redact faces, people, objects, and custom regions in video footage to support GDPR and privacy-first review workflows from a single application.
 
