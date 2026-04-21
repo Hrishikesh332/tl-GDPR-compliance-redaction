@@ -7,6 +7,8 @@ import rateLimitIconSvg from '../../strand/icons/rate-limit.svg?raw'
 import visionDisabledIconSvg from '../../strand/icons/vision-disabled.svg?raw'
 import documentListIconSvg from '../../strand/icons/document-list.svg?raw'
 
+const DEMO_VIDEO_EMBED_URL = 'https://www.youtube.com/embed/Uz-WQcANyDg'
+
 function ThemedSvgIcon({
   icon,
   color,
@@ -235,17 +237,16 @@ export default function OverviewPage() {
               export with TwelveLabs-guided analysis and local blur tracking.
             </p>
           </div>
-          <div className="rounded-2xl border-2 border-dashed border-gray-300 bg-brand-charcoal flex flex-col items-center justify-center aspect-video max-w-4xl mx-auto overflow-hidden relative">
-            <div className="w-16 h-16 rounded-full bg-white/10 backdrop-blur-sm flex items-center justify-center mb-4 border border-white/20">
-              <svg className="w-7 h-7 text-white ml-0.5" viewBox="0 0 24 24" fill="currentColor">
-                <polygon points="5 3 19 12 5 21 5 3" />
-              </svg>
-            </div>
-            <p className="text-white/60 font-medium text-sm">Demo Video</p>
-            <p className="text-white/40 text-xs mt-1.5 max-w-xs text-center">
-              Replace this placeholder with a &lt;video&gt; element or an iframe embed
-              pointing to your demo recording.
-            </p>
+          <div className="rounded-2xl border border-border bg-brand-charcoal aspect-video max-w-4xl mx-auto overflow-hidden relative shadow-sm">
+            <iframe
+              src={DEMO_VIDEO_EMBED_URL}
+              title="GDPR Video Redaction demo"
+              className="absolute inset-0 h-full w-full"
+              loading="lazy"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              referrerPolicy="strict-origin-when-cross-origin"
+              allowFullScreen
+            />
           </div>
         </div>
       </section>
