@@ -1,0 +1,2 @@
+export const DASHBOARD_LAST_SEARCH_SESSION_KEY = 'video_redaction_last_search'
+export const EDITOR_LAST_SEARCH_SESSION_KEY = 'video_redaction_editor_last_search'

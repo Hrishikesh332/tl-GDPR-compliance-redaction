@@ -30,20 +30,24 @@ Everything you need for privacy safe video review and redaction:
 
 ### Frontend
 
-React
-TypeScript
-Vite
-Tailwind_CSS
+<p>
+  <img src="./docs/tech-stack/react.svg" alt="React" height="36" />
+  <img src="./docs/tech-stack/typescript.svg" alt="TypeScript" height="36" />
+  <img src="./docs/tech-stack/vite.svg" alt="Vite" height="36" />
+  <img src="./docs/tech-stack/tailwind-css.svg" alt="Tailwind CSS" height="36" />
+</p>
 
 ### Backend
 
-Python
-Flask
-
-OpenCV
-InsightFace
-Ultralytics
-FFmpeg
+<p>
+  <img src="./docs/tech-stack/twelvelabs.svg" alt="TwelveLabs" height="36" />
+  <img src="./docs/tech-stack/python.svg" alt="Python" height="36" />
+  <img src="./docs/tech-stack/flask.svg" alt="Flask" height="36" />
+  <img src="./docs/tech-stack/opencv.svg" alt="OpenCV" height="36" />
+  <img src="./docs/tech-stack/insightface.svg" alt="InsightFace" height="36" />
+  <img src="./docs/tech-stack/ultralytics.svg" alt="Ultralytics" height="36" />
+  <img src="./docs/tech-stack/ffmpeg.svg" alt="FFmpeg" height="36" />
+</p>
 
 ---
 

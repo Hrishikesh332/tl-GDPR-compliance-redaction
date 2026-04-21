@@ -9,20 +9,20 @@ frontend/
 ├── package.json
 ├── index.html
 ├── vite.config.ts
-├── tailwind.config.js    # Uses Strand preset from ./strand/
+├── tailwind.config.js  
 ├── tsconfig.json
-├── src/                   # App source
-│   ├── index.css          # Imports strand CSS
+├── src/                 
+│   ├── index.css         
 │   ├── main.tsx
 │   ├── App.tsx
 │   ├── components/
 │   └── pages/
-└── strand/                # Design system (tokens, CSS, preset)
+└── strand/               
     ├── tailwind-preset.js
     ├── tokens/
-    ├── css/               # variables.css, fonts.css
-    ├── components/        # Docs (see strand/components/README.md)
-    ├── assets/            # Logos
+    ├── css/              
+    ├── components/       
+    ├── assets/           
     └── icons/
 ```
 
@@ -38,6 +38,3 @@ cd frontend && npm install && npm run dev
 cd frontend && npm run build
 ```
 
-## Token reference
-
-See **`strand/components/README.md`** for colors, buttons, icons, and typography. Use Tailwind classes from the strand preset (e.g. `bg-surface`, `text-text-primary`, `border-border`) and CSS variables (e.g. `var(--strand-ui-accent)`) when needed.

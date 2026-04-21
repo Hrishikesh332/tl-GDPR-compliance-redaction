@@ -4,6 +4,10 @@ import AddImageModal from '../components/AddImageModal'
 import AddEntityModal from '../components/AddEntityModal'
 import { useVideoCache, type CachedVideo } from '../contexts/VideoCache'
 import { API_BASE } from '../lib/api'
+import {
+  DASHBOARD_LAST_SEARCH_SESSION_KEY,
+  EDITOR_LAST_SEARCH_SESSION_KEY,
+} from '../lib/searchSession'
 import searchIconUrl from '../../strand/icons/search.svg?url'
 import arrowBoxUpIconUrl from '../../strand/icons/arrow-box-up.svg?url'
 
@@ -661,7 +665,9 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
           entities,
           results,
         }
-        sessionStorage.setItem('video_redaction_last_search', JSON.stringify(sessionPayload))
+        const serializedSession = JSON.stringify(sessionPayload)
+        sessionStorage.setItem(DASHBOARD_LAST_SEARCH_SESSION_KEY, serializedSession)
+        sessionStorage.setItem(EDITOR_LAST_SEARCH_SESSION_KEY, serializedSession)
       } catch {}
     } catch (e) {
       setSearchError('Search request failed')
@@ -673,10 +679,11 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
 
   useEffect(() => {
     try {
-      const raw = sessionStorage.getItem('video_redaction_last_search')
+      const raw = sessionStorage.getItem(DASHBOARD_LAST_SEARCH_SESSION_KEY)
       if (raw) {
         const parsed = JSON.parse(raw) as SearchSessionResult
         if (parsed?.query != null && Array.isArray(parsed.results)) {
+          sessionStorage.setItem(EDITOR_LAST_SEARCH_SESSION_KEY, raw)
           const restoredAttachments = normalizePersistedSearchAttachments(parsed)
           const restoredQuery = typeof parsed.queryText === 'string'
             ? parsed.queryText
@@ -712,7 +719,8 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
     setSearchResults(null)
     setSearchError(null)
     try {
-      sessionStorage.removeItem('video_redaction_last_search')
+      sessionStorage.removeItem(DASHBOARD_LAST_SEARCH_SESSION_KEY)
+      sessionStorage.removeItem(EDITOR_LAST_SEARCH_SESSION_KEY)
     } catch {}
   }
 
@@ -741,7 +749,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
 
   return (
     <div className="w-full min-w-0">
-      <div className="search-bar-gradient-outer mb-4 shadow-sm w-full min-w-0">
+      <div className={`search-bar-gradient-outer mb-4 shadow-sm w-full min-w-0 ${(searchSuggestionsOpen || entityDropdownVisible) ? 'z-20' : ''}`}>
         <div className="search-bar-gradient-border-wrap">
           <div className="search-bar-gradient-border" aria-hidden />
         </div>
@@ -844,7 +852,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
                 <span className="hidden sm:inline">Add Entity</span>
                 <span className="hidden sm:inline text-[10px] font-medium bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded">BETA</span>
               </button>
-              <div className="relative">
+              <div className="relative z-[110]">
                 <button
                   type="button"
                   onClick={() => setSearchSuggestionsOpen((open) => !open)}
@@ -856,7 +864,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
                   <IconChevronDown className={`w-3 h-3 shrink-0 transition-transform ${searchSuggestionsOpen ? 'rotate-180' : ''}`} />
                 </button>
                 {searchSuggestionsOpen && (
-                  <div className="absolute left-0 mt-1 w-72 max-w-xs rounded-xl border border-border bg-surface shadow-xl z-50 py-1">
+                  <div className="absolute left-0 mt-1 w-72 max-w-xs rounded-xl border border-border bg-surface shadow-xl z-[120] py-1">
                     {SEARCH_SUGGESTIONS.map((suggestion) => (
                       <button
                         key={suggestion}

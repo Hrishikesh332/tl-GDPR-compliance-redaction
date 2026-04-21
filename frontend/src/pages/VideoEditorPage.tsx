@@ -5,6 +5,7 @@ import Hls from 'hls.js'
 import { useVideoCache } from '../contexts/VideoCache'
 import { API_BASE } from '../lib/api'
 import { storeLastEditorVideoId, DEMO_EDITOR_VIDEO_ID } from '../lib/editorRouting'
+import { EDITOR_LAST_SEARCH_SESSION_KEY } from '../lib/searchSession'
 import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
@@ -490,7 +491,6 @@ const ENTITY_SEARCH_LANE_SEGMENT_RING = 'rgba(0, 220, 130, 0.28)'
 const ENTITY_SEARCH_LANE_EDGE_LEFT = 'rgba(0, 220, 130, 0.55)'
 const ENTITY_SEARCH_LANE_EDGE_RIGHT = 'rgba(0, 220, 130, 0.35)'
 const FACE_LANE_DEBUG_CACHE_KEY = 'video_redaction_face_lane_debug_cache_v1'
-const EDITOR_LAST_SEARCH_SESSION_KEY = 'video_redaction_editor_last_search'
 const LIVE_REDACTION_OBJECT_CLASSES = [
   'backpack',
   'bicycle',
@@ -5141,7 +5141,7 @@ export default function VideoEditorPage() {
                           disabled={!videoId}
                           className="flex-1 h-9 rounded-md bg-surface border border-border px-3 text-sm text-text-primary placeholder:text-text-tertiary focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent disabled:opacity-60 disabled:cursor-not-allowed"
                         />
-                        <div className="relative shrink-0">
+                        <div className="relative shrink-0 z-20">
                           <button
                             type="button"
                             onClick={() => setAnalyzeSuggestionsOpen((open) => !open)}
@@ -5153,7 +5153,7 @@ export default function VideoEditorPage() {
                             <IconChevronDown className={`w-3 h-3 transition-transform ${analyzeSuggestionsOpen ? 'rotate-180' : ''}`} />
                           </button>
                           {analyzeSuggestionsOpen && (
-                            <div className="absolute right-0 bottom-full mb-1 py-1 min-w-[14rem] max-w-xs rounded-lg border border-border bg-surface shadow-lg z-50">
+                            <div className="absolute right-0 bottom-full mb-1 py-1 min-w-[14rem] max-w-xs rounded-lg border border-border bg-surface shadow-lg z-30">
                               {ANALYZE_SUGGESTIONS.map((suggestion) => (
                                 <button
                                   key={suggestion}

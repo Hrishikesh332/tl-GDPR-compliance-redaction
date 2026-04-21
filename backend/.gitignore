@@ -32,6 +32,7 @@ pyrightconfig.json
 logs/
 output/
 uploads/
+snaps/
 test.png
 *.mp4
 *.avi
