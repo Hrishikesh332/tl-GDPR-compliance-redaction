@@ -192,7 +192,12 @@ function Shell() {
                 className="font-brand text-text-primary hover:opacity-80 transition-opacity cursor-pointer shrink-0 text-left bg-transparent border-0 p-0 no-underline block"
                 aria-label={isMobileEditorViewport ? 'Go to overview' : 'Go to dashboard'}
               >
-                <h1 className="text-base md:text-h5 font-medium truncate">GDPR Compliance [Video REDACTION]</h1>
+                <div className="flex flex-col min-w-0">
+                  <span className="text-[10px] md:text-[11px] font-brand-xbold uppercase tracking-[0.14em] text-accent truncate">
+                    Video REDACTION
+                  </span>
+                  <h1 className="text-base md:text-h5 font-medium truncate">Automated GDPR Compliance</h1>
+                </div>
               </Link>
               <span className="hidden md:inline-flex items-center px-2 py-1 rounded-sm border border-border bg-transparent text-text-secondary text-xs font-medium shrink-0 uppercase tracking-wide pointer-events-none select-none">
                 Sample App

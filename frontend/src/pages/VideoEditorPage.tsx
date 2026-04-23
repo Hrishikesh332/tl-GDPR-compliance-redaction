@@ -490,6 +490,8 @@ const ENTITY_SEARCH_LANE_SEGMENT_ACTIVE = 'rgba(0, 220, 130, 0.16)'
 const ENTITY_SEARCH_LANE_SEGMENT_RING = 'rgba(0, 220, 130, 0.28)'
 const ENTITY_SEARCH_LANE_EDGE_LEFT = 'rgba(0, 220, 130, 0.55)'
 const ENTITY_SEARCH_LANE_EDGE_RIGHT = 'rgba(0, 220, 130, 0.35)'
+const ENTITY_SEARCH_LANE_HEIGHT_PX = 60
+const VIDEO_TIMELINE_LANE_HEIGHT_PX = 76
 const FACE_LANE_DEBUG_CACHE_KEY = 'video_redaction_face_lane_debug_cache_v1'
 const LIVE_REDACTION_OBJECT_CLASSES = [
   'backpack',
@@ -3521,6 +3523,24 @@ export default function VideoEditorPage() {
     [searchEntities]
   )
   const hiddenTimelineSearchEntityCount = Math.max(0, searchEntities.length - visibleTimelineSearchEntities.length)
+  const searchLaneNoteLines = useMemo(() => {
+    if (searchEntities.length === 1) {
+      return [
+        `This lane visualizes where the entity search for ${searchEntities[0].name} matches this video over time.`,
+        'Taller bars indicate a stronger entity match and usually mean that person is more clearly visible or more prominently present in that moment, while shorter bars suggest a weaker or briefer appearance.',
+      ]
+    }
+    if (searchEntities.length > 1) {
+      return [
+        'This lane visualizes where the selected entity search matches this video over time.',
+        'Taller bars indicate stronger identity matches and usually mean one or more selected people are more clearly visible in that segment, while shorter bars suggest a weaker or less prominent appearance.',
+      ]
+    }
+    return [
+      'This lane visualizes where your normal search matches this video over time.',
+      'Taller bars indicate stronger relevance to your search and a more prominent match in that segment, while shorter bars indicate weaker or less certain matches.',
+    ]
+  }, [searchEntities])
   const visibleLiveRedactionDetections = useMemo(() => {
     const now = Date.now()
     return liveRedactionDetections.filter((detection) => {
@@ -4638,7 +4658,10 @@ export default function VideoEditorPage() {
                     )}
                   </div>
 
-                  <div className={`h-[64px] shrink-0 relative border-b border-border ${trackMuted.video ? 'opacity-40' : ''}`}>
+                  <div
+                    className={`shrink-0 relative border-b border-border ${trackMuted.video ? 'opacity-40' : ''}`}
+                    style={{ height: `${VIDEO_TIMELINE_LANE_HEIGHT_PX}px` }}
+                  >
                     <div className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden border border-accent/25 bg-gradient-to-r from-brand-charcoal via-[#123228] to-brand-charcoal shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
                       <div className="absolute inset-0 flex">
                         {timelineThumbnails.length > 0 ? (
@@ -4680,127 +4703,137 @@ export default function VideoEditorPage() {
                   </div>
 
                   {orderedSearchClips.length > 0 && (
-                    <div className="h-[48px] shrink-0 relative border-b border-border">
-                      <div
-                        className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
-                        style={{
-                          border: `1px solid ${ENTITY_SEARCH_LANE_BORDER}`,
-                          background: ENTITY_SEARCH_LANE_BACKGROUND,
-                        }}
-                      >
+                    <div className="shrink-0 border-b border-border">
+                      <div className="relative" style={{ height: `${ENTITY_SEARCH_LANE_HEIGHT_PX}px` }}>
                         <div
-                          className="absolute inset-0 pointer-events-none"
-                          style={{ background: ENTITY_SEARCH_LANE_OVERLAY }}
-                        />
-                        <div
-                          className="absolute inset-x-3 bottom-[9px] h-px"
-                          style={{ backgroundColor: ENTITY_SEARCH_LANE_BASELINE }}
-                        />
-                        {visibleTimelineSearchEntities.length > 0 && (
-                          <div className="absolute left-3 top-2 right-12 z-[4] flex items-center gap-1.5 overflow-hidden pointer-events-none">
-                            {visibleTimelineSearchEntities.map((entity) => (
-                              <SearchEntityChip
-                                key={`timeline-search-entity-${entity.id}`}
-                                entity={entity}
-                                variant="timeline"
-                              />
-                            ))}
-                            {hiddenTimelineSearchEntityCount > 0 && (
-                              <div
-                                className="inline-flex items-center rounded-full border border-white/10 bg-black/22 px-2 py-1 text-[10px] font-medium text-white/72 shadow-[0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-sm"
-                                style={{ opacity: 0.8 }}
-                              >
-                                +{hiddenTimelineSearchEntityCount} more
-                              </div>
-                            )}
-                          </div>
-                        )}
-                        <button
-                          type="button"
-                          className="absolute right-3 top-2 z-[5] inline-flex h-5 w-5 items-center justify-center rounded-md border border-white/18 bg-black/20 text-white/80 transition hover:border-white/32 hover:bg-black/35 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/45"
-                          onClick={clearSearchTimelineLane}
-                          title="Remove entity lane"
-                          aria-label="Remove entity lane"
+                          className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                          style={{
+                            border: `1px solid ${ENTITY_SEARCH_LANE_BORDER}`,
+                            background: ENTITY_SEARCH_LANE_BACKGROUND,
+                          }}
                         >
-                          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" aria-hidden>
-                            <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                          </svg>
-                        </button>
-                        {searchLaneBars.length > 0 ? (
-                          <>
-                            <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
-                              {searchLaneBars.map((bar, index) => {
-                                const barHeight = 8 + bar.value * 56
-                                const y = 76 - barHeight
-                                return (
-                                  <rect
-                                    key={`search-bar-base-${index}`}
-                                    x={bar.x.toFixed(2)}
-                                    y={y.toFixed(2)}
-                                    width={bar.width.toFixed(2)}
-                                    height={barHeight.toFixed(2)}
-                                    rx="1.8"
-                                    fill={ENTITY_SEARCH_LANE_BAR_BASE}
-                                  />
-                                )
-                              })}
+                          <div
+                            className="absolute inset-0 pointer-events-none"
+                            style={{ background: ENTITY_SEARCH_LANE_OVERLAY }}
+                          />
+                          <div
+                            className="absolute inset-x-3 bottom-[9px] h-px"
+                            style={{ backgroundColor: ENTITY_SEARCH_LANE_BASELINE }}
+                          />
+                          {visibleTimelineSearchEntities.length > 0 && (
+                            <div className="absolute left-3 top-2 right-12 z-[4] flex items-center gap-1.5 overflow-hidden pointer-events-none">
+                              {visibleTimelineSearchEntities.map((entity) => (
+                                <SearchEntityChip
+                                  key={`timeline-search-entity-${entity.id}`}
+                                  entity={entity}
+                                  variant="timeline"
+                                />
+                              ))}
+                              {hiddenTimelineSearchEntityCount > 0 && (
+                                <div
+                                  className="inline-flex items-center rounded-full border border-white/10 bg-black/22 px-2 py-1 text-[10px] font-medium text-white/72 shadow-[0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-sm"
+                                  style={{ opacity: 0.8 }}
+                                >
+                                  +{hiddenTimelineSearchEntityCount} more
+                                </div>
+                              )}
+                            </div>
+                          )}
+                          <button
+                            type="button"
+                            className="absolute right-3 top-2 z-[5] inline-flex h-5 w-5 items-center justify-center rounded-md border border-white/18 bg-black/20 text-white/80 transition hover:border-white/32 hover:bg-black/35 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/45"
+                            onClick={clearSearchTimelineLane}
+                            title="Remove entity lane"
+                            aria-label="Remove entity lane"
+                          >
+                            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" aria-hidden>
+                              <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                             </svg>
-                            <svg
-                              className="absolute inset-0 h-full w-full z-[2]"
-                              viewBox="0 0 1200 84"
-                              preserveAspectRatio="none"
-                              aria-hidden
-                              style={{ clipPath: `inset(0 ${Math.max(0, 100 - progress * 100)}% 0 0)` }}
-                            >
-                              {searchLaneBars.map((bar, index) => {
-                                const barHeight = 8 + bar.value * 56
-                                const y = 76 - barHeight
-                                return (
-                                  <rect
-                                    key={`search-bar-active-${index}`}
-                                    x={bar.x.toFixed(2)}
-                                    y={y.toFixed(2)}
-                                    width={bar.width.toFixed(2)}
-                                    height={barHeight.toFixed(2)}
-                                    rx="1.8"
-                                    fill={ENTITY_SEARCH_LANE_COLOR}
-                                  />
-                                )
-                              })}
-                            </svg>
-                          </>
-                        ) : null}
-                        {searchLaneSegments.map(({ clip, index, isActive, importance, left, width }) => {
-                          return (
-                            <button
-                              key={`lane-hit-${clip.start}-${clip.end}-${index}`}
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                seekToTime(clip.start)
-                              }}
-                              className="absolute inset-y-0 z-[3] bg-transparent"
-                              style={{
-                                left,
-                                width,
-                              }}
-                              title={`${fmtShort(clip.start)} - ${fmtShort(clip.end)}`}
-                            >
-                              <span
-                                className={`absolute inset-y-1 rounded-full transition-all ${isActive ? '' : 'hover:bg-[rgba(0,220,130,0.10)]'}`}
-                                style={{
-                                  left: 0,
-                                  right: 0,
-                                  backgroundColor: isActive ? ENTITY_SEARCH_LANE_SEGMENT_ACTIVE : undefined,
-                                  boxShadow: isActive ? `0 0 0 1px ${ENTITY_SEARCH_LANE_SEGMENT_RING}` : undefined,
-                                  opacity: isActive ? 0.95 : 0.15 + importance * 0.42,
+                          </button>
+                          {searchLaneBars.length > 0 ? (
+                            <>
+                              <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
+                                {searchLaneBars.map((bar, index) => {
+                                  const barHeight = 8 + bar.value * 56
+                                  const y = 76 - barHeight
+                                  return (
+                                    <rect
+                                      key={`search-bar-base-${index}`}
+                                      x={bar.x.toFixed(2)}
+                                      y={y.toFixed(2)}
+                                      width={bar.width.toFixed(2)}
+                                      height={barHeight.toFixed(2)}
+                                      rx="1.8"
+                                      fill={ENTITY_SEARCH_LANE_BAR_BASE}
+                                    />
+                                  )
+                                })}
+                              </svg>
+                              <svg
+                                className="absolute inset-0 h-full w-full z-[2]"
+                                viewBox="0 0 1200 84"
+                                preserveAspectRatio="none"
+                                aria-hidden
+                                style={{ clipPath: `inset(0 ${Math.max(0, 100 - progress * 100)}% 0 0)` }}
+                              >
+                                {searchLaneBars.map((bar, index) => {
+                                  const barHeight = 8 + bar.value * 56
+                                  const y = 76 - barHeight
+                                  return (
+                                    <rect
+                                      key={`search-bar-active-${index}`}
+                                      x={bar.x.toFixed(2)}
+                                      y={y.toFixed(2)}
+                                      width={bar.width.toFixed(2)}
+                                      height={barHeight.toFixed(2)}
+                                      rx="1.8"
+                                      fill={ENTITY_SEARCH_LANE_COLOR}
+                                    />
+                                  )
+                                })}
+                              </svg>
+                            </>
+                          ) : null}
+                          {searchLaneSegments.map(({ clip, index, isActive, importance, left, width }) => {
+                            return (
+                              <button
+                                key={`lane-hit-${clip.start}-${clip.end}-${index}`}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  seekToTime(clip.start)
                                 }}
-                              />
-                            </button>
-                          )
-                        })}
-                        <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_LEFT }} />
-                        <div className="absolute right-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_RIGHT }} />
+                                className="absolute inset-y-0 z-[3] bg-transparent"
+                                style={{
+                                  left,
+                                  width,
+                                }}
+                                title={`${fmtShort(clip.start)} - ${fmtShort(clip.end)}`}
+                              >
+                                <span
+                                  className={`absolute inset-y-1 rounded-full transition-all ${isActive ? '' : 'hover:bg-[rgba(0,220,130,0.10)]'}`}
+                                  style={{
+                                    left: 0,
+                                    right: 0,
+                                    backgroundColor: isActive ? ENTITY_SEARCH_LANE_SEGMENT_ACTIVE : undefined,
+                                    boxShadow: isActive ? `0 0 0 1px ${ENTITY_SEARCH_LANE_SEGMENT_RING}` : undefined,
+                                    opacity: isActive ? 0.95 : 0.15 + importance * 0.42,
+                                  }}
+                                />
+                              </button>
+                            )
+                          })}
+                          <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_LEFT }} />
+                          <div className="absolute right-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_RIGHT }} />
+                        </div>
+                      </div>
+                      <div className="px-3 pb-2.5 pt-1.5">
+                        <p className="text-[11px] leading-4 text-text-tertiary">
+                          {searchLaneNoteLines[0]}
+                        </p>
+                        <p className="text-[11px] leading-4 text-text-tertiary">
+                          {searchLaneNoteLines[1]}
+                        </p>
                       </div>
                     </div>
                   )}

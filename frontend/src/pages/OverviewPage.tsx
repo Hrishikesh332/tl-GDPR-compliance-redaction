@@ -1,7 +1,7 @@
 import analyzeIconSvg from '../../strand/icons/analyze.svg?raw'
 import embedIconSvg from '../../strand/icons/embed.svg?raw'
 import entityCollectionIconSvg from '../../strand/icons/entity-collection.svg?raw'
-import visionIconSvg from '../../strand/icons/vision.svg?raw'
+import searchIconSvg from '../../strand/icons/search-v2.svg?raw'
 import hourglassIconSvg from '../../strand/icons/hourglass.svg?raw'
 import rateLimitIconSvg from '../../strand/icons/rate-limit.svg?raw'
 import visionDisabledIconSvg from '../../strand/icons/vision-disabled.svg?raw'
@@ -126,7 +126,7 @@ export default function OverviewPage() {
               Docs
             </a>
             <a
-              href="https://github.com/twelvelabs-io"
+              href="https://github.com/Hrishikesh332/tl-GDPR-compliance-redaction"
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg border border-border text-text-primary text-sm font-brand-bold hover:bg-card transition-colors"
@@ -264,16 +264,16 @@ export default function OverviewPage() {
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <FeatureCard
-              icon={analyzeIconSvg}
-              title="TwelveLabs Video Analysis"
-              description="Use TwelveLabs indexing and analysis to generate scene, people, and object context that helps guide review and redaction workflows."
+              icon={searchIconSvg}
+              title="TwelveLabs Video Search"
+              description="Use the TwelveLabs Marengo model to search indexed footage with natural language, images, and saved entities, then jump straight to relevant clips."
               iconColor="var(--strand-product-search-dark)"
               iconBackground="var(--strand-product-search-light)"
             />
             <FeatureCard
-              icon={visionIconSvg}
-              title="Local Object Detection"
-              description="Detect and redact supported object classes locally with adjustable confidence thresholds and editor-driven selection."
+              icon={analyzeIconSvg}
+              title="TwelveLabs Video Analysis"
+              description="Use the TwelveLabs Pegasus model to generate scene, people, and object context that helps guide review and redaction workflows."
               iconColor="var(--strand-product-generate-dark)"
               iconBackground="var(--strand-product-generate-light)"
             />
@@ -328,6 +328,36 @@ export default function OverviewPage() {
               title="Render & Export"
               description="Render the redacted output, then re-encode to H.264 MP4 when ffmpeg is available for broader playback compatibility."
             />
+          </div>
+        </div>
+      </section>
+
+      <section className="relative left-1/2 w-screen -translate-x-1/2 border-t border-black/10 bg-background py-16 sm:py-20">
+        <div className="max-w-4xl mx-auto px-3 sm:px-4 lg:px-5 text-center">
+          <h2 className="text-[32px] sm:text-[44px] leading-[1.08] font-brand-bold text-text-primary tracking-[-0.02em]">
+            Ready to Get Started with Automated GDPR Compliance?
+          </h2>
+          <p className="mt-4 text-base sm:text-lg text-text-secondary">
+            Upload your first video and see results in seconds.
+          </p>
+
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+            <a
+              href="https://github.com/Hrishikesh332/tl-GDPR-compliance-redaction"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-w-[148px] items-center justify-center rounded-[22px] bg-brand-charcoal px-6 py-3 text-base font-brand-bold text-brand-white transition-colors hover:bg-gray-700"
+            >
+              View Code
+            </a>
+            <a
+              href="https://www.twelvelabs.io/contact"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-w-[148px] items-center justify-center rounded-[22px] border border-border bg-background px-6 py-3 text-base font-brand-bold text-text-primary transition-colors hover:bg-card"
+            >
+              Talk to Sales
+            </a>
           </div>
         </div>
       </section>
