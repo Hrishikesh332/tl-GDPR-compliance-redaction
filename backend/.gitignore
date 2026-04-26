@@ -30,13 +30,14 @@ pyrightconfig.json
 
 # Logs and output
 logs/
-output/
 uploads/
 test.png
 *.mp4
 *.avi
 *.mov
 *.mkv
+!output/
+!output/**
 
 # IDE
 .idea/

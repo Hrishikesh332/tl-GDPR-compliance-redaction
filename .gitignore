@@ -23,13 +23,14 @@ htmlcov/
 
 # Backend outputs and runtime
 backend/logs/
-backend/output/
 backend/uploads/
 backend/test.png
 *.mp4
 *.avi
 *.mov
 *.mkv
+!backend/output/
+!backend/output/**
 
 # IDE and editors
 .idea/
