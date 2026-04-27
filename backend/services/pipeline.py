@@ -19,7 +19,9 @@ from services.redactor import redact_video
 from utils.video import (
     extract_keyframes, extract_frames_at_timestamps,
     get_video_metadata, merge_overlapping_ranges, timestamps_from_time_ranges,
+    normalize_export_height,
 )
+from utils.downloads import safe_redacted_mp4_filename
 from utils.storage import (
     get_run_dir,
     save_unique_face_snaps,
@@ -1123,6 +1125,7 @@ def run_redaction(
     detect_every_n=DEFAULT_DETECT_EVERY_N,
     detect_every_seconds=None,
     use_temporal_optimization=True,
+    output_height=720,
     progress_callback=None,
 ):
     job = get_job(job_id)
@@ -1133,9 +1136,10 @@ def run_redaction(
 
     video_path = job["video_path"]
     video_id = job.get("twelvelabs_video_id")
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    normalized_output_height = normalize_export_height(output_height)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    output_path = os.path.join(OUTPUT_DIR, f"redacted_{job_id}_{run_id}.mp4")
+    output_path = os.path.join(OUTPUT_DIR, f"redacted_{job_id}_{run_id}_{normalized_output_height}p.mp4")
 
     temporal_ranges = []
 
@@ -1209,10 +1213,15 @@ def run_redaction(
         detect_every_seconds=detect_every_seconds,
         temporal_ranges=temporal_ranges if temporal_ranges else None,
         custom_regions=custom_regions or [],
+        output_height=normalized_output_height,
         progress_callback=progress_callback,
     )
 
-    result["download_url"] = f"/api/download/{os.path.basename(output_path)}"
+    download_filename = safe_redacted_mp4_filename(os.path.basename(output_path))
+    result["download_url"] = f"/api/download/{download_filename}"
+    result["download_filename"] = download_filename
+    result["mime_type"] = "video/mp4"
+    result["export_quality"] = f"{normalized_output_height}p"
     result["entity_ids_used"] = entity_ids or []
     result["temporal_ranges_from_entity_search"] = len(temporal_ranges)
     return result

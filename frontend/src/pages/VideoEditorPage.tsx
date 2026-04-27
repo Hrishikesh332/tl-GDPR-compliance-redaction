@@ -438,10 +438,17 @@ export type TrackingRegion = {
 }
 
 type RedactionStyle = 'blur' | 'black'
+type ExportQuality = 480 | 720 | 1080
 
 const REDACTION_STYLE_OPTIONS: Array<{ value: RedactionStyle; label: string }> = [
   { value: 'blur', label: 'Blur' },
   { value: 'black', label: 'Mask' },
+]
+
+const EXPORT_QUALITY_OPTIONS: Array<{ value: ExportQuality; label: string }> = [
+  { value: 480, label: '480p' },
+  { value: 720, label: '720p' },
+  { value: 1080, label: '1080p' },
 ]
 
 type TrackingPreviewSample = {
@@ -495,6 +502,14 @@ const ENTITY_SEARCH_LANE_BACKGROUND = 'linear-gradient(90deg, rgba(0, 220, 130, 
 const ENTITY_SEARCH_LANE_OVERLAY = 'linear-gradient(180deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0) 58%, rgba(0,220,130,0.02) 100%)'
 const ENTITY_SEARCH_LANE_BASELINE = 'rgba(0, 220, 130, 0.18)'
 const ENTITY_SEARCH_LANE_BAR_BASE = 'rgba(0, 220, 130, 0.28)'
+// Highlight peak bars (where the entity/query match is strongest) in red so
+// the most crucial moments stand out from the rest of the green lane.
+const ENTITY_SEARCH_LANE_PEAK_COLOR = '#ef4444'
+const ENTITY_SEARCH_LANE_PEAK_BAR_BASE = 'rgba(239, 68, 68, 0.32)'
+// Bars within this fraction of the lane's max value are treated as peaks and
+// turn red. Tuned so a proper cluster of the strongest matches stands out,
+// not just the single tallest bar.
+const ENTITY_SEARCH_LANE_PEAK_THRESHOLD = 0.65
 const ENTITY_SEARCH_LANE_SEGMENT_ACTIVE = 'rgba(0, 220, 130, 0.16)'
 const ENTITY_SEARCH_LANE_SEGMENT_RING = 'rgba(0, 220, 130, 0.28)'
 const ENTITY_SEARCH_LANE_EDGE_LEFT = 'rgba(0, 220, 130, 0.55)'
@@ -716,13 +731,31 @@ function normalizeObjectClass(value?: string | null): string | null {
   return normalized || null
 }
 
+function ensureMp4Filename(filename?: string | null): string {
+  const basename = (filename || '').trim().split(/[\\/]/).pop() || 'redacted-video.mp4'
+  const sanitized = basename.replace(/[^\w.-]+/g, '_') || 'redacted-video.mp4'
+  return /\.mp4$/i.test(sanitized) ? sanitized : `${sanitized}.mp4`
+}
+
+function filenameFromContentDisposition(header: string | null): string | null {
+  if (!header) return null
+  const utfMatch = header.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utfMatch?.[1]) {
+    try {
+      return decodeURIComponent(utfMatch[1].replace(/"/g, ''))
+    } catch {
+      return utfMatch[1].replace(/"/g, '')
+    }
+  }
+  const match = header.match(/filename="?([^";]+)"?/i)
+  return match?.[1] || null
+}
+
 function clickDownloadLink(url: string, filename?: string) {
   if (typeof document === 'undefined' || !url) return
   const link = document.createElement('a')
   link.href = url
-  if (filename) {
-    link.download = filename
-  }
+  link.download = ensureMp4Filename(filename)
   link.rel = 'noopener'
   link.style.display = 'none'
   document.body.appendChild(link)
@@ -743,15 +776,29 @@ async function triggerFileDownload(url: string, filename?: string) {
       throw new Error(`Download failed (${response.status})`)
     }
 
+    const responseFilename = filenameFromContentDisposition(response.headers.get('Content-Disposition'))
+    const resolvedFilename = ensureMp4Filename(filename || responseFilename)
     const blob = await response.blob()
-    objectUrl = window.URL.createObjectURL(blob)
-    clickDownloadLink(objectUrl, filename)
+    const responseType = response.headers.get('Content-Type') || blob.type
+    if (blob.size <= 0) {
+      throw new Error('Download returned an empty MP4')
+    }
+    if (!/video\/mp4/i.test(responseType)) {
+      throw new Error('Download did not return an MP4 file')
+    }
+    const mp4Blob = blob.type === 'video/mp4' ? blob : new Blob([blob], { type: 'video/mp4' })
+    objectUrl = window.URL.createObjectURL(mp4Blob)
+    clickDownloadLink(objectUrl, resolvedFilename)
   } catch (error) {
-    // Fall back to direct navigation if the blob fetch is blocked by the browser.
-    clickDownloadLink(url, filename)
-    if (error instanceof Error && /Download failed/i.test(error.message)) {
+    if (error instanceof Error && (
+      /Download failed/i.test(error.message) ||
+      /empty MP4/i.test(error.message) ||
+      /did not return an MP4/i.test(error.message)
+    )) {
       throw error
     }
+    // Fall back to direct navigation if the browser blocks the blob fetch.
+    clickDownloadLink(url, ensureMp4Filename(filename))
   } finally {
     if (objectUrl) {
       window.setTimeout(() => window.URL.revokeObjectURL(objectUrl as string), 1000)
@@ -1677,8 +1724,7 @@ export default function VideoEditorPage() {
   const exportMenuRef = useRef<HTMLDivElement>(null)
   const [exportRedactLoading, setExportRedactLoading] = useState(false)
   const [exportRedactError, setExportRedactError] = useState<string | null>(null)
-  const [exportRedactDownloadUrl, setExportRedactDownloadUrl] = useState<string | null>(null)
-  const [exportRedactFilename, setExportRedactFilename] = useState('redacted-video.mp4')
+  const [exportQuality, setExportQuality] = useState<ExportQuality>(720)
   const [exportRedactProgress, setExportRedactProgress] = useState<{ percent: number; message: string } | null>(null)
   const [trackingPreviewByRegion, setTrackingPreviewByRegion] = useState<Record<string, TrackingPreviewSample[]>>({})
   const [trackingPreviewLoading, setTrackingPreviewLoading] = useState(false)
@@ -1810,8 +1856,6 @@ export default function VideoEditorPage() {
     setLiveRedactionSeekPending(false)
     setLiveRedactionError(null)
     setExportRedactError(null)
-    setExportRedactDownloadUrl(null)
-    setExportRedactFilename('redacted-video.mp4')
     liveRedactionPendingTimeRef.current = null
     liveRedactionRequestIdRef.current = 0
     liveRedactionLastResolvedTimeRef.current = null
@@ -2923,19 +2967,18 @@ export default function VideoEditorPage() {
 
   const exportRedacted = useCallback(async () => {
     setExportRedactError(null)
-    setExportRedactDownloadUrl(null)
-    setExportRedactFilename('redacted-video.mp4')
     setExportRedactLoading(true)
     setExportRedactProgress({ percent: 0, message: 'Starting...' })
     try {
       const jobId = await resolveRedactionJobId()
-      const shouldUseTemporalOptimization = selectedFacePersonIds.length > 0
       const body: any = {
         job_id: jobId,
-        detect_every_n: 5,
-        use_temporal_optimization: shouldUseTemporalOptimization,
+        detect_every_n: 3,
+        use_temporal_optimization: false,
         blur_strength: blurIntensity,
         redaction_style: redactionStyle,
+        export_quality: `${exportQuality}p`,
+        output_height: exportQuality,
       }
       const customRegions = buildCustomRegionPayload(trackingRegions)
       if (customRegions.length > 0) {
@@ -2972,23 +3015,21 @@ export default function VideoEditorPage() {
         if (!pollRes.ok) throw new Error('Failed to check render status')
         const poll = (await pollRes.json()) as {
           status: string; percent?: number; message?: string; error?: string
-          result?: { download_url?: string; output_path?: string }
+          result?: { download_url?: string; output_path?: string; download_filename?: string; download_ready?: boolean }
         }
         setExportRedactProgress({ percent: poll.percent ?? 0, message: poll.message ?? 'Rendering...' })
 
         if (poll.status === 'completed') {
           resolved = true
           const result = poll.result
-          let resolvedDownloadUrl: string | null = null
           let resolvedFilename = 'redacted-video.mp4'
-          if (result?.download_url) {
-            resolvedDownloadUrl = result.download_url.startsWith('http') ? result.download_url : `${API_BASE}${result.download_url}`
-            setExportRedactDownloadUrl(resolvedDownloadUrl)
+          if (!result?.download_url || result.download_ready === false) {
+            throw new Error('Redaction completed but the MP4 is not ready for download')
           }
-          if (result?.output_path) {
-            resolvedFilename = result.output_path.split('/').pop() || 'redacted-video.mp4'
-            setExportRedactFilename(resolvedFilename)
-          }
+          const resolvedDownloadUrl = result.download_url.startsWith('http') ? result.download_url : `${API_BASE}${result.download_url}`
+          resolvedFilename = ensureMp4Filename(
+            result?.download_filename || (result?.output_path ? result.output_path.split('/').pop() : null),
+          )
           setExportRedactProgress({ percent: 100, message: 'Done!' })
           if (resolvedDownloadUrl) {
             await triggerFileDownload(resolvedDownloadUrl, resolvedFilename)
@@ -3004,18 +3045,7 @@ export default function VideoEditorPage() {
       setExportRedactLoading(false)
       setTimeout(() => setExportRedactProgress(null), 3000)
     }
-  }, [blurIntensity, buildCustomRegionPayload, hasRunDetection, redactionStyle, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses, trackingRegions])
-
-  const downloadExportedVideo = useCallback(async () => {
-    if (!exportRedactDownloadUrl) return
-    setExportRedactError(null)
-    try {
-      await triggerFileDownload(exportRedactDownloadUrl, exportRedactFilename)
-      setExportMenuOpen(false)
-    } catch (e) {
-      setExportRedactError(e instanceof Error ? e.message : 'Download failed')
-    }
-  }, [exportRedactDownloadUrl, exportRedactFilename])
+  }, [blurIntensity, buildCustomRegionPayload, exportQuality, hasRunDetection, redactionStyle, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses, trackingRegions])
 
   useEffect(() => {
     if (!liveRedactionPreviewActive || !effectiveStreamUrl) {
@@ -3504,10 +3534,16 @@ export default function VideoEditorPage() {
   const searchLaneBars = useMemo(() => {
     if (!searchWaveformData.length) return []
     const barCount = Math.min(144, Math.max(72, Math.floor(Math.max(duration, 12) * 1.8)))
-    return buildTimelineBarSeries(searchWaveformData, barCount).map((value, index) => ({
+    const series = buildTimelineBarSeries(searchWaveformData, barCount)
+    // Use the absolute max so a single peak still marks just that bar; the
+    // floor avoids flagging bars in lanes that have no real signal.
+    const maxValue = series.reduce((acc, value) => Math.max(acc, value), 0)
+    const peakCutoff = maxValue > 0.05 ? maxValue * ENTITY_SEARCH_LANE_PEAK_THRESHOLD : Infinity
+    return series.map((value, index) => ({
       value,
       x: (index / Math.max(1, barCount)) * 1200,
       width: Math.max(4, (1200 / Math.max(1, barCount)) - 1.6),
+      isPeak: value >= peakCutoff,
     }))
   }, [duration, searchWaveformData])
   const activeSearchClipIndex = useMemo(
@@ -4193,10 +4229,34 @@ export default function VideoEditorPage() {
                 <IconChevronDown className={`w-4 h-4 transition-transform ${exportMenuOpen ? 'rotate-180' : ''}`} />
               </button>
               {exportMenuOpen && (
-                <div className="absolute right-0 top-full mt-1 py-1 min-w-[10rem] rounded-lg border border-border bg-surface shadow-lg z-50">
+                <div className="absolute right-0 top-full mt-1 py-1 min-w-[14rem] rounded-lg border border-border bg-surface shadow-lg z-50">
                   {exportRedactError && (
                     <p className="px-3 py-2 text-xs text-error border-b border-border">{exportRedactError}</p>
                   )}
+                  <div className="px-3 py-2 border-b border-border space-y-2">
+                    <div className="text-[11px] font-medium uppercase tracking-wider text-text-tertiary">Quality</div>
+                    <div className="grid grid-cols-3 gap-1">
+                      {EXPORT_QUALITY_OPTIONS.map((option) => {
+                        const active = exportQuality === option.value
+                        return (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setExportQuality(option.value)}
+                            disabled={exportRedactLoading}
+                            aria-pressed={active}
+                            className={`h-7 rounded-md border text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                              active
+                                ? 'border-accent bg-accent text-background'
+                                : 'border-border text-text-secondary hover:text-text-primary hover:bg-card'
+                            }`}
+                          >
+                            {option.label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
                   <button
                     type="button"
                     className="w-full px-3 py-2 text-left text-sm text-text-primary hover:bg-card transition-colors flex items-center gap-2 border-b border-border whitespace-nowrap disabled:opacity-60 disabled:cursor-not-allowed"
@@ -4204,7 +4264,7 @@ export default function VideoEditorPage() {
                     disabled={exportRedactLoading}
                   >
                     <IconDownload className="w-4 h-4" />
-                    {exportRedactLoading ? 'Rendering...' : 'Download Redacted'}
+                    {exportRedactLoading ? 'Rendering...' : 'Download Redacted Video'}
                   </button>
                   {exportRedactLoading && exportRedactProgress && (
                     <div className="px-3 py-2 border-b border-border space-y-1">
@@ -4219,16 +4279,6 @@ export default function VideoEditorPage() {
                         />
                       </div>
                     </div>
-                  )}
-                  {exportRedactDownloadUrl && (
-                    <button
-                      type="button"
-                      className="w-full px-3 py-2 text-left text-sm text-accent hover:bg-card transition-colors flex items-center gap-2 border-b border-border whitespace-nowrap"
-                      onClick={() => { void downloadExportedVideo() }}
-                    >
-                      <IconDownload className="w-4 h-4" />
-                      Download redacted video
-                    </button>
                   )}
                 </div>
               )}
@@ -4655,7 +4705,7 @@ export default function VideoEditorPage() {
                                       width={bar.width.toFixed(2)}
                                       height={barHeight.toFixed(2)}
                                       rx="1.8"
-                                      fill={ENTITY_SEARCH_LANE_BAR_BASE}
+                                      fill={bar.isPeak ? ENTITY_SEARCH_LANE_PEAK_BAR_BASE : ENTITY_SEARCH_LANE_BAR_BASE}
                                     />
                                   )
                                 })}
@@ -4678,7 +4728,7 @@ export default function VideoEditorPage() {
                                       width={bar.width.toFixed(2)}
                                       height={barHeight.toFixed(2)}
                                       rx="1.8"
-                                      fill={ENTITY_SEARCH_LANE_COLOR}
+                                      fill={bar.isPeak ? ENTITY_SEARCH_LANE_PEAK_COLOR : ENTITY_SEARCH_LANE_COLOR}
                                     />
                                   )
                                 })}

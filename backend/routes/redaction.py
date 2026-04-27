@@ -8,6 +8,7 @@ from flask import Blueprint, request, jsonify
 from services.detection import ObjectDetectionUnavailable
 from services.face_identity import ensure_face_identity
 from services.pipeline import run_redaction, preview_redaction_tracks, get_job, get_enriched_faces
+from utils.video import EXPORT_HEIGHTS, normalize_export_height
 
 logger = logging.getLogger("video_redaction.routes.redaction")
 
@@ -54,6 +55,47 @@ def parse_list_field(data, key, *, split_csv=False):
     return []
 
 
+def parse_bool_field(data, key, default=False):
+    value = data.get(key)
+    if value is None:
+        value = request.form.get(key)
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def parse_output_height(data):
+    raw_value = (
+        data.get("output_height")
+        or data.get("export_height")
+        or data.get("export_quality")
+        or request.form.get("output_height")
+        or request.form.get("export_quality")
+    )
+    if raw_value in (None, ""):
+        return normalize_export_height(None)
+    try:
+        if isinstance(raw_value, str):
+            parsed = int(raw_value.strip().lower().removesuffix("p"))
+        else:
+            parsed = int(raw_value)
+    except (TypeError, ValueError):
+        raise RedactionRequestError("export_quality must be one of 480p, 720p, or 1080p", 400)
+    if parsed not in EXPORT_HEIGHTS:
+        raise RedactionRequestError("export_quality must be one of 480p, 720p, or 1080p", 400)
+    return parsed
+
+
 def build_redaction_request(data):
     job_id = data.get("job_id") or request.form.get("job_id")
     if not job_id:
@@ -93,6 +135,13 @@ def build_redaction_request(data):
             len(face_targets),
             matched_ids,
         )
+        missing_person_ids = sorted(set(person_ids) - set(matched_ids))
+        if missing_person_ids:
+            raise RedactionRequestError(
+                "Some selected faces could not be resolved for redaction.",
+                400,
+                {"missing_person_ids": missing_person_ids},
+            )
 
     object_classes = parse_list_field(data, "object_classes", split_csv=True) or []
     object_classes = [str(item).strip() for item in object_classes if str(item).strip()]
@@ -109,9 +158,9 @@ def build_redaction_request(data):
         redaction_style = "blur"
 
     try:
-        detect_every_n = int(data.get("detect_every_n", request.form.get("detect_every_n", 5)))
+        detect_every_n = int(data.get("detect_every_n", request.form.get("detect_every_n", 3)))
     except (TypeError, ValueError):
-        detect_every_n = 5
+        detect_every_n = 3
 
     detect_every_seconds = data.get("detect_every_seconds")
     if detect_every_seconds is None:
@@ -122,7 +171,8 @@ def build_redaction_request(data):
             except (TypeError, ValueError):
                 detect_every_seconds = None
 
-    use_temporal_optimization = data.get("use_temporal_optimization", True)
+    use_temporal_optimization = parse_bool_field(data, "use_temporal_optimization", default=True)
+    output_height = parse_output_height(data)
     entity_ids = parse_list_field(data, "entity_ids", split_csv=True) or []
     entity_ids = [str(item).strip() for item in entity_ids if str(item).strip()]
     custom_regions = parse_custom_regions(data)
@@ -147,6 +197,7 @@ def build_redaction_request(data):
         "detect_every_n": detect_every_n,
         "detect_every_seconds": detect_every_seconds,
         "use_temporal_optimization": use_temporal_optimization,
+        "output_height": output_height,
     }
 
 
@@ -154,6 +205,14 @@ def serialize_redaction_response(prepared, result):
     return {
         "output_path": result["output_path"],
         "download_url": result["download_url"],
+        "download_filename": result.get("download_filename"),
+        "mime_type": result.get("mime_type", "video/mp4"),
+        "output_size_bytes": result.get("output_size_bytes"),
+        "h264_encoded": result.get("h264_encoded", False),
+        "download_ready": result.get("download_ready", False),
+        "export_quality": result.get("export_quality", f"{prepared.get('output_height', 720)}p"),
+        "width": result.get("width"),
+        "height": result.get("height"),
         "total_frames": result["total_frames"],
         "fps": result["fps"],
         "detection_frames_processed": result.get("detection_frames_processed", 0),
@@ -198,6 +257,7 @@ def run_redaction_job(redaction_job_id, prepared):
             detect_every_n=prepared["detect_every_n"],
             detect_every_seconds=prepared["detect_every_seconds"],
             use_temporal_optimization=prepared["use_temporal_optimization"],
+            output_height=prepared["output_height"],
             progress_callback=progress_callback,
         )
     except ObjectDetectionUnavailable as error:
@@ -266,6 +326,7 @@ def redact():
             detect_every_n=prepared["detect_every_n"],
             detect_every_seconds=prepared["detect_every_seconds"],
             use_temporal_optimization=prepared["use_temporal_optimization"],
+            output_height=prepared["output_height"],
         )
     except ObjectDetectionUnavailable as e:
         return jsonify({"error": str(e)}), 503
