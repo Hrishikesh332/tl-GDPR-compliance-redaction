@@ -661,13 +661,17 @@ def update_auto_redaction_track(
 
             search_anchor = predicted_bbox or last_bbox
             search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+            # Keep the relock bounded to the tracked neighborhood, but allow
+            # the same strict geometry fallback used during initial anchored
+            # localization so deploy/runtime embedding drift does not blank out
+            # a selected-face blur lane.
             relocked_face = localize_known_face_in_search_region(
                 frame,
                 known_face=known_face,
                 search_bbox=expand_bbox(search_anchor, frame_w, frame_h, search_factor),
                 preferred_bbox=search_anchor,
                 tolerance=identity_tolerance if identity_tolerance is not None else 0.55,
-                allow_geometry_fallback=known_face.get("encoding") is None,
+                allow_geometry_fallback=True,
             ) if search_anchor is not None else None
 
             if relocked_face is not None:

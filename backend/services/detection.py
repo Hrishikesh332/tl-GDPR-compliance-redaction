@@ -525,7 +525,9 @@ def localize_known_face_in_search_region(
 ):
     """
     This keeps person-specific blur efficient by only searching a cropped area,
-    while still requiring the selected person's embedding when available.
+    while preferring the selected person's embedding when available. When the
+    embedding model/runtime drifts across environments, a tight anchor can still
+    fall back to strict geometry checks inside the selected search region.
     """
     if frame_bgr is None or known_face is None:
         return None
@@ -668,8 +670,9 @@ def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, toleran
     """Locate specific saved faces in a frame.
 
     Prefers nearby saved appearance boxes as anchors so selected-face blur still
-    works even when embedding-based identity matching is unavailable. Falls back
-    to encoding matches when they are available.
+    works even when embedding-based identity matching is unavailable or drifts
+    between environments. Falls back to broader full-frame identity matching
+    only when an anchored search window cannot re-lock the face.
     """
     if not known_faces:
         return []
@@ -692,13 +695,17 @@ def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, toleran
         anchor_candidate = None
         if anchor_bbox is not None:
             search_expand = known_face_search_expand_factor(anchor_gap)
+            # Keep the face-specific search anchored near the saved appearance.
+            # Even when a stored embedding exists, allow the stricter geometry
+            # fallback in this narrow window so deploy/runtime model drift does
+            # not silently disable person-specific blur.
             anchor_candidate = localize_known_face_in_search_region(
                 frame_bgr,
                 known_face=known_face,
                 search_bbox=expand_bbox(anchor_bbox, frame_w, frame_h, search_expand),
                 preferred_bbox=anchor_bbox,
                 tolerance=tolerance,
-                allow_geometry_fallback=known_face.get("encoding") is None,
+                allow_geometry_fallback=True,
             )
             if anchor_candidate is not None and (
                 anchor_gap is None or anchor_gap <= KNOWN_FACE_STALE_ANCHOR_MAX_GAP_SEC
