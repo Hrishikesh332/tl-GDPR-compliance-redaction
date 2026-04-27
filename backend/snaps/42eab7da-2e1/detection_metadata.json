@@ -2871,10 +2871,51 @@
       "snap_filename": "person_14.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_14.png",
       "name": "person_14",
-      "priority_rank": 0,
-      "tags": [],
+      "priority_rank": 22,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Multiple individuals in a formal setting, some in suits, some in robes, engaged in conversation, part of an official event",
+      "time_ranges": [
+        {
+          "start_sec": 166,
+          "end_sec": 176
+        },
+        {
+          "start_sec": 176,
+          "end_sec": 188
+        },
+        {
+          "start_sec": 188,
+          "end_sec": 199
+        },
+        {
+          "start_sec": 199,
+          "end_sec": 210
+        },
+        {
+          "start_sec": 210,
+          "end_sec": 216
+        },
+        {
+          "start_sec": 216,
+          "end_sec": 221
+        },
+        {
+          "start_sec": 221,
+          "end_sec": 229
+        },
+        {
+          "start_sec": 229,
+          "end_sec": 235
+        },
+        {
+          "start_sec": 235,
+          "end_sec": 243
+        }
+      ]
     },
     {
       "person_id": "person_58",
@@ -4316,10 +4357,19 @@
       "snap_filename": "person_58.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_58.png",
       "name": "person_58",
-      "priority_rank": 1,
-      "tags": [],
+      "priority_rank": 21,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Two men in close-up conversation, one in traditional German dress, the other in a robe, possibly part of a formal or ceremonial event",
+      "time_ranges": [
+        {
+          "start_sec": 153,
+          "end_sec": 166
+        }
+      ]
     },
     {
       "person_id": "person_75",
@@ -5671,10 +5721,19 @@
       "snap_filename": "person_75.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_75.png",
       "name": "person_75",
-      "priority_rank": 2,
-      "tags": [],
+      "priority_rank": 14,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "One man in black robe walking toward another group entering through a doorway, part of a formal legal setting",
+      "time_ranges": [
+        {
+          "start_sec": 124,
+          "end_sec": 131
+        }
+      ]
     },
     {
       "person_id": "person_76",
@@ -7006,10 +7065,19 @@
       "snap_filename": "person_76.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_76.png",
       "name": "person_76",
-      "priority_rank": 3,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 9,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Two men in close-up conversation, one wearing traditional German dress with buttons, the other in a robe over regular clothes",
+      "time_ranges": [
+        {
+          "start_sec": 153,
+          "end_sec": 166
+        }
+      ]
     },
     {
       "person_id": "person_13",
@@ -7911,10 +7979,19 @@
       "snap_filename": "person_13.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_13.png",
       "name": "person_13",
-      "priority_rank": 4,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 2,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Another individual in business attire following the previous person, placing items on a desk and leaving",
+      "time_ranges": [
+        {
+          "start_sec": 41,
+          "end_sec": 48
+        }
+      ]
     },
     {
       "person_id": "person_67",
@@ -8766,10 +8843,23 @@
       "snap_filename": "person_67.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_67.png",
       "name": "person_67",
-      "priority_rank": 5,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 6,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Two men sitting behind a long table with papers and pens, wearing formal clothing, reviewing material",
+      "time_ranges": [
+        {
+          "start_sec": 87,
+          "end_sec": 99
+        },
+        {
+          "start_sec": 99,
+          "end_sec": 107
+        }
+      ]
     },
     {
       "person_id": "person_71",
@@ -9601,10 +9691,19 @@
       "snap_filename": "person_71.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_71.png",
       "name": "person_71",
-      "priority_rank": 6,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 7,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Two men approaching desks near windows, placing bags on chairs, both in formal attire",
+      "time_ranges": [
+        {
+          "start_sec": 62,
+          "end_sec": 80
+        }
+      ]
     },
     {
       "person_id": "person_21",
@@ -10426,10 +10525,19 @@
       "snap_filename": "person_21.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_21.png",
       "name": "person_21",
-      "priority_rank": 7,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 8,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Two men engaged in conversation near a long table with laptops, wearing formal clothing",
+      "time_ranges": [
+        {
+          "start_sec": 138,
+          "end_sec": 144
+        }
+      ]
     },
     {
       "person_id": "person_50",
@@ -11201,10 +11309,19 @@
       "snap_filename": "person_50.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_50.png",
       "name": "person_50",
-      "priority_rank": 8,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 4,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Two men standing side-by-side facing forward, both in formal attire, one adjusting his hair",
+      "time_ranges": [
+        {
+          "start_sec": 107,
+          "end_sec": 112
+        }
+      ]
     },
     {
       "person_id": "person_7",
@@ -11956,10 +12073,19 @@
       "snap_filename": "person_7.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_7.png",
       "name": "person_7",
-      "priority_rank": 9,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 5,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Two men standing back-to-back, both in formal clothing, being photographed by an unseen photographer",
+      "time_ranges": [
+        {
+          "start_sec": 112,
+          "end_sec": 120
+        }
+      ]
     },
     {
       "person_id": "person_87",
@@ -12701,10 +12827,19 @@
       "snap_filename": "person_87.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_87.png",
       "name": "person_87",
-      "priority_rank": 10,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 12,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Two men in close-up conversation, both in formal attire, focused on their exchange despite surrounding movement",
+      "time_ranges": [
+        {
+          "start_sec": 229,
+          "end_sec": 235
+        }
+      ]
     },
     {
       "person_id": "person_1",
@@ -13436,10 +13571,19 @@
       "snap_filename": "person_1.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_1.png",
       "name": "person_1",
-      "priority_rank": 11,
-      "tags": [],
+      "priority_rank": 13,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Two men in the courtroom, both wearing black robes, standing near a table with orange chairs",
+      "time_ranges": [
+        {
+          "start_sec": 121,
+          "end_sec": 124
+        }
+      ]
     },
     {
       "person_id": "person_78",
@@ -14161,10 +14305,19 @@
       "snap_filename": "person_78.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_78.png",
       "name": "person_78",
-      "priority_rank": 12,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 0,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Woman with reddish-brown hair tied back neatly, wearing casual attire, operating video equipment",
+      "time_ranges": [
+        {
+          "start_sec": 210,
+          "end_sec": 221
+        }
+      ]
     },
     {
       "person_id": "person_0",
@@ -14876,10 +15029,19 @@
       "snap_filename": "person_0.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_0.png",
       "name": "person_0",
-      "priority_rank": 13,
-      "tags": [],
+      "priority_rank": 15,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Three men entering the courtroom, two in suits, one in black robe, all part of an official legal or judicial group",
+      "time_ranges": [
+        {
+          "start_sec": 124,
+          "end_sec": 131
+        }
+      ]
     },
     {
       "person_id": "person_2",
@@ -15591,10 +15753,19 @@
       "snap_filename": "person_2.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_2.png",
       "name": "person_2",
-      "priority_rank": 14,
-      "tags": [],
+      "priority_rank": 16,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Woman wearing glasses entering the courtroom from the right-hand side, part of an official legal or judicial setting",
+      "time_ranges": [
+        {
+          "start_sec": 124,
+          "end_sec": 131
+        }
+      ]
     },
     {
       "person_id": "person_6",
@@ -16306,10 +16477,19 @@
       "snap_filename": "person_6.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_6.png",
       "name": "person_6",
-      "priority_rank": 15,
-      "tags": [],
+      "priority_rank": 19,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Two men in formal attire standing near a table, possibly part of a legal or official proceeding",
+      "time_ranges": [
+        {
+          "start_sec": 144,
+          "end_sec": 148
+        }
+      ]
     },
     {
       "person_id": "person_68",
@@ -17021,10 +17201,19 @@
       "snap_filename": "person_68.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_68.png",
       "name": "person_68",
-      "priority_rank": 16,
-      "tags": [],
+      "priority_rank": 20,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "One man adjusting his hair while conversing near a wall backdrop, part of a formal setting",
+      "time_ranges": [
+        {
+          "start_sec": 148,
+          "end_sec": 153
+        }
+      ]
     },
     {
       "person_id": "person_4",
@@ -25141,10 +25330,19 @@
       "snap_filename": "person_62.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_62.png",
       "name": "person_62",
-      "priority_rank": 28,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 3,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Man in formal clothing looking down at a mobile device held in both hands",
+      "time_ranges": [
+        {
+          "start_sec": 48,
+          "end_sec": 62
+        }
+      ]
     },
     {
       "person_id": "person_3",
@@ -27711,10 +27909,19 @@
       "snap_filename": "person_55.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_55.png",
       "name": "person_55",
-      "priority_rank": 32,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 1,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Man in business attire placing items on a desk, then leaving the room",
+      "time_ranges": [
+        {
+          "start_sec": 29,
+          "end_sec": 41
+        }
+      ]
     },
     {
       "person_id": "person_36",
@@ -39146,10 +39353,19 @@
       "snap_filename": "person_82.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_82.png",
       "name": "person_82",
-      "priority_rank": 51,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 10,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Two men in close-up conversation, both in formal attire, engaged in deep discussion",
+      "time_ranges": [
+        {
+          "start_sec": 176,
+          "end_sec": 188
+        }
+      ]
     },
     {
       "person_id": "person_22",
@@ -40841,10 +41057,19 @@
       "snap_filename": "person_77.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_77.png",
       "name": "person_77",
-      "priority_rank": 54,
-      "tags": [],
+      "priority_rank": 18,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Another man adjusting something in his pocket, joining others in the courtroom, part of an official group",
+      "time_ranges": [
+        {
+          "start_sec": 131,
+          "end_sec": 138
+        }
+      ]
     },
     {
       "person_id": "person_25",
@@ -46946,10 +47171,19 @@
       "snap_filename": "person_79.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_79.png",
       "name": "person_79",
-      "priority_rank": 65,
-      "tags": [],
+      "priority_rank": 17,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "One individual walking past the camera in the courtroom, likely part of an official group",
+      "time_ranges": [
+        {
+          "start_sec": 131,
+          "end_sec": 138
+        }
+      ]
     },
     {
       "person_id": "person_86",
@@ -60581,10 +60815,19 @@
       "snap_filename": "person_85.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_85.png",
       "name": "person_85",
-      "priority_rank": 90,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 11,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Two men in close-up conversation, both in formal clothing, maintaining dialogue in a busy environment",
+      "time_ranges": [
+        {
+          "start_sec": 221,
+          "end_sec": 229
+        }
+      ]
     },
     {
       "person_id": "person_91",

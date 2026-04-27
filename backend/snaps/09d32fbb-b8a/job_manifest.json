@@ -12,9 +12,164 @@
     "total_frames": 22061,
     "duration_sec": 882.44
   },
-  "twelvelabs_status": "analysis_failed: headers: {'date': 'Mon, 20 Apr 2026 10:20:56 GMT', 'content-type': 'application/json', 'content-length': '152', 'connection': 'keep-alive', 'content-encoding': 'gzip', 'retry-after': '40899', 'tl-report': 'backend', 'vary': 'Accept-Encoding', 'x-ratelimit-dimensions': 'OutputToken', 'x-ratelimit-outputtoken-limit': '25000', 'x-ratelimit-outputtoken-remaining': '0', 'x-ratelimit-outputtoken-reset': '1776721355', 'x-trace-id': '9ff2161a2794c3243b58009fce5bfbbd'}, status_code: 429, body: {'code': 'too_many_requests', 'message': 'You have exceeded the rate limit (25000token/1day). Please try again later after 2026-04-20T21:42:35Z.'}",
   "local_status": "done",
-  "twelvelabs_people": null,
+  "twelvelabs_people": [
+    {
+      "name": "",
+      "description": "Middle-aged man with graying hair, wearing a dark suit jacket and light-colored collared shirt, standing outside a building speaking into multiple microphones. Appears in the first segment with a static camera view.",
+      "time_ranges": [
+        {
+          "start_sec": 0,
+          "end_sec": 177
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man wearing glasses and a navy-blue suit jacket over a white dress shirt, standing before microphones outdoors against a building facade. Appears in the second segment.",
+      "time_ranges": [
+        {
+          "start_sec": 352,
+          "end_sec": 407
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man wearing glasses, a brown blazer over a lighter-colored sweater and collared shirt, speaking outdoors. Background shows another figure walking from right to left.",
+      "time_ranges": [
+        {
+          "start_sec": 407,
+          "end_sec": 529
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Gray-haired man in a black coat, standing near another man in a grey hoodie. Visible in the background during the third segment, standing close together.",
+      "time_ranges": [
+        {
+          "start_sec": 458,
+          "end_sec": 529
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with dark hair and wearing a grey hoodie, standing near a gray-haired man in a black coat. Visible in the background during the third segment.",
+      "time_ranges": [
+        {
+          "start_sec": 458,
+          "end_sec": 529
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Bald man wearing a dark green jacket over a plaid shirt, speaking into off-camera microphones outdoors against a beige tent-like structure. Camera remains focused on him.",
+      "time_ranges": [
+        {
+          "start_sec": 705,
+          "end_sec": 828
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Several figures walking near the entrance of a modern building with glass doors and windows, some carrying bags or briefcases. Visible during the final segments.",
+      "time_ranges": [
+        {
+          "start_sec": 835,
+          "end_sec": 854
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "person_17",
+      "description": "Middle-aged man with graying hair, wearing a dark suit jacket and light-colored collared shirt. Appears in the first segment and later in the final interview segment. Identified by name in dialogue.",
+      "time_ranges": [
+        {
+          "start_sec": 0,
+          "end_sec": 177
+        },
+        {
+          "start_sec": 733,
+          "end_sec": 776
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "person_8",
+      "description": "Young man with dark hair, wearing a suit. Appears in the final segment, described as having delivered a flawless performance during the trial. Identified by name in dialogue.",
+      "time_ranges": [
+        {
+          "start_sec": 816,
+          "end_sec": 823
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": false,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "person_2",
+      "description": "Male judge, likely in formal attire, delivering the verdict. Appears in the first segment, speaking with authority. Identified by role and context.",
+      "time_ranges": [
+        {
+          "start_sec": 0,
+          "end_sec": 177
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    }
+  ],
   "twelvelabs_objects": null,
-  "twelvelabs_scene_summary": null
+  "twelvelabs_scene_summary": null,
+  "twelvelabs_status": null
 }

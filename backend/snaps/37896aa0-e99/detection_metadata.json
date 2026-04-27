@@ -3671,10 +3671,19 @@
       "snap_filename": "person_5.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_5.png",
       "name": "person_5",
-      "priority_rank": 0,
-      "tags": [],
+      "priority_rank": 5,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Judge standing near elevated bench, wearing judicial robes, observing proceedings, expression neutral",
+      "time_ranges": [
+        {
+          "start_sec": 281,
+          "end_sec": 305
+        }
+      ]
     },
     {
       "person_id": "person_52",
@@ -6446,10 +6455,17 @@
       "snap_filename": "person_52.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_52.png",
       "name": "person_52",
-      "priority_rank": 1,
+      "priority_rank": 2,
       "tags": [],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Woman with shoulder-length light brown hair, wearing a black jacket over a blue shirt, speaking into a purple microphone, standing against a blurred office backdrop",
+      "time_ranges": [
+        {
+          "start_sec": 504,
+          "end_sec": 665
+        }
+      ]
     },
     {
       "person_id": "person_2",
@@ -8281,10 +8297,17 @@
       "snap_filename": "person_2.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_2.png",
       "name": "person_2",
-      "priority_rank": 2,
+      "priority_rank": 11,
       "tags": [],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Woman at desk reviewing paperwork, wearing professional attire, focused expression, working alone",
+      "time_ranges": [
+        {
+          "start_sec": 82,
+          "end_sec": 120
+        }
+      ]
     },
     {
       "person_id": "person_15",
@@ -9996,10 +10019,19 @@
       "snap_filename": "person_15.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_15.png",
       "name": "person_15",
-      "priority_rank": 3,
-      "tags": [],
+      "priority_rank": 6,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Female lawyer in black robe, standing behind defendant, engaged in conversation, attentive posture",
+      "time_ranges": [
+        {
+          "start_sec": 336,
+          "end_sec": 377
+        }
+      ]
     },
     {
       "person_id": "person_36",
@@ -11391,10 +11423,19 @@
       "snap_filename": "person_36.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_36.png",
       "name": "person_36",
-      "priority_rank": 4,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 0,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Man in blue pants and black shoes, wearing ankle cuffs, seated at a table with hands resting on lap, wearing an electronic device on right ear, looking straight ahead",
+      "time_ranges": [
+        {
+          "start_sec": 351,
+          "end_sec": 408
+        }
+      ]
     },
     {
       "person_id": "person_8",
@@ -12736,10 +12777,19 @@
       "snap_filename": "person_8.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_8.png",
       "name": "person_8",
-      "priority_rank": 5,
-      "tags": [],
+      "priority_rank": 7,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Male lawyer in black robe, standing beside female lawyer, facing off-camera, engaged in legal discussion",
+      "time_ranges": [
+        {
+          "start_sec": 336,
+          "end_sec": 377
+        }
+      ]
     },
     {
       "person_id": "person_17",
@@ -13911,10 +13961,17 @@
       "snap_filename": "person_17.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_17.png",
       "name": "person_17",
-      "priority_rank": 6,
+      "priority_rank": 13,
       "tags": [],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Two suited gentlemen discussing near the exit, one departs after conversation, both wearing formal business attire",
+      "time_ranges": [
+        {
+          "start_sec": 142,
+          "end_sec": 168
+        }
+      ]
     },
     {
       "person_id": "person_21",
@@ -14966,10 +15023,17 @@
       "snap_filename": "person_21.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_21.png",
       "name": "person_21",
-      "priority_rank": 7,
+      "priority_rank": 14,
       "tags": [],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Four men gathered closely in conversation, wearing business attire, exchanging words before parting",
+      "time_ranges": [
+        {
+          "start_sec": 94,
+          "end_sec": 113
+        }
+      ]
     },
     {
       "person_id": "person_10",
@@ -15901,10 +15965,19 @@
       "snap_filename": "person_10.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_10.png",
       "name": "person_10",
-      "priority_rank": 8,
-      "tags": [],
+      "priority_rank": 1,
+      "tags": [
+        "Anonymized"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Handcuffed man being escorted by police officers, wearing a dark-colored suit, facial expression neutral, walking with head down",
+      "time_ranges": [
+        {
+          "start_sec": 197,
+          "end_sec": 215
+        }
+      ]
     },
     {
       "person_id": "person_3",
@@ -16735,11 +16808,18 @@
       "appearance_count": 30,
       "snap_filename": "person_3.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_3.png",
-      "name": "person_3",
-      "priority_rank": 9,
+      "name": "person_64",
+      "priority_rank": 3,
       "tags": [],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Female interviewee with professional demeanor, wearing a formal outfit, speaking directly to camera with engaged expression",
+      "time_ranges": [
+        {
+          "start_sec": 448,
+          "end_sec": 504
+        }
+      ]
     },
     {
       "person_id": "person_35",
@@ -17551,10 +17631,19 @@
       "snap_filename": "person_35.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_35.png",
       "name": "person_35",
-      "priority_rank": 10,
-      "tags": [],
+      "priority_rank": 4,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Man in suit escorting handcuffed defendant toward judge's bench, flanked by officers, focused on task",
+      "time_ranges": [
+        {
+          "start_sec": 244,
+          "end_sec": 257
+        }
+      ]
     },
     {
       "person_id": "person_1",
@@ -18356,10 +18445,17 @@
       "snap_filename": "person_1.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_1.png",
       "name": "person_1",
-      "priority_rank": 11,
+      "priority_rank": 10,
       "tags": [],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Older gentleman interacting with three computers at a table, wearing casual clothing, using keyboard and mouse",
+      "time_ranges": [
+        {
+          "start_sec": 60,
+          "end_sec": 77
+        }
+      ]
     },
     {
       "person_id": "person_24",
@@ -19144,7 +19240,14 @@
       "priority_rank": 12,
       "tags": [],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Individual seated at workstation, typing notes on paper laid flat on keyboard, wearing casual clothes",
+      "time_ranges": [
+        {
+          "start_sec": 133,
+          "end_sec": 142
+        }
+      ]
     },
     {
       "person_id": "person_37",
@@ -19916,10 +20019,17 @@
       "snap_filename": "person_37.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_37.png",
       "name": "person_37",
-      "priority_rank": 13,
+      "priority_rank": 15,
       "tags": [],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Man with glasses and dark hair, standing to the left of a table, gesturing while speaking, holding papers",
+      "time_ranges": [
+        {
+          "start_sec": 179,
+          "end_sec": 190
+        }
+      ]
     },
     {
       "person_id": "person_0",
@@ -20631,10 +20741,17 @@
       "snap_filename": "person_0.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_0.png",
       "name": "person_0",
-      "priority_rank": 14,
+      "priority_rank": 16,
       "tags": [],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "description": "Third individual sitting at a desk behind the man with glasses, seemingly working on a computer, face not clearly visible",
+      "time_ranges": [
+        {
+          "start_sec": 179,
+          "end_sec": 190
+        }
+      ]
     },
     {
       "person_id": "person_4",
@@ -22061,10 +22178,19 @@
       "snap_filename": "person_22.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_22.png",
       "name": "person_22",
-      "priority_rank": 16,
-      "tags": [],
+      "priority_rank": 8,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Security guard watching over audience, wearing uniform, standing near the back of the courtroom",
+      "time_ranges": [
+        {
+          "start_sec": 322,
+          "end_sec": 336
+        }
+      ]
     },
     {
       "person_id": "person_11",
@@ -31751,10 +31877,19 @@
       "snap_filename": "person_58.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_58.png",
       "name": "person_58",
-      "priority_rank": 32,
-      "tags": [],
+      "priority_rank": 17,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Police personnel remaining inside courtroom after proceedings, observing departing crowd, wearing standard uniforms",
+      "time_ranges": [
+        {
+          "start_sec": 435,
+          "end_sec": 445
+        }
+      ]
     },
     {
       "person_id": "person_26",
@@ -32316,10 +32451,19 @@
       "snap_filename": "person_26.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/37896aa0-e99/faces/person_26.png",
       "name": "person_26",
-      "priority_rank": 33,
-      "tags": [],
+      "priority_rank": 9,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Police officer holding a piece of paper, standing near the exit, observing the scene",
+      "time_ranges": [
+        {
+          "start_sec": 197,
+          "end_sec": 215
+        }
+      ]
     },
     {
       "person_id": "person_60",

@@ -132,9 +132,12 @@ def apply_pixelate(frame, bbox, pixel_size=12):
         return frame
     roi = frame[y1:y2, x1:x2]
     roi_h, roi_w = roi.shape[:2]
-    down_w = max(1, roi_w // max(1, pixel_size))
-    down_h = max(1, roi_h // max(1, pixel_size))
-    reduced = cv2.resize(roi, (down_w, down_h), interpolation=cv2.INTER_LINEAR)
+    block_size = max(6, int(pixel_size))
+    down_w = max(1, roi_w // block_size)
+    down_h = max(1, roi_h // block_size)
+    blur_kernel = max(3, (block_size // 2) | 1)
+    distorted = cv2.GaussianBlur(roi, (blur_kernel, blur_kernel), 0)
+    reduced = cv2.resize(distorted, (down_w, down_h), interpolation=cv2.INTER_LINEAR)
     frame[y1:y2, x1:x2] = cv2.resize(reduced, (roi_w, roi_h), interpolation=cv2.INTER_NEAREST)
     return frame
 
@@ -155,5 +158,5 @@ def apply_redaction(frame, bbox, mode="blur", blur_strength=51):
     if mode_normalized in {"solid", "black", "mask"}:
       return apply_black_fill(frame, bbox)
     if mode_normalized == "pixelate":
-      return apply_pixelate(frame, bbox, pixel_size=max(6, blur_strength // 6))
+      return apply_pixelate(frame, bbox, pixel_size=max(10, int(blur_strength) // 3))
     return apply_blur(frame, bbox, blur_strength)

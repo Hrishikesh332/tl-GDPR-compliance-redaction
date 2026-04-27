@@ -12,9 +12,391 @@
     "total_frames": 9125,
     "duration_sec": 365.0
   },
-  "twelvelabs_status": "analysis_failed: headers: {'date': 'Mon, 20 Apr 2026 10:24:50 GMT', 'content-type': 'application/json', 'content-length': '152', 'connection': 'keep-alive', 'content-encoding': 'gzip', 'retry-after': '40665', 'tl-report': 'backend', 'vary': 'Accept-Encoding', 'x-ratelimit-dimensions': 'OutputToken', 'x-ratelimit-outputtoken-limit': '25000', 'x-ratelimit-outputtoken-remaining': '0', 'x-ratelimit-outputtoken-reset': '1776721355', 'x-trace-id': '1afd0c8c3343bf051b90b9458ac768b0'}, status_code: 429, body: {'code': 'too_many_requests', 'message': 'You have exceeded the rate limit (25000token/1day). Please try again later after 2026-04-20T21:42:35Z.'}",
   "local_status": "done",
-  "twelvelabs_people": null,
+  "twelvelabs_people": [
+    {
+      "name": "",
+      "description": "Woman with reddish-brown hair tied back neatly, wearing casual attire, operating video equipment",
+      "time_ranges": [
+        {
+          "start_sec": 210,
+          "end_sec": 221
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man in business attire placing items on a desk, then leaving the room",
+      "time_ranges": [
+        {
+          "start_sec": 29,
+          "end_sec": 41
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Another individual in business attire following the previous person, placing items on a desk and leaving",
+      "time_ranges": [
+        {
+          "start_sec": 41,
+          "end_sec": 48
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man in formal clothing looking down at a mobile device held in both hands",
+      "time_ranges": [
+        {
+          "start_sec": 48,
+          "end_sec": 62
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men standing side-by-side facing forward, both in formal attire, one adjusting his hair",
+      "time_ranges": [
+        {
+          "start_sec": 107,
+          "end_sec": 112
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men standing back-to-back, both in formal clothing, being photographed by an unseen photographer",
+      "time_ranges": [
+        {
+          "start_sec": 112,
+          "end_sec": 120
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men sitting behind a long table with papers and pens, wearing formal clothing, reviewing material",
+      "time_ranges": [
+        {
+          "start_sec": 87,
+          "end_sec": 99
+        },
+        {
+          "start_sec": 99,
+          "end_sec": 107
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men approaching desks near windows, placing bags on chairs, both in formal attire",
+      "time_ranges": [
+        {
+          "start_sec": 62,
+          "end_sec": 80
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men engaged in conversation near a long table with laptops, wearing formal clothing",
+      "time_ranges": [
+        {
+          "start_sec": 138,
+          "end_sec": 144
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men in close-up conversation, one wearing traditional German dress with buttons, the other in a robe over regular clothes",
+      "time_ranges": [
+        {
+          "start_sec": 153,
+          "end_sec": 166
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men in close-up conversation, both in formal attire, engaged in deep discussion",
+      "time_ranges": [
+        {
+          "start_sec": 176,
+          "end_sec": 188
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men in close-up conversation, both in formal clothing, maintaining dialogue in a busy environment",
+      "time_ranges": [
+        {
+          "start_sec": 221,
+          "end_sec": 229
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men in close-up conversation, both in formal attire, focused on their exchange despite surrounding movement",
+      "time_ranges": [
+        {
+          "start_sec": 229,
+          "end_sec": 235
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men in the courtroom, both wearing black robes, standing near a table with orange chairs",
+      "time_ranges": [
+        {
+          "start_sec": 121,
+          "end_sec": 124
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "One man in black robe walking toward another group entering through a doorway, part of a formal legal setting",
+      "time_ranges": [
+        {
+          "start_sec": 124,
+          "end_sec": 131
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Three men entering the courtroom, two in suits, one in black robe, all part of an official legal or judicial group",
+      "time_ranges": [
+        {
+          "start_sec": 124,
+          "end_sec": 131
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman wearing glasses entering the courtroom from the right-hand side, part of an official legal or judicial setting",
+      "time_ranges": [
+        {
+          "start_sec": 124,
+          "end_sec": 131
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "One individual walking past the camera in the courtroom, likely part of an official group",
+      "time_ranges": [
+        {
+          "start_sec": 131,
+          "end_sec": 138
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Another man adjusting something in his pocket, joining others in the courtroom, part of an official group",
+      "time_ranges": [
+        {
+          "start_sec": 131,
+          "end_sec": 138
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men in formal attire standing near a table, possibly part of a legal or official proceeding",
+      "time_ranges": [
+        {
+          "start_sec": 144,
+          "end_sec": 148
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "One man adjusting his hair while conversing near a wall backdrop, part of a formal setting",
+      "time_ranges": [
+        {
+          "start_sec": 148,
+          "end_sec": 153
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Two men in close-up conversation, one in traditional German dress, the other in a robe, possibly part of a formal or ceremonial event",
+      "time_ranges": [
+        {
+          "start_sec": 153,
+          "end_sec": 166
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Multiple individuals in a formal setting, some in suits, some in robes, engaged in conversation, part of an official event",
+      "time_ranges": [
+        {
+          "start_sec": 166,
+          "end_sec": 176
+        },
+        {
+          "start_sec": 176,
+          "end_sec": 188
+        },
+        {
+          "start_sec": 188,
+          "end_sec": 199
+        },
+        {
+          "start_sec": 199,
+          "end_sec": 210
+        },
+        {
+          "start_sec": 210,
+          "end_sec": 216
+        },
+        {
+          "start_sec": 216,
+          "end_sec": 221
+        },
+        {
+          "start_sec": 221,
+          "end_sec": 229
+        },
+        {
+          "start_sec": 229,
+          "end_sec": 235
+        },
+        {
+          "start_sec": 235,
+          "end_sec": 243
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    }
+  ],
   "twelvelabs_objects": null,
-  "twelvelabs_scene_summary": null
+  "twelvelabs_scene_summary": null,
+  "twelvelabs_status": null
 }

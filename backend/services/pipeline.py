@@ -946,6 +946,43 @@ def normalize_face_tags(desc_entry):
     return tags, should_anonymize and not is_official, is_official
 
 
+def faces_need_description_refresh(faces, people_desc):
+    if not isinstance(people_desc, list) or not faces:
+        return False
+
+    missing_fields = any(
+        "priority_rank" not in face or
+        "should_anonymize" not in face or
+        "is_official" not in face or
+        "tags" not in face
+        for face in faces
+        if isinstance(face, dict)
+    )
+    if missing_fields:
+        return True
+
+    has_people_privacy_annotations = any(
+        isinstance(desc_entry, dict) and (
+            bool(desc_entry.get("should_anonymize")) or
+            bool(desc_entry.get("is_official")) or
+            bool(desc_entry.get("tags"))
+        )
+        for desc_entry in people_desc
+    )
+    if not has_people_privacy_annotations:
+        return False
+
+    has_face_privacy_annotations = any(
+        isinstance(face, dict) and (
+            bool(face.get("should_anonymize")) or
+            bool(face.get("is_official")) or
+            any(str(tag or "").strip().lower() in ("anonymized", "official") for tag in face.get("tags", []) or [])
+        )
+        for face in faces
+    )
+    return not has_face_privacy_annotations
+
+
 def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
     faces = unique_faces
     if faces is None:
@@ -1033,15 +1070,7 @@ def get_enriched_faces(job_id):
                 job["twelvelabs_people"] = people_desc
                 persist_job_manifest(job_id, job=job)
         if faces and isinstance(people_desc, list):
-            needs_refresh = any(
-                "priority_rank" not in face or
-                "should_anonymize" not in face or
-                "is_official" not in face or
-                "tags" not in face
-                for face in faces
-                if isinstance(face, dict)
-            )
-            if needs_refresh:
+            if faces_need_description_refresh(faces, people_desc):
                 enrich_faces_with_descriptions(job_id, people_desc, faces)
                 save_detection_metadata(get_run_dir(job_id), faces, job.get("unique_objects", []))
         if job.get("unique_faces") or job.get("unique_objects"):

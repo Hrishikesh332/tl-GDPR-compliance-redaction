@@ -5651,10 +5651,23 @@
       "snap_filename": "person_0.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_0.png",
       "name": "person_0",
-      "priority_rank": 0,
-      "tags": [],
+      "priority_rank": 15,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Judge in black robes, working at a desk with two monitors, laptop, and papers; wears headphones at times",
+      "time_ranges": [
+        {
+          "start_sec": 8,
+          "end_sec": 145
+        },
+        {
+          "start_sec": 163,
+          "end_sec": 179
+        }
+      ]
     },
     {
       "person_id": "person_2",
@@ -9095,11 +9108,20 @@
       "appearance_count": 291,
       "snap_filename": "person_2.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_2.png",
-      "name": "person_2",
-      "priority_rank": 1,
-      "tags": [],
+      "name": "Dr. Malte Margold",
+      "priority_rank": 13,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Man wearing glasses and a suit; speaks into a pink microphone held off-camera; short brown hair; stands against a white wall with framed pictures",
+      "time_ranges": [
+        {
+          "start_sec": 563,
+          "end_sec": 779
+        }
+      ]
     },
     {
       "person_id": "person_85",
@@ -11331,10 +11353,19 @@
       "snap_filename": "person_85.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_85.png",
       "name": "person_85",
-      "priority_rank": 2,
-      "tags": [],
+      "priority_rank": 12,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Man wearing glasses and a dark suit jacket over a light-colored collared shirt and tie; speaks into a pink microphone; short brown hair",
+      "time_ranges": [
+        {
+          "start_sec": 819,
+          "end_sec": 950
+        }
+      ]
     },
     {
       "person_id": "person_41",
@@ -12676,10 +12707,19 @@
       "snap_filename": "person_41.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_41.png",
       "name": "person_41",
-      "priority_rank": 3,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 6,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Woman sitting at a desk with her head down, covered by a black cloth; wears a beige sweater; remains motionless for extended periods",
+      "time_ranges": [
+        {
+          "start_sec": 327,
+          "end_sec": 562
+        }
+      ]
     },
     {
       "person_id": "person_3",
@@ -13941,10 +13981,19 @@
       "snap_filename": "person_3.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_3.png",
       "name": "person_3",
-      "priority_rank": 4,
-      "tags": [],
+      "priority_rank": 17,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Cameramen operating professional cameras in the courtroom; both wear headsets; visible in multiple shots",
+      "time_ranges": [
+        {
+          "start_sec": 92,
+          "end_sec": 113
+        }
+      ]
     },
     {
       "person_id": "person_12",
@@ -14906,10 +14955,19 @@
       "snap_filename": "person_12.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_12.png",
       "name": "person_12",
-      "priority_rank": 5,
-      "tags": [],
+      "priority_rank": 11,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Man in beige suit vest over white shirt, standing with a pink microphone; speaks into the mic; short brown hair",
+      "time_ranges": [
+        {
+          "start_sec": 780,
+          "end_sec": 819
+        }
+      ]
     },
     {
       "person_id": "person_1",
@@ -15831,10 +15889,19 @@
       "snap_filename": "person_1.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_1.png",
       "name": "person_1",
-      "priority_rank": 6,
-      "tags": [],
+      "priority_rank": 16,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Second judge in black robes, working at a desk with documents; no headphones; interacts with a visitor",
+      "time_ranges": [
+        {
+          "start_sec": 27,
+          "end_sec": 38
+        }
+      ]
     },
     {
       "person_id": "person_22",
@@ -16675,11 +16742,20 @@
       "appearance_count": 31,
       "snap_filename": "person_22.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_22.png",
-      "name": "person_22",
-      "priority_rank": 7,
-      "tags": [],
+      "name": "person_88",
+      "priority_rank": 14,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Man wearing glasses and a dark suit jacket over a light-colored collared shirt and tie; speaks into a pink microphone; short brown hair; identified as Oberstaatsanwalt and Pressesprecher",
+      "time_ranges": [
+        {
+          "start_sec": 786,
+          "end_sec": 800
+        }
+      ]
     },
     {
       "person_id": "person_30",
@@ -17491,10 +17567,19 @@
       "snap_filename": "person_30.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_30.png",
       "name": "person_30",
-      "priority_rank": 8,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 4,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Blonde-haired woman adjusting herself in her seat among spectators; wears a light-colored top and appears to be focused on her device",
+      "time_ranges": [
+        {
+          "start_sec": 113,
+          "end_sec": 135
+        }
+      ]
     },
     {
       "person_id": "person_6",
@@ -18296,10 +18381,19 @@
       "snap_filename": "person_6.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_6.png",
       "name": "person_6",
-      "priority_rank": 9,
-      "tags": [],
+      "priority_rank": 22,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Photographer holding a camera aloft, taking a group photo inside the courtroom; two individuals pose smiling",
+      "time_ranges": [
+        {
+          "start_sec": 483,
+          "end_sec": 491
+        }
+      ]
     },
     {
       "person_id": "person_67",
@@ -19101,10 +19195,19 @@
       "snap_filename": "person_67.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_67.png",
       "name": "person_67",
-      "priority_rank": 10,
-      "tags": [],
+      "priority_rank": 20,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Reporter in beige suit jacket over white shirt and tie, speaking directly to the camera outside the building; wears sunglasses",
+      "time_ranges": [
+        {
+          "start_sec": 656,
+          "end_sec": 655
+        }
+      ]
     },
     {
       "person_id": "person_18",
@@ -19886,10 +19989,19 @@
       "snap_filename": "person_18.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_18.png",
       "name": "person_18",
-      "priority_rank": 11,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 8,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Woman with long blonde hair, holding a camera; approaches the hooded figure with another woman; wears a dark top",
+      "time_ranges": [
+        {
+          "start_sec": 256,
+          "end_sec": 270
+        }
+      ]
     },
     {
       "person_id": "person_23",
@@ -20671,10 +20783,19 @@
       "snap_filename": "person_23.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_23.png",
       "name": "person_23",
-      "priority_rank": 12,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 5,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Man in overcoat-like attire over suit clothes, sitting near rows of chairs; interacts with a female attendee, places a folder on the table",
+      "time_ranges": [
+        {
+          "start_sec": 135,
+          "end_sec": 145
+        }
+      ]
     },
     {
       "person_id": "person_65",
@@ -21456,10 +21577,19 @@
       "snap_filename": "person_65.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_65.png",
       "name": "person_65",
-      "priority_rank": 13,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 1,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Woman in black attire standing near the hooded figure, wearing a dark-colored top and long sleeves; face partially visible, appears to speak to the hooded individual",
+      "time_ranges": [
+        {
+          "start_sec": 210,
+          "end_sec": 309
+        }
+      ]
     },
     {
       "person_id": "person_51",
@@ -22221,10 +22351,19 @@
       "snap_filename": "person_51.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_51.png",
       "name": "person_51",
-      "priority_rank": 14,
-      "tags": [],
+      "priority_rank": 19,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Female police officer in uniform, escorting the hooded individual; visible in multiple shots",
+      "time_ranges": [
+        {
+          "start_sec": 179,
+          "end_sec": 230
+        }
+      ]
     },
     {
       "person_id": "person_17",
@@ -22956,10 +23095,19 @@
       "snap_filename": "person_17.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_17.png",
       "name": "person_17",
-      "priority_rank": 15,
-      "tags": [],
+      "priority_rank": 21,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Security guard in sunglasses, walking past the reporter outside the building",
+      "time_ranges": [
+        {
+          "start_sec": 656,
+          "end_sec": 655
+        }
+      ]
     },
     {
       "person_id": "person_52",
@@ -23691,10 +23839,19 @@
       "snap_filename": "person_52.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_52.png",
       "name": "person_52",
-      "priority_rank": 16,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 0,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Hooded individual wearing a beige sweater, escorted by two female police officers; head down, face obscured by hood and shadow",
+      "time_ranges": [
+        {
+          "start_sec": 179,
+          "end_sec": 230
+        }
+      ]
     },
     {
       "person_id": "person_16",
@@ -25826,10 +25983,19 @@
       "snap_filename": "person_76.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_76.png",
       "name": "person_76",
-      "priority_rank": 19,
-      "tags": [],
+      "priority_rank": 24,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Four individuals at raised desks facing forward; one stands before them with arms raised above head",
+      "time_ranges": [
+        {
+          "start_sec": 520,
+          "end_sec": 534
+        }
+      ]
     },
     {
       "person_id": "person_10",
@@ -26521,10 +26687,19 @@
       "snap_filename": "person_10.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_10.png",
       "name": "person_10",
-      "priority_rank": 20,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 3,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Woman with shoulder-length brown hair, carrying a small object in her right hand; stands near the entrance of a room, facing the camera",
+      "time_ranges": [
+        {
+          "start_sec": 356,
+          "end_sec": 374
+        }
+      ]
     },
     {
       "person_id": "person_44",
@@ -27216,10 +27391,19 @@
       "snap_filename": "person_44.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_44.png",
       "name": "person_44",
-      "priority_rank": 21,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 2,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Woman with short dark hair and glasses, wearing a long-sleeved shirt and pants; stands near the entrance of a room, holding a small object in her right hand",
+      "time_ranges": [
+        {
+          "start_sec": 356,
+          "end_sec": 374
+        }
+      ]
     },
     {
       "person_id": "person_63",
@@ -27911,10 +28095,19 @@
       "snap_filename": "person_63.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_63.png",
       "name": "person_63",
-      "priority_rank": 22,
-      "tags": [],
+      "priority_rank": 23,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Two individuals in the group photo, smiling directly at the camera; one woman adjusts her hair, the other holds a camera",
+      "time_ranges": [
+        {
+          "start_sec": 483,
+          "end_sec": 491
+        }
+      ]
     },
     {
       "person_id": "person_26",
@@ -35421,10 +35614,19 @@
       "snap_filename": "person_53.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_53.png",
       "name": "person_53",
-      "priority_rank": 34,
-      "tags": [],
+      "priority_rank": 18,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Three male police officers walking up stairs, one carrying a white bag; later seen escorting the hooded individual",
+      "time_ranges": [
+        {
+          "start_sec": 179,
+          "end_sec": 190
+        }
+      ]
     },
     {
       "person_id": "person_55",
@@ -36016,10 +36218,19 @@
       "snap_filename": "person_55.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_55.png",
       "name": "person_55",
-      "priority_rank": 35,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 10,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Man sitting at a desk, looking at a monitor; speaks to someone offscreen; hands rest on keyboard",
+      "time_ranges": [
+        {
+          "start_sec": 404,
+          "end_sec": 414
+        }
+      ]
     },
     {
       "person_id": "person_25",
@@ -37176,10 +37387,19 @@
       "snap_filename": "person_59.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_59.png",
       "name": "person_59",
-      "priority_rank": 37,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 7,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Woman with short hair and glasses, holding a camera; approaches the hooded figure with another woman; wears a dark top",
+      "time_ranges": [
+        {
+          "start_sec": 256,
+          "end_sec": 270
+        }
+      ]
     },
     {
       "person_id": "person_69",
@@ -55261,10 +55481,19 @@
       "snap_filename": "person_60.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_60.png",
       "name": "person_60",
-      "priority_rank": 70,
-      "tags": [],
-      "should_anonymize": false,
-      "is_official": false
+      "priority_rank": 9,
+      "tags": [
+        "Anonymized"
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "description": "Older man entering through a doorway, walking toward the back of the room; stops briefly before proceeding forward",
+      "time_ranges": [
+        {
+          "start_sec": 256,
+          "end_sec": 270
+        }
+      ]
     },
     {
       "person_id": "person_61",
@@ -62346,10 +62575,19 @@
       "snap_filename": "person_82.png",
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/faces/person_82.png",
       "name": "person_82",
-      "priority_rank": 83,
-      "tags": [],
+      "priority_rank": 25,
+      "tags": [
+        "Official"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": true,
+      "description": "Two figures standing near a table, one with upper body obscured by a dark-colored fabric; both appear to be in a formal setting",
+      "time_ranges": [
+        {
+          "start_sec": 534,
+          "end_sec": 562
+        }
+      ]
     },
     {
       "person_id": "person_83",

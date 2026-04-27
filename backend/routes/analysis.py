@@ -16,7 +16,10 @@ from services.redactor import (
     detect_best_face_bbox,
     expand_bbox,
     expand_face_redaction_bbox,
+    expand_tracked_face_bbox,
     frame_bbox_to_small_bbox,
+    merge_tracking_search_anchor,
+    motion_bridge_bbox,
     normalize_object_class_name,
     optical_flow_bbox_update,
     seed_tracking_points,
@@ -43,12 +46,15 @@ LIVE_TRACK_FRAME_MAX_DIM = 640
 LIVE_TRACK_GLOBAL_MAX_CORNERS = 240
 LIVE_TRACK_GLOBAL_MIN_POINTS = 8
 LIVE_TRACK_GLOBAL_MIN_CONFIDENCE = 0.18
+LIVE_TRACK_GLOBAL_BRIDGE_MIN_CONFIDENCE = 0.24
 LIVE_TRACK_FACE_SEARCH_EXPAND = 1.75
 LIVE_TRACK_FACE_LOST_SEARCH_EXPAND = 2.45
 LIVE_TRACK_FACE_SEARCH_MOTION_BONUS = 0.55
-LIVE_TRACK_FACE_RELOCK_MAX_AREA_RATIO = 3.4
-LIVE_TRACK_FACE_RELOCK_MIN_IOU = 0.05
-LIVE_TRACK_FACE_RELOCK_MAX_CENTER_SHIFT = 1.15
+LIVE_TRACK_FACE_RELOCK_MAX_AREA_RATIO = 2.7
+LIVE_TRACK_FACE_IDENTIFIED_RELOCK_MAX_AREA_RATIO = 2.2
+LIVE_TRACK_FACE_RELOCK_MIN_IOU = 0.08
+LIVE_TRACK_FACE_RELOCK_MAX_CENTER_SHIFT = 0.9
+LIVE_TRACK_FACE_IDENTIFIED_RELOCK_MAX_CENTER_SHIFT = 0.72
 
 
 def normalize_bbox(bbox, frame_w, frame_h):
@@ -140,7 +146,7 @@ def raw_bbox_center_distance(box_a, box_b):
     return float(np.hypot(((ax1 + ax2) * 0.5) - ((bx1 + bx2) * 0.5), ((ay1 + ay2) * 0.5) - ((by1 + by2) * 0.5)))
 
 
-def should_accept_face_relock(candidate_bbox, reference_bbox, search_bbox):
+def should_accept_face_relock(candidate_bbox, reference_bbox, search_bbox, strict=False):
     if candidate_bbox is None:
         return False
 
@@ -149,7 +155,7 @@ def should_accept_face_relock(candidate_bbox, reference_bbox, search_bbox):
     if reference_bbox is None:
         if search_area is None:
             return True
-        return candidate_area <= search_area * 0.82
+        return candidate_area <= search_area * (0.68 if strict else 0.78)
 
     reference_area = max(1.0, raw_bbox_area(reference_bbox))
     area_ratio = max(candidate_area, reference_area) / min(candidate_area, reference_area)
@@ -160,11 +166,21 @@ def should_accept_face_relock(candidate_bbox, reference_bbox, search_bbox):
     )
     center_shift = raw_bbox_center_distance(candidate_bbox, reference_bbox) / reference_diag
 
-    if area_ratio > LIVE_TRACK_FACE_RELOCK_MAX_AREA_RATIO and iou < LIVE_TRACK_FACE_RELOCK_MIN_IOU:
+    max_area_ratio = (
+        LIVE_TRACK_FACE_IDENTIFIED_RELOCK_MAX_AREA_RATIO
+        if strict else LIVE_TRACK_FACE_RELOCK_MAX_AREA_RATIO
+    )
+    max_center_shift = (
+        LIVE_TRACK_FACE_IDENTIFIED_RELOCK_MAX_CENTER_SHIFT
+        if strict else LIVE_TRACK_FACE_RELOCK_MAX_CENTER_SHIFT
+    )
+    max_search_area_ratio = 0.68 if strict else 0.78
+
+    if area_ratio > max_area_ratio and iou < LIVE_TRACK_FACE_RELOCK_MIN_IOU:
         return False
-    if center_shift > LIVE_TRACK_FACE_RELOCK_MAX_CENTER_SHIFT and iou < LIVE_TRACK_FACE_RELOCK_MIN_IOU:
+    if center_shift > max_center_shift and iou < LIVE_TRACK_FACE_RELOCK_MIN_IOU:
         return False
-    if search_area is not None and candidate_area > search_area * 0.82 and iou < LIVE_TRACK_FACE_RELOCK_MIN_IOU:
+    if search_area is not None and candidate_area > search_area * max_search_area_ratio and iou < LIVE_TRACK_FACE_RELOCK_MIN_IOU:
         return False
     return True
 
@@ -219,6 +235,10 @@ def blend_detection_boxes(track_det, detection):
         + min(0.18, motion_strength * 1.6)
         + (0.08 if track_det.get("trackingMode") == "global" else 0.0),
     )
+    if detection["kind"] == "face":
+        alpha = max(alpha, 0.78)
+        if detection.get("personId") or track_det.get("personId"):
+            alpha = max(alpha, 0.88)
     return {
         **detection,
         "x": round(float(track_det["x"]) * (1 - alpha) + float(detection["x"]) * alpha, 6),
@@ -363,6 +383,13 @@ def build_tracked_live_detections(
         motion_strength = 0.0
         updated_small_bbox = None
         updated_points = None
+        global_motion_confidence = float((global_motion or {}).get("confidence", 0.0) or 0.0)
+        global_bbox = apply_live_motion_to_bbox(
+            previous_frame_bbox,
+            global_motion,
+            frame_w,
+            frame_h,
+        ) if previous_frame_bbox is not None and global_motion_confidence >= LIVE_TRACK_GLOBAL_MIN_CONFIDENCE else None
         if previous_points is not None:
             updated_small_bbox, updated_points = optical_flow_bbox_update(
                 previous_gray,
@@ -386,10 +413,10 @@ def build_tracked_live_detections(
         if tracking_mode == "local" and global_motion:
             motion_strength = float(global_motion.get("motion_strength", 0.0) or 0.0)
 
-        updated_bbox = small_bbox_to_frame_bbox(updated_small_bbox, scale_back, frame_w, frame_h) if updated_small_bbox is not None else previous_frame_bbox
+        updated_bbox = small_bbox_to_frame_bbox(updated_small_bbox, scale_back, frame_w, frame_h) if updated_small_bbox is not None else (global_bbox or previous_frame_bbox)
         if track["kind"] == "face":
             track_person_id = str(track.get("personId") or "").strip()
-            search_anchor = updated_bbox or previous_frame_bbox
+            search_anchor = merge_tracking_search_anchor(updated_bbox or previous_frame_bbox, global_bbox, frame_w, frame_h)
             if search_anchor is not None:
                 search_factor = LIVE_TRACK_FACE_SEARCH_EXPAND if updated_bbox is not None else LIVE_TRACK_FACE_LOST_SEARCH_EXPAND
                 search_factor += min(LIVE_TRACK_FACE_SEARCH_MOTION_BONUS, motion_strength * 5.5)
@@ -402,18 +429,23 @@ def build_tracked_live_detections(
                         frame,
                         known_face=known_face,
                         search_bbox=search_bbox,
-                        preferred_bbox=updated_bbox or previous_frame_bbox,
+                        preferred_bbox=updated_bbox or global_bbox or previous_frame_bbox,
                         tolerance=face_tolerance if face_tolerance is not None else 0.55,
-                        allow_geometry_fallback=known_face.get("encoding") is None,
+                        allow_geometry_fallback=True,
                     )
                     relocked_bbox = tuple(relocked_face["bbox"]) if relocked_face is not None else None
-                    if relocked_bbox is None or not should_accept_face_relock(
+                    if relocked_bbox is not None and should_accept_face_relock(
                         relocked_bbox,
-                        updated_bbox or previous_frame_bbox,
+                        updated_bbox or global_bbox or previous_frame_bbox,
                         search_bbox,
+                        strict=True,
                     ):
+                        updated_bbox = expand_tracked_face_bbox(relocked_bbox, frame_w, frame_h, motion_strength)
+                    elif global_bbox is not None and global_motion_confidence >= LIVE_TRACK_GLOBAL_BRIDGE_MIN_CONFIDENCE:
+                        updated_bbox = motion_bridge_bbox(global_bbox, frame_w, frame_h, motion_strength)
+                        tracking_mode = "global"
+                    else:
                         continue
-                    updated_bbox = relocked_bbox
                     updated_small_bbox = frame_bbox_to_small_bbox(
                         updated_bbox,
                         scale_back,
@@ -426,11 +458,26 @@ def build_tracked_live_detections(
                     refined_bbox = detect_best_face_bbox(
                         frame,
                         search_bbox,
-                        preferred_bbox=updated_bbox or previous_frame_bbox,
+                        preferred_bbox=updated_bbox or global_bbox or previous_frame_bbox,
                         allow_supplemental=(tracking_mode != "local" or motion_strength >= 0.025),
                     )
-                    if refined_bbox is not None and should_accept_face_relock(refined_bbox, updated_bbox or previous_frame_bbox, search_bbox):
-                        updated_bbox = refined_bbox
+                    if refined_bbox is not None and should_accept_face_relock(
+                        refined_bbox,
+                        updated_bbox or global_bbox or previous_frame_bbox,
+                        search_bbox,
+                    ):
+                        updated_bbox = expand_tracked_face_bbox(refined_bbox, frame_w, frame_h, motion_strength)
+                        updated_small_bbox = frame_bbox_to_small_bbox(
+                            updated_bbox,
+                            scale_back,
+                            small_frame.shape[1],
+                            small_frame.shape[0],
+                        )
+                        if updated_small_bbox is not None:
+                            updated_points = seed_tracking_points(gray_small, updated_small_bbox)
+                    elif global_bbox is not None and global_motion_confidence >= LIVE_TRACK_GLOBAL_BRIDGE_MIN_CONFIDENCE:
+                        updated_bbox = motion_bridge_bbox(global_bbox, frame_w, frame_h, motion_strength)
+                        tracking_mode = "global"
                         updated_small_bbox = frame_bbox_to_small_bbox(
                             updated_bbox,
                             scale_back,

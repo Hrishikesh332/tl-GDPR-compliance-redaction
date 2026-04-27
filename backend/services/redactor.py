@@ -24,9 +24,19 @@ from utils.video import small_frame_for_tracking, reencode_mp4_to_h264
 
 logger = logging.getLogger("video_redaction.redactor")
 
-FACE_REDACTION_PAD_X_RATIO = 0.14
-FACE_REDACTION_PAD_TOP_RATIO = 0.24
-FACE_REDACTION_PAD_BOTTOM_RATIO = 0.12
+# Face detections tend to land tight on the facial features, while the
+# redaction needs to cover the full head more reliably during motion.
+FACE_REDACTION_PAD_X_RATIO = 0.16
+FACE_REDACTION_PAD_TOP_RATIO = 0.30
+FACE_REDACTION_PAD_BOTTOM_RATIO = 0.18
+GLOBAL_MOTION_MAX_CORNERS = 240
+GLOBAL_MOTION_MIN_POINTS = 8
+GLOBAL_MOTION_MIN_CONFIDENCE = 0.18
+FACE_TRACK_MOTION_SEARCH_BONUS_CAP = 0.72
+FACE_TRACK_MOTION_PAD_CAP = 0.18
+FACE_TRACK_BRIDGE_PAD_CAP = 0.12
+FACE_TRACK_BRIDGE_MIN_GLOBAL_CONFIDENCE = 0.24
+FACE_TRACK_BRIDGE_MAX_FAILS = 2
 _NO_TRACKER_FACTORY = object()
 _TRACKER_FACTORY_CACHE = {}
 _TRACKER_FACTORY_LOGGED = set()
@@ -163,6 +173,27 @@ def expand_face_redaction_bbox(
     if expanded[2] <= expanded[0] or expanded[3] <= expanded[1]:
         return bbox
     return expanded
+
+
+def motion_bridge_bbox(bbox, frame_w, frame_h, motion_strength=0.0, cap=FACE_TRACK_BRIDGE_PAD_CAP):
+    if not bbox:
+        return bbox
+    bonus = min(max(0.0, float(cap)), max(0.0, float(motion_strength or 0.0)) * 5.5)
+    factor = 1.0 + bonus
+    if factor <= 1.0:
+        return bbox
+    return expand_bbox(bbox, frame_w, frame_h, factor)
+
+
+def expand_tracked_face_bbox(face_bbox, frame_w, frame_h, motion_strength=0.0):
+    expanded = expand_face_redaction_bbox(face_bbox, frame_w, frame_h)
+    return motion_bridge_bbox(
+        expanded,
+        frame_w,
+        frame_h,
+        motion_strength=motion_strength,
+        cap=FACE_TRACK_MOTION_PAD_CAP,
+    )
 
 
 def bbox_area(bbox):
@@ -469,6 +500,104 @@ def optical_flow_bbox_update(prev_gray, gray, prev_points, prev_bbox, frame_w, f
     return bbox, transformed_points
 
 
+def estimate_global_frame_motion(prev_gray, gray):
+    if prev_gray is None or gray is None:
+        return None
+
+    points = cv2.goodFeaturesToTrack(
+        prev_gray,
+        maxCorners=GLOBAL_MOTION_MAX_CORNERS,
+        qualityLevel=0.01,
+        minDistance=7,
+        blockSize=7,
+    )
+    if points is None or len(points) < GLOBAL_MOTION_MIN_POINTS:
+        return None
+
+    next_points, status, _ = cv2.calcOpticalFlowPyrLK(
+        prev_gray,
+        gray,
+        points,
+        None,
+        winSize=(31, 31),
+        maxLevel=4,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 24, 0.02),
+    )
+    if next_points is None or status is None:
+        return None
+
+    good_old = points[status.flatten() == 1]
+    good_new = next_points[status.flatten() == 1]
+    if len(good_old) < GLOBAL_MOTION_MIN_POINTS or len(good_new) < GLOBAL_MOTION_MIN_POINTS:
+        return None
+
+    matrix = None
+    inlier_ratio = 0.0
+    residual = None
+    if len(good_old) >= 10:
+        matrix, inliers = cv2.estimateAffinePartial2D(
+            good_old.reshape(-1, 1, 2),
+            good_new.reshape(-1, 1, 2),
+            method=cv2.RANSAC,
+            ransacReprojThreshold=4.0,
+        )
+        if matrix is not None:
+            transformed = cv2.transform(good_old.reshape(-1, 1, 2), matrix).reshape(-1, 2)
+            residual = float(np.median(np.linalg.norm(transformed - good_new.reshape(-1, 2), axis=1)))
+            if inliers is not None and len(inliers) > 0:
+                inlier_ratio = float(np.mean(inliers))
+
+    if matrix is None:
+        diff = (good_new - good_old).reshape(-1, 2)
+        delta = np.median(diff, axis=0)
+        dx = float(delta[0])
+        dy = float(delta[1])
+        residual = float(np.median(np.linalg.norm(diff - delta, axis=1)))
+    else:
+        dx = float(matrix[0, 2])
+        dy = float(matrix[1, 2])
+
+    frame_diag = max(1.0, float(np.hypot(gray.shape[1], gray.shape[0])))
+    motion_strength = float(np.hypot(dx, dy) / frame_diag)
+    feature_ratio = min(1.0, len(good_old) / GLOBAL_MOTION_MAX_CORNERS)
+    residual_score = 1.0 - min(1.0, (residual or 0.0) / 12.0)
+    confidence = max(0.0, min(1.0, feature_ratio * 0.45 + inlier_ratio * 0.35 + residual_score * 0.2))
+
+    return {
+        "matrix": matrix,
+        "dx": dx,
+        "dy": dy,
+        "confidence": confidence,
+        "motion_strength": motion_strength,
+    }
+
+
+def apply_motion_to_bbox(bbox, motion, frame_w, frame_h):
+    if bbox is None or motion is None:
+        return None
+
+    matrix = motion.get("matrix")
+    if matrix is not None:
+        return corners_to_bbox(cv2.transform(bbox_corners(bbox), matrix), frame_w, frame_h)
+
+    return translate_bbox(
+        bbox,
+        float(motion.get("dx", 0.0)),
+        float(motion.get("dy", 0.0)),
+        frame_w,
+        frame_h,
+    )
+
+
+def merge_tracking_search_anchor(primary_bbox, secondary_bbox, frame_w, frame_h):
+    if primary_bbox is None:
+        return secondary_bbox
+    if secondary_bbox is None:
+        return primary_bbox
+    merged_corners = np.concatenate((bbox_corners(primary_bbox), bbox_corners(secondary_bbox)), axis=0)
+    return corners_to_bbox(merged_corners, frame_w, frame_h) or primary_bbox or secondary_bbox
+
+
 def tracker_roi_to_frame_bbox(x, y, tw, th, scale_back, frame_w, frame_h, min_side=4):
     """Convert tracker ROI (x, y, w, h) in scaled space to clamped (x1, y1, x2, y2) in frame space.
     Ensures the blur area resizes with the tracker and stays within frame bounds."""
@@ -597,6 +726,12 @@ def update_auto_redaction_track(
     optical_bbox = None
     optical_points = None
     optical_ok = False
+    global_motion = estimate_global_frame_motion(prev_gray_small, gray_small) if prev_gray_small is not None else None
+    global_motion_confidence = float((global_motion or {}).get("confidence", 0.0) or 0.0)
+    motion_strength = float((global_motion or {}).get("motion_strength", 0.0) or 0.0)
+    global_bbox = None
+    if global_motion is not None and global_motion_confidence >= GLOBAL_MOTION_MIN_CONFIDENCE:
+        global_bbox = apply_motion_to_bbox(last_bbox or prev_smoothed, global_motion, frame_w, frame_h)
 
     if tracker is not None and periodic_reinit and last_bbox:
         try:
@@ -650,17 +785,18 @@ def update_auto_redaction_track(
         except (cv2.error, AttributeError, Exception):
             pass
 
-    predicted_bbox = optical_bbox if optical_ok else (tracker_bbox if tracker_ok else None)
+    predicted_bbox = optical_bbox if optical_ok else (global_bbox if global_bbox is not None else (tracker_bbox if tracker_ok else None))
     resolved_bbox = predicted_bbox or last_bbox
     face_detected = False
-    tracking_success = tracker_ok or optical_ok
+    tracking_success = tracker_ok or optical_ok or global_bbox is not None
 
     if kind == "face" and resolved_bbox is not None:
         if known_face is not None:
             from services.detection import localize_known_face_in_search_region
 
-            search_anchor = predicted_bbox or last_bbox
-            search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+            search_anchor = merge_tracking_search_anchor(predicted_bbox or last_bbox, global_bbox, frame_w, frame_h)
+            search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok or global_bbox is not None) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+            search_factor += min(FACE_TRACK_MOTION_SEARCH_BONUS_CAP, motion_strength * 6.0)
             # Keep the relock bounded to the tracked neighborhood, but allow
             # the same strict geometry fallback used during initial anchored
             # localization so deploy/runtime embedding drift does not blank out
@@ -669,14 +805,20 @@ def update_auto_redaction_track(
                 frame,
                 known_face=known_face,
                 search_bbox=expand_bbox(search_anchor, frame_w, frame_h, search_factor),
-                preferred_bbox=search_anchor,
+                preferred_bbox=predicted_bbox or global_bbox or last_bbox,
                 tolerance=identity_tolerance if identity_tolerance is not None else 0.55,
                 allow_geometry_fallback=True,
             ) if search_anchor is not None else None
 
             if relocked_face is not None:
-                resolved_bbox = tuple(relocked_face["bbox"])
+                resolved_bbox = expand_tracked_face_bbox(tuple(relocked_face["bbox"]), frame_w, frame_h, motion_strength)
                 face_detected = True
+                tracking_success = True
+            elif global_bbox is not None and global_motion_confidence >= FACE_TRACK_BRIDGE_MIN_GLOBAL_CONFIDENCE and fail_count < FACE_TRACK_BRIDGE_MAX_FAILS:
+                # During a hard camera pan, a selected face can miss for a frame
+                # even though the whole scene motion is clear. Bridge with the
+                # globally translated box instead of briefly revealing the face.
+                resolved_bbox = motion_bridge_bbox(global_bbox, frame_w, frame_h, motion_strength)
                 tracking_success = True
             else:
                 # When the user selected a specific saved person, prefer briefly
@@ -685,16 +827,21 @@ def update_auto_redaction_track(
                 resolved_bbox = None
                 tracking_success = False
         else:
-            search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+            search_anchor = merge_tracking_search_anchor(resolved_bbox, global_bbox, frame_w, frame_h)
+            search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok or global_bbox is not None) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+            search_factor += min(FACE_TRACK_MOTION_SEARCH_BONUS_CAP, motion_strength * 6.0)
             refined_bbox = detect_best_face_bbox(
                 frame,
-                expand_bbox(resolved_bbox, frame_w, frame_h, search_factor),
-                preferred_bbox=resolved_bbox,
+                expand_bbox(search_anchor, frame_w, frame_h, search_factor),
+                preferred_bbox=predicted_bbox or global_bbox or resolved_bbox,
                 allow_supplemental=(not tracker_ok or fail_count > 0),
             )
             if refined_bbox is not None:
-                resolved_bbox = refined_bbox
+                resolved_bbox = expand_tracked_face_bbox(refined_bbox, frame_w, frame_h, motion_strength)
                 face_detected = True
+                tracking_success = True
+            elif global_bbox is not None and global_motion_confidence >= FACE_TRACK_BRIDGE_MIN_GLOBAL_CONFIDENCE:
+                resolved_bbox = motion_bridge_bbox(global_bbox, frame_w, frame_h, motion_strength)
                 tracking_success = True
 
         if face_detected and tracker is not None and (
