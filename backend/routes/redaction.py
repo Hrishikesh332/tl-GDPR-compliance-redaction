@@ -96,6 +96,16 @@ def parse_output_height(data):
     return parsed
 
 
+def custom_region_is_face(region):
+    if not isinstance(region, dict):
+        return False
+    mode = str(region.get("tracking_mode", "")).strip().lower()
+    if mode == "face":
+        return True
+    reason = str(region.get("reason", "")).lower()
+    return any(token in reason for token in ("face", "person", "head"))
+
+
 def build_redaction_request(data):
     job_id = data.get("job_id") or request.form.get("job_id")
     if not job_id:
@@ -176,6 +186,11 @@ def build_redaction_request(data):
     entity_ids = parse_list_field(data, "entity_ids", split_csv=True) or []
     entity_ids = [str(item).strip() for item in entity_ids if str(item).strip()]
     custom_regions = parse_custom_regions(data)
+
+    has_face_targets = bool(face_targets or face_encodings)
+    has_face_custom_regions = any(custom_region_is_face(region) for region in custom_regions)
+    if has_face_targets or has_face_custom_regions:
+        detect_every_n = 1
 
     total_targets = max(len(face_targets), len(face_encodings)) + len(object_classes) + len(custom_regions)
     if total_targets == 0 and not entity_ids:

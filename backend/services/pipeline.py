@@ -1201,6 +1201,35 @@ def run_redaction(
 
     obj_set = set(object_classes or [])
 
+    # Build (or load) face-lock lanes for every selected person before
+    # rendering. The lane is the precomputed per-frame bbox track on
+    # the local video; it is the source of truth for the blur during
+    # export, identical to what the live overlay shows. Persons whose
+    # lanes succeed are filtered out of the per-frame InsightFace path
+    # inside redact_video so the lane never has to compete with a
+    # potentially-drifting per-frame relock.
+    face_lock_tracks = {}
+    if face_targets:
+        from services.face_lock_track import build_face_lock_lane
+
+        for face in face_targets:
+            person_id = get_face_identity(face)
+            if not person_id:
+                continue
+            try:
+                lane_doc = build_face_lock_lane(job_id, person_id)
+                if lane_doc:
+                    face_lock_tracks[person_id] = lane_doc
+                    logger.info(
+                        "Face-lock lane ready for person %s: %d frames",
+                        person_id, len(lane_doc.get("lane") or []),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Could not build face-lock lane for %s; falling back to per-frame relock: %s",
+                    person_id, exc,
+                )
+
     result = redact_video(
         input_path=video_path,
         output_path=output_path,
@@ -1215,6 +1244,7 @@ def run_redaction(
         custom_regions=custom_regions or [],
         output_height=normalized_output_height,
         progress_callback=progress_callback,
+        face_lock_tracks=face_lock_tracks,
     )
 
     download_filename = safe_redacted_mp4_filename(os.path.basename(output_path))

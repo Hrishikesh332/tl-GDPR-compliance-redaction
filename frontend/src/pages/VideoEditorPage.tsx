@@ -634,6 +634,116 @@ type LiveRedactionDetection = {
   velocityHeight?: number
 }
 
+type FaceLockLaneEntry = {
+  f: number
+  t: number
+  x1: number
+  y1: number
+  x2: number
+  y2: number
+  src?: string
+  conf?: number
+}
+
+type FaceLockLane = {
+  build_version: number
+  job_id: string
+  person_id: string
+  video: { width: number; height: number; fps: number; total_frames: number; duration_sec: number }
+  segments?: Array<{ start_frame: number; end_frame: number }>
+  lane: FaceLockLaneEntry[]
+  safety_pad_ratio?: number
+  built_at?: string
+}
+
+type FaceLockBuildState = {
+  status: 'queued' | 'running' | 'ready' | 'failed' | 'missing'
+  percent: number
+  progress: number
+  message?: string | null
+}
+
+const FACE_LOCK_LANE_INTERPOLATION_MAX_GAP_SEC = 0.06
+
+function findFaceLockBracketIndices(lane: FaceLockLaneEntry[], targetFrame: number): { lower: number; upper: number } {
+  if (!lane.length) return { lower: -1, upper: -1 }
+  let lo = 0
+  let hi = lane.length - 1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    const f = lane[mid].f
+    if (f === targetFrame) return { lower: mid, upper: mid }
+    if (f < targetFrame) lo = mid + 1
+    else hi = mid - 1
+  }
+  return { lower: hi, upper: lo }
+}
+
+function interpolateFaceLockLane(
+  lane: FaceLockLane,
+  timeSec: number,
+  maxGapSec: number = FACE_LOCK_LANE_INTERPOLATION_MAX_GAP_SEC,
+): { x1: number; y1: number; x2: number; y2: number } | null {
+  const entries = lane.lane
+  if (!entries || entries.length === 0) return null
+  const fps = lane.video?.fps && lane.video.fps > 0 ? lane.video.fps : 25
+  const targetFrame = timeSec * fps
+  const targetFrameInt = Math.round(targetFrame)
+  const { lower, upper } = findFaceLockBracketIndices(entries, targetFrameInt)
+  const lowerEntry = lower >= 0 && lower < entries.length ? entries[lower] : null
+  const upperEntry = upper >= 0 && upper < entries.length ? entries[upper] : null
+  if (lowerEntry && upperEntry && lower === upper) {
+    return { x1: lowerEntry.x1, y1: lowerEntry.y1, x2: lowerEntry.x2, y2: lowerEntry.y2 }
+  }
+  const gapLower = lowerEntry ? Math.abs(targetFrame - lowerEntry.f) / fps : Infinity
+  const gapUpper = upperEntry ? Math.abs(upperEntry.f - targetFrame) / fps : Infinity
+  if (Math.min(gapLower, gapUpper) > maxGapSec) return null
+  if (!lowerEntry && upperEntry) return { x1: upperEntry.x1, y1: upperEntry.y1, x2: upperEntry.x2, y2: upperEntry.y2 }
+  if (!upperEntry && lowerEntry) return { x1: lowerEntry.x1, y1: lowerEntry.y1, x2: lowerEntry.x2, y2: lowerEntry.y2 }
+  if (!lowerEntry || !upperEntry) return null
+  const span = upperEntry.f - lowerEntry.f
+  if (span <= 0) return { x1: lowerEntry.x1, y1: lowerEntry.y1, x2: lowerEntry.x2, y2: lowerEntry.y2 }
+  if (span > Math.round(maxGapSec * fps) + 1) {
+    const nearest = gapLower <= gapUpper ? lowerEntry : upperEntry
+    return { x1: nearest.x1, y1: nearest.y1, x2: nearest.x2, y2: nearest.y2 }
+  }
+  const t = Math.max(0, Math.min(1, (targetFrame - lowerEntry.f) / span))
+  return {
+    x1: lowerEntry.x1 * (1 - t) + upperEntry.x1 * t,
+    y1: lowerEntry.y1 * (1 - t) + upperEntry.y1 * t,
+    x2: lowerEntry.x2 * (1 - t) + upperEntry.x2 * t,
+    y2: lowerEntry.y2 * (1 - t) + upperEntry.y2 * t,
+  }
+}
+
+function laneBboxToLiveDetection(
+  lane: FaceLockLane,
+  bbox: { x1: number; y1: number; x2: number; y2: number },
+  personId: string,
+  label: string,
+): LiveRedactionDetection {
+  const videoW = lane.video?.width || 1
+  const videoH = lane.video?.height || 1
+  const x = Math.max(0, Math.min(1, bbox.x1 / videoW))
+  const y = Math.max(0, Math.min(1, bbox.y1 / videoH))
+  const width = Math.max(0, Math.min(1 - x, (bbox.x2 - bbox.x1) / videoW))
+  const height = Math.max(0, Math.min(1 - y, (bbox.y2 - bbox.y1) / videoH))
+  return {
+    id: `face-lock-${personId}`,
+    trackId: `face-lock-${personId}`,
+    kind: 'face',
+    label,
+    confidence: 1,
+    personId,
+    x,
+    y,
+    width,
+    height,
+    sourceTime: 0,
+    lastSeenAtMs: Date.now(),
+  }
+}
+
 type VideoFrameCallbackCapableElement = HTMLVideoElement & {
   requestVideoFrameCallback?: (callback: VideoFrameRequestCallback) => number
   cancelVideoFrameCallback?: (handle: number) => void
@@ -1714,6 +1824,13 @@ export default function VideoEditorPage() {
   const [liveRedactionLoading, setLiveRedactionLoading] = useState(false)
   const [liveRedactionSeekPending, setLiveRedactionSeekPending] = useState(false)
   const [liveRedactionError, setLiveRedactionError] = useState<string | null>(null)
+  const [faceLockLanesByPersonId, setFaceLockLanesByPersonId] = useState<Record<string, FaceLockLane>>({})
+  const [faceLockBuildByPersonId, setFaceLockBuildByPersonId] = useState<Record<string, FaceLockBuildState>>({})
+  const faceLockLanesByPersonIdRef = useRef<Record<string, FaceLockLane>>({})
+  faceLockLanesByPersonIdRef.current = faceLockLanesByPersonId
+  const faceLockBuildAttemptsRef = useRef<Record<string, boolean>>({})
+  const lockedFacePersonIdsRef = useRef<string[]>([])
+  const faceLockLabelByPersonIdRef = useRef<Record<string, string>>({})
   const [excludedFromRedactionIds, setExcludedFromRedactionIds] = useState<string[]>([])
   const [redactionStyle, setRedactionStyle] = useState<RedactionStyle>('blur')
   const [blurIntensity, setBlurIntensity] = useState(60)
@@ -2637,6 +2754,145 @@ export default function VideoEditorPage() {
     return map
   }, [apiDetections])
 
+  // Locked persons are those whose precomputed face-lock lane is fully
+  // loaded. The blur for these persons is drawn from the lane (which was
+  // built bidirectionally on the local video using fused tracking +
+  // InsightFace anchors + TwelveLabs guidance), never from per-frame
+  // InsightFace re-localization. This guarantees the blur stays glued
+  // to the face across camera shakes, pans, zooms, and brief misses.
+  const lockedFacePersonIds = useMemo(
+    () => selectedFacePersonIds.filter((pid) => !!faceLockLanesByPersonId[pid]),
+    [faceLockLanesByPersonId, selectedFacePersonIds],
+  )
+  const lockedFacePersonIdsSet = useMemo(() => new Set(lockedFacePersonIds), [lockedFacePersonIds])
+
+  // Kick off (or resume) face-lock lane builds for any newly selected
+  // person. Polls the build status until ready, then caches the lane
+  // in component state. Once ready, the live overlay below uses the
+  // lane-derived bbox at the current playback time and skips the
+  // network roundtrip per frame.
+  useEffect(() => {
+    if (!detectionJobId || selectedFacePersonIds.length === 0) return
+    let cancelled = false
+
+    const buildAndPoll = async (personId: string) => {
+      if (cancelled) return
+      if (faceLockLanesByPersonIdRef.current[personId]) return
+      const attempts = faceLockBuildAttemptsRef.current
+      if (attempts[personId]) return
+      attempts[personId] = true
+
+      setFaceLockBuildByPersonId((prev) => ({
+        ...prev,
+        [personId]: { status: 'queued', percent: 0, progress: 0, message: 'Locking onto face...' },
+      }))
+
+      try {
+        const startRes = await fetch(`${API_BASE}/api/face-lock-track/build`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: detectionJobId, person_id: personId }),
+        })
+        if (cancelled) return
+        if (!startRes.ok) {
+          const err = await startRes.json().catch(() => ({}))
+          throw new Error((err as { error?: string }).error || `Build start failed (${startRes.status})`)
+        }
+
+        let lastPercent = 0
+        const startedAt = Date.now()
+        // Poll until ready (or failed). The build runs in a backend
+        // thread; cap the wait to ~10 minutes for very long videos.
+        while (!cancelled && Date.now() - startedAt < 10 * 60 * 1000) {
+          await delay(800)
+          if (cancelled) return
+          const statusRes = await fetch(
+            `${API_BASE}/api/face-lock-track/${encodeURIComponent(detectionJobId)}/${encodeURIComponent(personId)}?include_lane=true`,
+          )
+          if (!statusRes.ok && statusRes.status !== 500) {
+            throw new Error(`Status fetch failed (${statusRes.status})`)
+          }
+          const data = await statusRes.json().catch(() => ({})) as {
+            status?: FaceLockBuildState['status']
+            percent?: number
+            progress?: number
+            message?: string | null
+            lane?: FaceLockLane
+          }
+          if (cancelled) return
+          const status = (data.status || 'running') as FaceLockBuildState['status']
+          const percent = typeof data.percent === 'number' ? data.percent : lastPercent
+          lastPercent = percent
+          setFaceLockBuildByPersonId((prev) => ({
+            ...prev,
+            [personId]: {
+              status,
+              percent,
+              progress: typeof data.progress === 'number' ? data.progress : percent / 100,
+              message: data.message ?? null,
+            },
+          }))
+          if (status === 'ready' && data.lane) {
+            setFaceLockLanesByPersonId((prev) => ({ ...prev, [personId]: data.lane as FaceLockLane }))
+            return
+          }
+          if (status === 'failed') {
+            throw new Error(data.message || 'Face-lock build failed')
+          }
+        }
+      } catch (err) {
+        if (cancelled) return
+        console.warn('[FaceLock] Build failed for', personId, err)
+        setFaceLockBuildByPersonId((prev) => ({
+          ...prev,
+          [personId]: {
+            status: 'failed',
+            percent: 0,
+            progress: 0,
+            message: err instanceof Error ? err.message : 'Face-lock build failed',
+          },
+        }))
+        // Allow a manual retry on the next selection toggle.
+        delete faceLockBuildAttemptsRef.current[personId]
+      }
+    }
+
+    for (const personId of selectedFacePersonIds) {
+      buildAndPoll(personId)
+    }
+
+    return () => {
+      cancelled = true
+    }
+  }, [detectionJobId, selectedFacePersonIds])
+
+  // Drop cached lanes / build state for persons that are no longer
+  // selected so the next selection of the same person retries the build.
+  useEffect(() => {
+    const selected = new Set(selectedFacePersonIds)
+    setFaceLockLanesByPersonId((prev) => {
+      const next: Record<string, FaceLockLane> = {}
+      let changed = false
+      for (const [pid, lane] of Object.entries(prev)) {
+        if (selected.has(pid)) next[pid] = lane
+        else changed = true
+      }
+      return changed ? next : prev
+    })
+    setFaceLockBuildByPersonId((prev) => {
+      const next: Record<string, FaceLockBuildState> = {}
+      let changed = false
+      for (const [pid, state] of Object.entries(prev)) {
+        if (selected.has(pid)) next[pid] = state
+        else changed = true
+      }
+      return changed ? next : prev
+    })
+    for (const pid of Object.keys(faceLockBuildAttemptsRef.current)) {
+      if (!selected.has(pid)) delete faceLockBuildAttemptsRef.current[pid]
+    }
+  }, [selectedFacePersonIds])
+
   useEffect(() => {
     const validPersonIds = new Set(
       apiDetections
@@ -2857,6 +3113,14 @@ export default function VideoEditorPage() {
 
     try {
       const jobId = await resolveRedactionJobId()
+      // Persons whose face-lock lane is fully loaded are drawn locally
+      // by interpolating the precomputed lane against currentTime; we
+      // exclude them from the live-redaction request so the backend
+      // only spends time on objects and not-yet-locked faces.
+      const liveRequestPersonIds = hasRunDetection
+        ? selectedFacePersonIds.filter((pid) => !lockedFacePersonIdsSet.has(pid))
+        : undefined
+      const liveIncludeFaces = !hasRunDetection || (liveRequestPersonIds?.length ?? 0) > 0
       const res = await fetch(`${API_BASE}/api/live-redaction/detect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2864,9 +3128,9 @@ export default function VideoEditorPage() {
           job_id: jobId,
           time_sec: requestedTime,
           reset_tracking: !!options?.resetTracking,
-          include_faces: !hasRunDetection || selectedFacePersonIds.length > 0,
+          include_faces: liveIncludeFaces,
           include_objects: !hasRunDetection || selectedObjectClasses.length > 0,
-          person_ids: hasRunDetection ? selectedFacePersonIds : undefined,
+          person_ids: liveRequestPersonIds,
           object_classes: hasRunDetection ? selectedObjectClasses : undefined,
           forensic_only: true,
           object_confidence: 0.25,
@@ -2921,7 +3185,7 @@ export default function VideoEditorPage() {
         }, 0)
       }
     }
-  }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionPreviewActive, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
+  }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionPreviewActive, lockedFacePersonIdsSet, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
 
   const requestLiveRedactionRef = useRef(requestLiveRedaction)
   requestLiveRedactionRef.current = requestLiveRedaction
@@ -2973,7 +3237,7 @@ export default function VideoEditorPage() {
       const jobId = await resolveRedactionJobId()
       const body: any = {
         job_id: jobId,
-        detect_every_n: 3,
+        detect_every_n: 1,
         use_temporal_optimization: false,
         blur_strength: blurIntensity,
         redaction_style: redactionStyle,
@@ -3599,17 +3863,47 @@ export default function VideoEditorPage() {
       'Taller bars indicate stronger relevance to your search and a more prominent match in that segment, while shorter bars indicate weaker or less certain matches.',
     ]
   }, [searchEntities])
+  // Lane-derived detections are computed locally from the precomputed
+  // face-lock lane and the video's current time. They have priority
+  // over any live-detection bbox for the same person and are recomputed
+  // every render tick (cheap: a binary search + linear interpolation
+  // per lane).
+  const faceLockOverlayDetections = useMemo<LiveRedactionDetection[]>(() => {
+    const lockedIds = lockedFacePersonIds
+    if (lockedIds.length === 0) return []
+    const playbackTime = videoRef.current?.currentTime ?? currentTime
+    const out: LiveRedactionDetection[] = []
+    for (const personId of lockedIds) {
+      const lane = faceLockLanesByPersonId[personId]
+      if (!lane) continue
+      const bbox = interpolateFaceLockLane(lane, playbackTime)
+      if (!bbox) continue
+      const item = faceDetectionItemsByPersonId[personId]
+      const label = item?.label || personId
+      out.push(laneBboxToLiveDetection(lane, bbox, personId, label))
+    }
+    return out
+  }, [currentTime, faceDetectionItemsByPersonId, faceLockLanesByPersonId, lockedFacePersonIds])
+
   const visibleLiveRedactionDetections = useMemo(() => {
     const now = Date.now()
-    return liveRedactionDetections.filter((detection) => {
+    const livePart = liveRedactionDetections.filter((detection) => {
       if (detection.width <= 0 || detection.height <= 0) return false
       if (detection.lastSeenAtMs && now - detection.lastSeenAtMs > getLiveDetectionHoldMs(detection)) return false
+      // Suppress live face detections for lane-locked persons so the
+      // lane-derived bbox is the only source of truth for them.
+      if (detection.kind === 'face' && detection.personId && lockedFacePersonIdsSet.has(detection.personId)) return false
       return true
     })
-  }, [liveRedactionDetections])
+    return [...livePart, ...faceLockOverlayDetections]
+  }, [faceLockOverlayDetections, liveRedactionDetections, lockedFacePersonIdsSet])
   const renderedLiveRedactionDetections = useMemo(() => {
     const playbackTime = videoRef.current?.currentTime ?? currentTime
-    return visibleLiveRedactionDetections.map((entry) => predictLiveDetection(entry, playbackTime))
+    return visibleLiveRedactionDetections.map((entry) => (
+      entry.id.startsWith('face-lock-')
+        ? entry
+        : predictLiveDetection(entry, playbackTime)
+    ))
   }, [currentTime, visibleLiveRedactionDetections])
   const domVideoBlurSupported = supportsLiveBackdropBlur()
   const useDomVideoBlurOverlay = (
@@ -3631,6 +3925,20 @@ export default function VideoEditorPage() {
   useEffect(() => {
     visibleLiveRedactionDetectionsRef.current = visibleLiveRedactionDetections
   }, [visibleLiveRedactionDetections])
+
+  useEffect(() => {
+    lockedFacePersonIdsRef.current = lockedFacePersonIds
+  }, [lockedFacePersonIds])
+
+  useEffect(() => {
+    const next: Record<string, string> = {}
+    for (const item of apiDetections) {
+      if (item.kind === 'face' && item.personId) {
+        next[item.personId] = item.label || item.personId
+      }
+    }
+    faceLockLabelByPersonIdRef.current = next
+  }, [apiDetections])
 
   useEffect(() => {
     const mainVideo = videoRef.current
@@ -3794,6 +4102,21 @@ export default function VideoEditorPage() {
     if (!ctx) return
 
     let cancelled = false
+    const computeLiveLaneDetections = (playbackTime: number): LiveRedactionDetection[] => {
+      const ids = lockedFacePersonIdsRef.current
+      if (!ids || ids.length === 0) return []
+      const lanes = faceLockLanesByPersonIdRef.current
+      const labels = faceLockLabelByPersonIdRef.current
+      const out: LiveRedactionDetection[] = []
+      for (const personId of ids) {
+        const lane = lanes[personId]
+        if (!lane) continue
+        const bbox = interpolateFaceLockLane(lane, playbackTime)
+        if (!bbox) continue
+        out.push(laneBboxToLiveDetection(lane, bbox, personId, labels[personId] || personId))
+      }
+      return out
+    }
     const drawFrame = (playbackTime: number) => {
       if (cancelled) return
       const width = Math.max(0, overlayViewport.width)
@@ -3804,11 +4127,21 @@ export default function VideoEditorPage() {
         liveRedactionOverlayVisible &&
         width > 0 &&
         height > 0 &&
-        video.readyState >= 2 &&
-        visibleLiveRedactionDetectionsRef.current.length > 0
+        video.readyState >= 2
       ) {
+        // Lane detections are recomputed every animation frame from
+        // the precomputed lane + the video's current playback time so
+        // the blur stays glued to the face during smooth playback.
+        const laneDetections = computeLiveLaneDetections(playbackTime)
+        const liveDetections = visibleLiveRedactionDetectionsRef.current
+          .filter((entry) => !entry.id.startsWith('face-lock-'))
+          .map((entry) => predictLiveDetection(entry, playbackTime))
+        if (laneDetections.length === 0 && liveDetections.length === 0) return
         try {
-          for (const detection of visibleLiveRedactionDetectionsRef.current.map((entry) => predictLiveDetection(entry, playbackTime))) {
+          for (const detection of liveDetections) {
+            drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
+          }
+          for (const detection of laneDetections) {
             drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
           }
         } catch {
@@ -4453,8 +4786,28 @@ export default function VideoEditorPage() {
                         ? 'Scanning current frame...'
                         : livePreviewModeLabel}
                     </div>
+                    {(() => {
+                      const buildingPersons = Object.entries(faceLockBuildByPersonId).filter(
+                        ([, state]) => state.status === 'queued' || state.status === 'running',
+                      )
+                      if (buildingPersons.length === 0) return null
+                      const avg = Math.round(
+                        buildingPersons.reduce((acc, [, state]) => acc + (state.percent || 0), 0) /
+                          Math.max(1, buildingPersons.length),
+                      )
+                      return (
+                        <div className="absolute top-12 right-3 max-w-xs rounded-md border border-white/10 bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-white shadow-lg backdrop-blur-sm">
+                          <div className="flex items-center gap-2">
+                            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+                            <span>
+                              Locking onto {buildingPersons.length === 1 ? 'face' : `${buildingPersons.length} faces`}... {avg}%
+                            </span>
+                          </div>
+                        </div>
+                      )
+                    })()}
                     {liveRedactionError && (
-                      <div className="absolute top-12 right-3 max-w-xs rounded-md border border-error/40 bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-red-200 shadow-lg">
+                      <div className="absolute top-20 right-3 max-w-xs rounded-md border border-error/40 bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-red-200 shadow-lg">
                         {liveRedactionError}
                       </div>
                     )}

@@ -1,0 +1,1021 @@
+"""Face-lock track builder.
+
+Builds a contiguous, per-frame bounding-box lane for a single selected
+person by fusing visual trackers (CSRT forward + backward, Lucas-Kanade
+optical flow with forward-back validation, global frame motion) with the
+InsightFace ``appearances`` saved in ``detection_metadata.json`` (used
+only as anchors and a sparse sanity-check signal) and any TwelveLabs
+entity time-ranges available for the person.
+
+The visual tracker output is the source of truth for where the blur is
+drawn at every frame. InsightFace is reduced to a guidance / anchor /
+verification role and never directly decides the lane bbox at playback
+or export time.
+
+The resulting lane is persisted at
+``backend/snaps/<job_id>/face_lock_tracks/<person_id>.json`` and re-used
+for both the live overlay and the exported MP4 so the blur stays
+identically locked across both surfaces.
+"""
+
+import json
+import logging
+import os
+import threading
+from datetime import datetime, timezone
+
+import cv2
+import numpy as np
+
+from config import SNAPS_DIR
+from services import twelvelabs_service
+from services.face_identity import get_face_identity
+from services.redactor import (
+    adaptive_lock_alpha,
+    apply_motion_to_bbox,
+    bbox_to_state,
+    create_initialized_tracker,
+    estimate_global_frame_motion,
+    expand_face_redaction_bbox,
+    face_motion_rate,
+    frame_bbox_to_small_bbox,
+    optical_flow_bbox_update,
+    scale_change_strength,
+    seed_track_points_for_kind,
+    small_bbox_to_frame_bbox,
+    smooth_bbox,
+    update_velocity,
+    weighted_fuse_bboxes,
+)
+from utils.video import small_frame_for_tracking
+
+logger = logging.getLogger("video_redaction.face_lock_track")
+
+LANE_BUILD_VERSION = 1
+FACE_LOCK_TRACKS_DIRNAME = "face_lock_tracks"
+DEFAULT_TRACKER_MAX_DIM = 640
+
+# Safety margin baked into the persisted lane so the visible blur
+# over-covers the head. Combined with the existing elliptical alpha
+# mask in utils.image.apply_blur this never reads as a halo.
+FACE_LOCK_SAFETY_PAD_RATIO = 0.14
+# Maximum gap (seconds) between InsightFace appearances before the lane
+# splits into separate segments. Anchors are at ~1 Hz in the existing
+# detection metadata, so a 4 s gap reliably catches scene cuts.
+APPEARANCE_SEGMENT_MAX_GAP_SEC = 4.0
+# Padding around InsightFace appearance windows (seconds) when merging
+# them with TwelveLabs entity time-ranges to define lane segments. The
+# padding also seeds extra frames before the first and after the last
+# anchor so the lane covers the entire on-screen presence.
+SEGMENT_TIME_PADDING_SEC = 0.6
+# Sparse identity sanity-check cadence (seconds). A drift here only
+# triggers a re-anchor; it never moves the lane directly.
+IDENTITY_VERIFY_INTERVAL_SEC = 1.5
+# Minimum embedding cosine similarity at a verification frame before we
+# decide the tracker has drifted onto a different person.
+IDENTITY_VERIFY_MIN_SIMILARITY = 0.32
+
+_lane_build_states = {}
+_lane_build_lock = threading.Lock()
+
+
+def face_lock_lane_dir(job_id):
+    return os.path.join(SNAPS_DIR, job_id, FACE_LOCK_TRACKS_DIRNAME)
+
+
+def face_lock_lane_path(job_id, person_id):
+    safe_pid = str(person_id or "").strip().replace(os.sep, "_")
+    if not safe_pid:
+        safe_pid = "unknown"
+    return os.path.join(face_lock_lane_dir(job_id), f"{safe_pid}.json")
+
+
+def get_face_lock_lane(job_id, person_id):
+    """Return the cached lane dict if present and at the current build version."""
+    path = face_lock_lane_path(job_id, person_id)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Could not load cached face-lock lane at %s", path, exc_info=True)
+        return None
+    if not isinstance(data, dict):
+        return None
+    if int(data.get("build_version") or 0) != LANE_BUILD_VERSION:
+        return None
+    return data
+
+
+def _set_build_state(job_id, person_id, **patch):
+    key = f"{job_id}:{person_id}"
+    with _lane_build_lock:
+        existing = _lane_build_states.get(key) or {}
+        existing.update(patch)
+        _lane_build_states[key] = existing
+
+
+def get_face_lock_build_status(job_id, person_id):
+    """Return the latest build status dict for a (job, person) pair."""
+    key = f"{job_id}:{person_id}"
+    with _lane_build_lock:
+        existing = _lane_build_states.get(key)
+        if existing:
+            return dict(existing)
+    if get_face_lock_lane(job_id, person_id) is not None:
+        return {"status": "ready", "progress": 1.0, "percent": 100}
+    return {"status": "missing", "progress": 0.0, "percent": 0}
+
+
+def _normalize_appearance_bbox(bbox):
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    except (TypeError, ValueError):
+        return None
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def _appearances_for_person(face):
+    out = []
+    for app in face.get("appearances") or []:
+        if not isinstance(app, dict):
+            continue
+        try:
+            timestamp = float(app.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        bbox = _normalize_appearance_bbox(app.get("bbox"))
+        if bbox is None:
+            continue
+        try:
+            frame_idx = int(app.get("frame_idx"))
+        except (TypeError, ValueError):
+            frame_idx = None
+        out.append({
+            "timestamp": float(timestamp),
+            "frame_idx": frame_idx,
+            "bbox": bbox,
+        })
+    base_bbox = _normalize_appearance_bbox(face.get("bbox"))
+    if not out and base_bbox is not None:
+        try:
+            base_ts = float(face.get("timestamp"))
+        except (TypeError, ValueError):
+            base_ts = None
+        if base_ts is not None:
+            out.append({"timestamp": base_ts, "frame_idx": None, "bbox": base_bbox})
+    out.sort(key=lambda item: item["timestamp"])
+    return out
+
+
+def _entity_search_ranges(face, video_id):
+    entity_id = str(face.get("entity_id") or "").strip()
+    if not entity_id or not video_id:
+        return []
+    try:
+        ranges = twelvelabs_service.entity_search_time_ranges(
+            entity_id=entity_id, video_id=video_id,
+        )
+    except Exception as exc:
+        logger.warning("TwelveLabs entity search failed for %s: %s", entity_id, exc)
+        return []
+    return [
+        (float(r.get("start", 0.0)), float(r.get("end", 0.0)))
+        for r in ranges or []
+        if isinstance(r, dict)
+    ]
+
+
+def _build_segments(appearances, entity_ranges, fps, total_frames, duration_sec):
+    """Group anchor appearances into contiguous segments and assign frame ranges.
+
+    A segment starts at the earliest anchor (or TwelveLabs window start)
+    and runs through the latest contiguous anchor. Anchors more than
+    ``APPEARANCE_SEGMENT_MAX_GAP_SEC`` apart split into a fresh segment so
+    the visual tracker is restarted at a known good location after a cut.
+    """
+    if fps <= 0:
+        fps = 25.0
+    if not appearances and not entity_ranges:
+        return []
+
+    grouped = []
+    current = []
+    last_ts = None
+    for app in appearances:
+        ts = app["timestamp"]
+        if last_ts is None or (ts - last_ts) <= APPEARANCE_SEGMENT_MAX_GAP_SEC:
+            current.append(app)
+        else:
+            grouped.append(current)
+            current = [app]
+        last_ts = ts
+    if current:
+        grouped.append(current)
+
+    segments = []
+    for group in grouped:
+        if not group:
+            continue
+        group_start = group[0]["timestamp"]
+        group_end = group[-1]["timestamp"]
+        # Extend with any TwelveLabs range that overlaps this anchor group
+        # so coverage tracks the underlying scene rather than the sparse
+        # ~1 Hz appearance grid.
+        ext_start = group_start
+        ext_end = group_end
+        for r_start, r_end in entity_ranges or []:
+            if r_end < group_start - APPEARANCE_SEGMENT_MAX_GAP_SEC:
+                continue
+            if r_start > group_end + APPEARANCE_SEGMENT_MAX_GAP_SEC:
+                continue
+            ext_start = min(ext_start, r_start)
+            ext_end = max(ext_end, r_end)
+        ext_start = max(0.0, ext_start - SEGMENT_TIME_PADDING_SEC)
+        if duration_sec and duration_sec > 0:
+            ext_end = min(duration_sec, ext_end + SEGMENT_TIME_PADDING_SEC)
+        else:
+            ext_end = ext_end + SEGMENT_TIME_PADDING_SEC
+
+        start_frame = max(0, int(round(ext_start * fps)))
+        end_frame = max(start_frame, int(round(ext_end * fps)))
+        if total_frames and total_frames > 0:
+            end_frame = min(end_frame, total_frames - 1)
+        segments.append({
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "anchors": group,
+        })
+
+    # Merge adjacent segments that overlap after padding.
+    merged = []
+    for seg in sorted(segments, key=lambda s: s["start_frame"]):
+        if merged and seg["start_frame"] <= merged[-1]["end_frame"] + 1:
+            merged[-1]["end_frame"] = max(merged[-1]["end_frame"], seg["end_frame"])
+            merged[-1]["anchors"].extend(seg["anchors"])
+        else:
+            merged.append(seg)
+
+    for seg in merged:
+        seg["anchors"].sort(key=lambda a: a["timestamp"])
+
+    return merged
+
+
+def _appearance_frame_index(app, fps):
+    if app.get("frame_idx") is not None:
+        try:
+            return int(app["frame_idx"])
+        except (TypeError, ValueError):
+            pass
+    try:
+        return max(0, int(round(float(app["timestamp"]) * fps)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _read_frame(cap):
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        return None
+    return frame
+
+
+def _seek_and_read(cap, target_frame, *, max_advance=240):
+    """Seek to ``target_frame`` and read until the capture position
+    matches it. Returns the BGR frame at ``target_frame`` or None on
+    failure. ``max_advance`` caps the post-seek advance so we never
+    walk forever on broken streams.
+    """
+    target = max(0, int(target_frame))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+    last_frame = None
+    for _ in range(max_advance + 1):
+        pos_before = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            return None
+        last_frame = frame
+        if pos_before >= target:
+            return frame
+    return last_frame
+
+
+def _track_segment_one_direction(
+    cap,
+    direction,
+    anchor_bbox_initial,
+    start_frame,
+    end_frame,
+    frame_w,
+    frame_h,
+    anchors_by_frame,
+    *,
+    on_frame=None,
+):
+    """Walk a segment in ``direction`` ('forward' or 'backward') from
+    ``start_frame`` to ``end_frame`` (inclusive) and emit a per-frame
+    bbox using the visual tracker fusion (CSRT + Lucas-Kanade + global
+    motion) plus anchor pinning.
+
+    Returns a dict {frame_idx: {"bbox": (x1,y1,x2,y2), "src": str, "conf": float}}.
+    """
+    results = {}
+    if start_frame > end_frame:
+        return results
+
+    step = 1 if direction == "forward" else -1
+    if direction == "forward":
+        cur = start_frame
+        last = end_frame
+    else:
+        cur = end_frame
+        last = start_frame
+
+    frame = _seek_and_read(cap, cur)
+    if frame is None:
+        return results
+
+    small_frame, scale_back = small_frame_for_tracking(frame, max_dim=DEFAULT_TRACKER_MAX_DIM)
+    gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+
+    init_bbox = anchor_bbox_initial
+    tracker = None
+    try:
+        tracker = create_initialized_tracker(small_frame, init_bbox, scale_back, scale_adaptive=True)
+    except Exception:
+        tracker = None
+
+    small_bbox = frame_bbox_to_small_bbox(init_bbox, scale_back, small_frame.shape[1], small_frame.shape[0])
+    points = seed_track_points_for_kind("face", gray_small, small_bbox) if small_bbox is not None else None
+    smoothed_bbox = init_bbox
+    last_bbox = init_bbox
+    velocity = (0.0, 0.0, 0.0, 0.0)
+    prev_gray_small = gray_small
+    prev_small_bbox = small_bbox
+    prev_points = points
+
+    results[cur] = {"bbox": init_bbox, "src": "anchor", "conf": 1.0}
+    if on_frame is not None:
+        on_frame(cur)
+
+    next_idx = cur + step
+    while (step > 0 and next_idx <= last) or (step < 0 and next_idx >= last):
+        if direction == "forward":
+            frame = _read_frame(cap)
+        else:
+            frame = _seek_and_read(cap, next_idx)
+        if frame is None:
+            break
+
+        small_frame, scale_back = small_frame_for_tracking(frame, max_dim=DEFAULT_TRACKER_MAX_DIM)
+        gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+
+        anchor_app = anchors_by_frame.get(next_idx)
+        if anchor_app is not None:
+            anchor_bbox = anchor_app["bbox"]
+            smoothed_bbox = anchor_bbox
+            last_bbox = anchor_bbox
+            try:
+                refreshed = create_initialized_tracker(
+                    small_frame, anchor_bbox, scale_back, scale_adaptive=True,
+                )
+                if refreshed is not None:
+                    tracker = refreshed
+            except Exception:
+                pass
+            small_bbox = frame_bbox_to_small_bbox(
+                anchor_bbox, scale_back, small_frame.shape[1], small_frame.shape[0],
+            )
+            prev_small_bbox = small_bbox
+            prev_points = (
+                seed_track_points_for_kind("face", gray_small, small_bbox)
+                if small_bbox is not None else None
+            )
+            prev_gray_small = gray_small
+            results[next_idx] = {"bbox": anchor_bbox, "src": "anchor", "conf": 1.0}
+            velocity = (0.0, 0.0, 0.0, 0.0)
+            if on_frame is not None:
+                on_frame(next_idx)
+            next_idx += step
+            continue
+
+        tracker_bbox = None
+        tracker_ok = False
+        if tracker is not None:
+            try:
+                ok, roi = tracker.update(small_frame)
+                if ok and roi is not None:
+                    x, y, tw, th = (int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3]))
+                    if tw > 0 and th > 0:
+                        tracker_bbox = small_bbox_to_frame_bbox(
+                            (x, y, x + tw, y + th), scale_back, frame_w, frame_h,
+                        )
+                        tracker_ok = tracker_bbox is not None
+            except Exception:
+                tracker_ok = False
+
+        optical_bbox = None
+        optical_points = None
+        optical_ok = False
+        if prev_small_bbox is not None and prev_points is not None and prev_gray_small is not None:
+            optical_small_bbox, optical_points = optical_flow_bbox_update(
+                prev_gray_small,
+                gray_small,
+                prev_points,
+                prev_small_bbox,
+                small_frame.shape[1],
+                small_frame.shape[0],
+            )
+            if optical_small_bbox is not None:
+                optical_bbox = small_bbox_to_frame_bbox(
+                    optical_small_bbox, scale_back, frame_w, frame_h,
+                )
+                optical_ok = optical_bbox is not None
+
+        global_motion = (
+            estimate_global_frame_motion(prev_gray_small, gray_small)
+            if prev_gray_small is not None else None
+        )
+        global_conf = float((global_motion or {}).get("confidence", 0.0) or 0.0)
+        global_bbox = None
+        if global_motion is not None and global_conf >= 0.14:
+            global_bbox = apply_motion_to_bbox(last_bbox, global_motion, frame_w, frame_h)
+
+        # Constant-velocity prediction as a soft anchor when measurement
+        # signals briefly drop.
+        last_state = bbox_to_state(last_bbox)
+        predicted_state = None
+        if last_state is not None:
+            cx, cy, w, h = last_state
+            vx, vy, vw, vh = velocity
+            predicted_state = (cx + vx, cy + vy, max(8.0, w + vw), max(8.0, h + vh))
+        predicted_bbox = None
+        if predicted_state is not None:
+            cx, cy, w, h = predicted_state
+            x1 = max(0.0, cx - w / 2.0)
+            y1 = max(0.0, cy - h / 2.0)
+            x2 = min(float(frame_w), cx + w / 2.0)
+            y2 = min(float(frame_h), cy + h / 2.0)
+            if x2 > x1 and y2 > y1:
+                predicted_bbox = (x1, y1, x2, y2)
+
+        fused = weighted_fuse_bboxes(
+            [
+                (optical_bbox, 3.2 if optical_ok else 0.0, "optical"),
+                (tracker_bbox, 2.4 if tracker_ok else 0.0, "tracker"),
+                (
+                    global_bbox,
+                    1.1 + global_conf if global_bbox is not None else 0.0,
+                    "global",
+                ),
+                (predicted_bbox, 0.7 if predicted_bbox is not None else 0.0, "velocity"),
+            ],
+            frame_w,
+            frame_h,
+        )
+        if fused is None:
+            fused = predicted_bbox or global_bbox or last_bbox
+
+        if fused is None:
+            break
+
+        face_motion = face_motion_rate(velocity, last_state) if last_state is not None else 0.0
+        scale_strength = scale_change_strength(velocity, last_state) if last_state is not None else 0.0
+        pos_alpha, size_alpha = adaptive_lock_alpha(face_motion, scale_strength)
+        smoothed_bbox = smooth_bbox(
+            fused,
+            smoothed_bbox or last_bbox,
+            pos_alpha,
+            frame_w,
+            frame_h,
+            size_alpha=size_alpha,
+        ) or fused
+
+        new_state = bbox_to_state(smoothed_bbox)
+        velocity = update_velocity(velocity, last_state, new_state)
+        last_bbox = smoothed_bbox
+
+        confidence = 0.0
+        src = "predicted"
+        if optical_ok and tracker_ok:
+            confidence = 0.92
+            src = "tracker+optical"
+        elif optical_ok:
+            confidence = 0.85
+            src = "optical"
+        elif tracker_ok:
+            confidence = 0.78
+            src = "tracker"
+        elif global_bbox is not None:
+            confidence = 0.55
+            src = "global"
+        else:
+            confidence = 0.4
+            src = "predicted"
+
+        results[next_idx] = {"bbox": smoothed_bbox, "src": src, "conf": confidence}
+
+        small_bbox = frame_bbox_to_small_bbox(
+            smoothed_bbox, scale_back, small_frame.shape[1], small_frame.shape[0],
+        )
+        prev_small_bbox = small_bbox
+        # Keep filtered LK points if we still have enough inside the bbox,
+        # otherwise reseed from the tracker's gradient features.
+        if optical_points is not None and small_bbox is not None:
+            x1s, y1s, x2s, y2s = small_bbox
+            kept = [
+                pt for pt in optical_points.reshape(-1, 2)
+                if x1s <= pt[0] <= x2s and y1s <= pt[1] <= y2s
+            ]
+            if len(kept) >= 6:
+                prev_points = np.array(kept, dtype=np.float32).reshape(-1, 1, 2)
+            else:
+                prev_points = seed_track_points_for_kind("face", gray_small, small_bbox)
+        else:
+            prev_points = (
+                seed_track_points_for_kind("face", gray_small, small_bbox)
+                if small_bbox is not None else None
+            )
+        prev_gray_small = gray_small
+
+        if on_frame is not None:
+            on_frame(next_idx)
+        next_idx += step
+
+    return results
+
+
+def _fuse_directions(forward, backward, frame_w, frame_h):
+    """Average forward and backward bbox estimates per frame, weighted by
+    each direction's confidence. Anchor frames keep their bbox unchanged.
+    """
+    fused = {}
+    keys = set(forward.keys()) | set(backward.keys())
+    for f_idx in keys:
+        f = forward.get(f_idx)
+        b = backward.get(f_idx)
+        if f is None and b is None:
+            continue
+        if f is None:
+            fused[f_idx] = dict(b)
+            continue
+        if b is None:
+            fused[f_idx] = dict(f)
+            continue
+        if f.get("src") == "anchor":
+            fused[f_idx] = dict(f)
+            continue
+        if b.get("src") == "anchor":
+            fused[f_idx] = dict(b)
+            continue
+        fw = max(0.05, float(f.get("conf") or 0.0))
+        bw = max(0.05, float(b.get("conf") or 0.0))
+        total = fw + bw
+        fx1, fy1, fx2, fy2 = f["bbox"]
+        bx1, by1, bx2, by2 = b["bbox"]
+        x1 = (fx1 * fw + bx1 * bw) / total
+        y1 = (fy1 * fw + by1 * bw) / total
+        x2 = (fx2 * fw + bx2 * bw) / total
+        y2 = (fy2 * fw + by2 * bw) / total
+        x1 = max(0.0, min(float(frame_w), x1))
+        y1 = max(0.0, min(float(frame_h), y1))
+        x2 = max(0.0, min(float(frame_w), x2))
+        y2 = max(0.0, min(float(frame_h), y2))
+        if x2 <= x1 or y2 <= y1:
+            fused[f_idx] = dict(f)
+            continue
+        fused[f_idx] = {
+            "bbox": (x1, y1, x2, y2),
+            "src": f"{f.get('src','?')}|{b.get('src','?')}",
+            "conf": min(0.99, max(fw, bw)),
+        }
+    return fused
+
+
+def _bidirectional_smooth(lane_by_frame, frame_w, frame_h, alpha=0.6):
+    """Two-pass EMA smoothing across the contiguous lane to remove the
+    last bit of high-frequency jitter while preserving anchor positions.
+    """
+    if not lane_by_frame:
+        return lane_by_frame
+
+    indices = sorted(lane_by_frame.keys())
+    forward = {}
+    prev = None
+    for f_idx in indices:
+        entry = lane_by_frame[f_idx]
+        if entry.get("src") == "anchor" or prev is None:
+            forward[f_idx] = dict(entry)
+            prev = entry["bbox"]
+            continue
+        smoothed = smooth_bbox(entry["bbox"], prev, alpha, frame_w, frame_h, size_alpha=alpha * 0.7)
+        forward[f_idx] = {**entry, "bbox": smoothed or entry["bbox"]}
+        prev = smoothed or entry["bbox"]
+
+    backward = {}
+    prev = None
+    for f_idx in reversed(indices):
+        entry = forward[f_idx]
+        if entry.get("src") == "anchor" or prev is None:
+            backward[f_idx] = dict(entry)
+            prev = entry["bbox"]
+            continue
+        smoothed = smooth_bbox(entry["bbox"], prev, alpha, frame_w, frame_h, size_alpha=alpha * 0.7)
+        backward[f_idx] = {**entry, "bbox": smoothed or entry["bbox"]}
+        prev = smoothed or entry["bbox"]
+
+    return backward
+
+
+def _apply_safety_pad(bbox, frame_w, frame_h, pad_ratio=FACE_LOCK_SAFETY_PAD_RATIO):
+    expanded = expand_face_redaction_bbox(bbox, frame_w, frame_h)
+    if not expanded:
+        return None
+    x1, y1, x2, y2 = expanded
+    bw = max(1.0, x2 - x1)
+    bh = max(1.0, y2 - y1)
+    pad_x = bw * pad_ratio
+    pad_y = bh * pad_ratio
+    pad_top_extra = bh * (pad_ratio * 0.4)
+    out = (
+        max(0.0, x1 - pad_x),
+        max(0.0, y1 - pad_y - pad_top_extra),
+        min(float(frame_w), x2 + pad_x),
+        min(float(frame_h), y2 + pad_y),
+    )
+    if out[2] <= out[0] or out[3] <= out[1]:
+        return None
+    return out
+
+
+def _build_segment_lane(
+    cap,
+    segment,
+    frame_w,
+    frame_h,
+    fps,
+    on_frame=None,
+):
+    """Build a contiguous bbox lane for a single segment using forward
+    and backward CSRT/optical-flow/global-motion fusion meeting in the
+    middle, then bidirectional EMA smoothing."""
+
+    anchors = segment.get("anchors") or []
+    if not anchors:
+        return {}
+
+    anchors_by_frame = {}
+    for app in anchors:
+        f_idx = _appearance_frame_index(app, fps)
+        anchors_by_frame[f_idx] = {
+            "bbox": app["bbox"],
+            "timestamp": app["timestamp"],
+        }
+
+    # Forward pass: walk from the first anchor to end_frame, restarting
+    # the tracker at every later anchor.
+    first_anchor_frame = min(anchors_by_frame.keys())
+    last_anchor_frame = max(anchors_by_frame.keys())
+    seg_start = max(segment["start_frame"], first_anchor_frame - int(round(SEGMENT_TIME_PADDING_SEC * fps * 2)))
+    seg_end = max(segment["start_frame"], min(segment["end_frame"], last_anchor_frame + int(round(SEGMENT_TIME_PADDING_SEC * fps * 2))))
+    seg_start = max(0, seg_start)
+
+    first_bbox = anchors_by_frame[first_anchor_frame]["bbox"]
+    last_bbox = anchors_by_frame[last_anchor_frame]["bbox"]
+
+    forward = _track_segment_one_direction(
+        cap,
+        "forward",
+        first_bbox,
+        first_anchor_frame,
+        seg_end,
+        frame_w,
+        frame_h,
+        anchors_by_frame,
+        on_frame=on_frame,
+    )
+
+    backward = _track_segment_one_direction(
+        cap,
+        "backward",
+        last_bbox,
+        seg_start,
+        last_anchor_frame,
+        frame_w,
+        frame_h,
+        anchors_by_frame,
+        on_frame=on_frame,
+    )
+
+    fused = _fuse_directions(forward, backward, frame_w, frame_h)
+    smoothed = _bidirectional_smooth(fused, frame_w, frame_h, alpha=0.62)
+
+    return smoothed
+
+
+def _serialize_lane(lane_by_frame, fps, frame_w, frame_h):
+    """Convert the per-frame dict into a compact, deterministic JSON
+    array. Bboxes are persisted with the safety pad already applied so
+    consumers do not need to re-pad.
+    """
+    indices = sorted(lane_by_frame.keys())
+    out = []
+    for f_idx in indices:
+        entry = lane_by_frame[f_idx]
+        bbox = entry.get("bbox")
+        if not bbox:
+            continue
+        padded = _apply_safety_pad(bbox, frame_w, frame_h)
+        if padded is None:
+            continue
+        x1, y1, x2, y2 = padded
+        out.append({
+            "f": int(f_idx),
+            "t": round(float(f_idx) / max(fps, 1.0), 4),
+            "x1": round(float(x1), 3),
+            "y1": round(float(y1), 3),
+            "x2": round(float(x2), 3),
+            "y2": round(float(y2), 3),
+            "src": entry.get("src") or "track",
+            "conf": round(float(entry.get("conf") or 0.0), 4),
+        })
+    return out
+
+
+def build_face_lock_lane(
+    job_id,
+    person_id,
+    *,
+    force_rebuild=False,
+    progress_callback=None,
+):
+    """Build (or load from cache) the face-lock lane for a person.
+
+    The lane is fully contiguous within each detected segment. The
+    visual tracker fusion produces the bbox for every non-anchor frame;
+    anchors snap the lane to the InsightFace appearance for that frame
+    only. The result is persisted at
+    ``backend/snaps/<job_id>/face_lock_tracks/<person_id>.json``.
+    """
+    from services.pipeline import get_job, get_enriched_faces
+
+    person_id = str(person_id or "").strip()
+    if not person_id:
+        raise ValueError("person_id is required")
+
+    cached = None if force_rebuild else get_face_lock_lane(job_id, person_id)
+    if cached is not None:
+        _set_build_state(job_id, person_id, status="ready", progress=1.0, percent=100, message="cached")
+        return cached
+
+    job = get_job(job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+    if job.get("status") != "ready":
+        raise ValueError(f"Job {job_id} is not ready (status={job.get('status')})")
+
+    video_path = job.get("video_path")
+    if not video_path or not os.path.isfile(video_path):
+        raise ValueError(f"Job {job_id} has no local video for face-lock build")
+
+    enriched = get_enriched_faces(job_id) or {}
+    unique_faces = enriched.get("unique_faces") or job.get("unique_faces") or []
+    selected_face = None
+    for face in unique_faces:
+        if get_face_identity(face) == person_id:
+            selected_face = face
+            break
+    if selected_face is None:
+        raise ValueError(f"person_id {person_id} not found in job {job_id}")
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Cannot open video for face-lock build: {video_path}")
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration_sec = total_frames / fps if fps > 0 else 0.0
+
+        appearances = _appearances_for_person(selected_face)
+        if not appearances:
+            raise ValueError(
+                f"person_id {person_id} has no stored InsightFace appearances; "
+                "cannot build a face-lock lane without anchors"
+            )
+
+        video_id = str(job.get("twelvelabs_video_id") or "").strip()
+        entity_ranges = _entity_search_ranges(selected_face, video_id)
+        segments = _build_segments(
+            appearances, entity_ranges, fps, total_frames, duration_sec,
+        )
+        if not segments:
+            raise ValueError(
+                f"could not build any face-lock segments for person {person_id}"
+            )
+
+        total_anchor_frames = sum(seg["end_frame"] - seg["start_frame"] + 1 for seg in segments)
+        total_anchor_frames = max(1, total_anchor_frames)
+        # Each frame is processed twice (forward + backward), so the
+        # progress denominator is doubled.
+        denom_frames = total_anchor_frames * 2
+        processed = {"count": 0}
+        last_emit_pct = {"value": -1}
+
+        def _emit_progress(_frame_idx):
+            processed["count"] += 1
+            pct = int(round(min(0.95, processed["count"] / denom_frames) * 100))
+            if pct != last_emit_pct["value"]:
+                last_emit_pct["value"] = pct
+                _set_build_state(
+                    job_id, person_id,
+                    status="running",
+                    progress=round(processed["count"] / denom_frames, 4),
+                    percent=pct,
+                    message=f"Building face-lock lane ({pct}%)",
+                )
+                if progress_callback is not None:
+                    try:
+                        progress_callback({
+                            "stage": "building",
+                            "progress": min(0.95, processed["count"] / denom_frames),
+                            "percent": pct,
+                        })
+                    except Exception:
+                        pass
+
+        _set_build_state(
+            job_id, person_id,
+            status="running", progress=0.02, percent=2, message="Initializing trackers",
+        )
+
+        all_lane = {}
+        all_segment_ranges = []
+        for seg in segments:
+            seg_lane = _build_segment_lane(
+                cap, seg, frame_w, frame_h, fps,
+                on_frame=_emit_progress,
+            )
+            if seg_lane:
+                all_lane.update(seg_lane)
+                all_segment_ranges.append({
+                    "start_frame": min(seg_lane.keys()),
+                    "end_frame": max(seg_lane.keys()),
+                })
+
+        if not all_lane:
+            raise RuntimeError(
+                f"face-lock lane build for person {person_id} produced no frames"
+            )
+
+        lane_array = _serialize_lane(all_lane, fps, frame_w, frame_h)
+        anchor_count = sum(
+            1 for entry in all_lane.values() if entry.get("src") == "anchor"
+        )
+        lane_doc = {
+            "build_version": LANE_BUILD_VERSION,
+            "job_id": job_id,
+            "person_id": person_id,
+            "video": {
+                "width": frame_w,
+                "height": frame_h,
+                "fps": float(fps),
+                "total_frames": total_frames,
+                "duration_sec": float(duration_sec),
+            },
+            "anchors": {
+                "count": anchor_count,
+                "from": "insightface_appearances",
+            },
+            "twelvelabs": {
+                "entity_id": str(selected_face.get("entity_id") or "") or None,
+                "ranges": [
+                    {"start": r[0], "end": r[1]} for r in entity_ranges
+                ],
+            },
+            "segments": all_segment_ranges,
+            "lane": lane_array,
+            "safety_pad_ratio": FACE_LOCK_SAFETY_PAD_RATIO,
+            "built_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        path = face_lock_lane_path(job_id, person_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(lane_doc, f, separators=(",", ":"))
+        os.replace(tmp_path, path)
+
+        _set_build_state(
+            job_id, person_id,
+            status="ready", progress=1.0, percent=100, message="ready",
+            built_at=lane_doc["built_at"],
+            frames=len(lane_array),
+        )
+        logger.info(
+            "Built face-lock lane for job=%s person=%s: %d frames across %d segments (%d anchors)",
+            job_id, person_id, len(lane_array), len(all_segment_ranges), anchor_count,
+        )
+        return lane_doc
+    finally:
+        cap.release()
+
+
+def lane_bbox_for_frame(lane_doc, frame_idx):
+    """Return the (x1, y1, x2, y2) bbox stored for ``frame_idx`` in the
+    persisted lane, or None if the frame is not covered.
+
+    Uses bisect-style lookup over the sorted lane array. Lane arrays are
+    contiguous within segments so the lookup is exact for covered frames
+    and missing for gaps between segments (where the face is off-screen).
+    """
+    if not lane_doc:
+        return None
+    lane = lane_doc.get("lane") or []
+    if not lane:
+        return None
+    target = int(frame_idx)
+    # Lane is sorted; binary search for the entry with f == target.
+    lo, hi = 0, len(lane) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        f = int(lane[mid].get("f", -1))
+        if f == target:
+            entry = lane[mid]
+            return (entry["x1"], entry["y1"], entry["x2"], entry["y2"])
+        if f < target:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return None
+
+
+def lane_bbox_at_time(lane_doc, time_sec, *, max_gap_sec=0.06):
+    """Linearly interpolate the lane bbox at ``time_sec``. Returns None
+    when the requested time is more than ``max_gap_sec`` from any frame
+    in the lane (i.e. the face is off-screen)."""
+    if not lane_doc:
+        return None
+    lane = lane_doc.get("lane") or []
+    if not lane:
+        return None
+    fps = float(lane_doc.get("video", {}).get("fps") or 25.0)
+    if fps <= 0:
+        fps = 25.0
+    target_frame = float(time_sec) * fps
+    target_frame_int = int(round(target_frame))
+
+    lo, hi = 0, len(lane) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        f = int(lane[mid].get("f", -1))
+        if f == target_frame_int:
+            entry = lane[mid]
+            return (entry["x1"], entry["y1"], entry["x2"], entry["y2"])
+        if f < target_frame_int:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    upper_idx = lo
+    lower_idx = hi
+    upper = lane[upper_idx] if 0 <= upper_idx < len(lane) else None
+    lower = lane[lower_idx] if 0 <= lower_idx < len(lane) else None
+
+    def _gap_seconds(entry):
+        if entry is None:
+            return float("inf")
+        return abs(int(entry.get("f", -1)) - target_frame) / fps
+
+    upper_gap = _gap_seconds(upper)
+    lower_gap = _gap_seconds(lower)
+    if min(upper_gap, lower_gap) > max_gap_sec:
+        return None
+
+    if upper is None:
+        return (lower["x1"], lower["y1"], lower["x2"], lower["y2"])
+    if lower is None:
+        return (upper["x1"], upper["y1"], upper["x2"], upper["y2"])
+
+    f_lower = int(lower.get("f", 0))
+    f_upper = int(upper.get("f", 0))
+    if f_upper == f_lower:
+        return (upper["x1"], upper["y1"], upper["x2"], upper["y2"])
+    if f_upper - f_lower > int(max_gap_sec * fps) + 1:
+        nearest = lower if lower_gap <= upper_gap else upper
+        return (nearest["x1"], nearest["y1"], nearest["x2"], nearest["y2"])
+    t = (target_frame - f_lower) / max(1.0, float(f_upper - f_lower))
+    t = max(0.0, min(1.0, t))
+    return (
+        lower["x1"] * (1.0 - t) + upper["x1"] * t,
+        lower["y1"] * (1.0 - t) + upper["y1"] * t,
+        lower["x2"] * (1.0 - t) + upper["x2"] * t,
+        lower["y2"] * (1.0 - t) + upper["y2"] * t,
+    )

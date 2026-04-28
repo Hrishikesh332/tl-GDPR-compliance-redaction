@@ -35,17 +35,17 @@ logger = logging.getLogger("video_redaction.redactor")
 # not as a halo around the head. The elliptical alpha mask in
 # ``utils.image.apply_blur`` already feathers the edges, so a hard
 # margin is unnecessary.
-FACE_REDACTION_PAD_X_RATIO = 0.04
-FACE_REDACTION_PAD_TOP_RATIO = 0.12
-FACE_REDACTION_PAD_BOTTOM_RATIO = 0.04
+FACE_REDACTION_PAD_X_RATIO = 0.08
+FACE_REDACTION_PAD_TOP_RATIO = 0.18
+FACE_REDACTION_PAD_BOTTOM_RATIO = 0.10
 GLOBAL_MOTION_MAX_CORNERS = 240
 GLOBAL_MOTION_MIN_POINTS = 8
 GLOBAL_MOTION_MIN_CONFIDENCE = 0.14
 FACE_TRACK_MOTION_SEARCH_BONUS_CAP = 0.72
 # Cap how much extra padding motion can add to the blur. Kept tiny so
 # pans/zooms cannot inflate the blur into a halo around the head.
-FACE_TRACK_MOTION_PAD_CAP = 0.05
-FACE_TRACK_BRIDGE_PAD_CAP = 0.05
+FACE_TRACK_MOTION_PAD_CAP = 0.08
+FACE_TRACK_BRIDGE_PAD_CAP = 0.08
 # Lower confidence bar so the blur can ride a camera shift even if the
 # scene is mostly low-texture (background sky, walls, etc.).
 FACE_TRACK_BRIDGE_MIN_GLOBAL_CONFIDENCE = 0.14
@@ -63,6 +63,12 @@ FACE_LOCK_STILL_SIZE_ALPHA = 0.65
 FACE_LOCK_MOVING_SIZE_ALPHA = 0.32
 FACE_LOCK_PREDICTION_ALPHA = 0.32
 FACE_LOCK_PREDICTION_SIZE_ALPHA = 0.22
+FACE_LOCK_MOTION_BRIDGE_ALPHA = 0.92
+FACE_LOCK_MOTION_BRIDGE_SIZE_ALPHA = 0.65
+FACE_TRACK_POINT_MAX_CORNERS = 90
+FACE_TRACK_POINT_INNER_RATIO = 0.9
+OPTICAL_FLOW_FORWARD_BACK_MAX_ERROR = 1.8
+OPTICAL_FLOW_MIN_AFFINE_INLIER_RATIO = 0.42
 _NO_TRACKER_FACTORY = object()
 _TRACKER_FACTORY_CACHE = {}
 _TRACKER_FACTORY_LOGGED = set()
@@ -605,19 +611,28 @@ def corners_to_bbox(corners, frame_w, frame_h, min_side=4):
     return (x1, y1, x2, y2)
 
 
-def seed_tracking_points(gray_frame, bbox, max_corners=60):
+def seed_tracking_points(gray_frame, bbox, max_corners=60, elliptical=False):
     if gray_frame is None or bbox is None:
         return None
     h, w = gray_frame.shape[:2]
     x1, y1, x2, y2 = bbox
-    x1 = max(0, min(x1, w - 1))
-    y1 = max(0, min(y1, h - 1))
-    x2 = max(0, min(x2, w))
-    y2 = max(0, min(y2, h))
+    x1 = int(max(0, min(round(float(x1)), w - 1)))
+    y1 = int(max(0, min(round(float(y1)), h - 1)))
+    x2 = int(max(0, min(round(float(x2)), w)))
+    y2 = int(max(0, min(round(float(y2)), h)))
     if x2 - x1 < 4 or y2 - y1 < 4:
         return None
     mask = np.zeros((h, w), dtype=np.uint8)
-    mask[y1:y2, x1:x2] = 255
+    if elliptical:
+        cx = int(round((x1 + x2) / 2.0))
+        cy = int(round((y1 + y2) / 2.0))
+        axes = (
+            max(2, int(round((x2 - x1) * FACE_TRACK_POINT_INNER_RATIO / 2.0))),
+            max(2, int(round((y2 - y1) * FACE_TRACK_POINT_INNER_RATIO / 2.0))),
+        )
+        cv2.ellipse(mask, (cx, cy), axes, 0, 0, 360, 255, -1)
+    else:
+        mask[y1:y2, x1:x2] = 255
     points = cv2.goodFeaturesToTrack(
         gray_frame,
         maxCorners=max_corners,
@@ -626,6 +641,20 @@ def seed_tracking_points(gray_frame, bbox, max_corners=60):
         blockSize=7,
         mask=mask,
     )
+    return points
+
+
+def seed_track_points_for_kind(kind, gray_frame, bbox):
+    """Seed per-track LK points, biasing face tracks toward the facial oval."""
+    is_face = str(kind or "").strip().lower() == "face"
+    points = seed_tracking_points(
+        gray_frame,
+        bbox,
+        max_corners=FACE_TRACK_POINT_MAX_CORNERS if is_face else 60,
+        elliptical=is_face,
+    )
+    if points is None and is_face:
+        points = seed_tracking_points(gray_frame, bbox, max_corners=60, elliptical=False)
     return points
 
 
@@ -648,7 +677,7 @@ def optical_flow_bbox_update(prev_gray, gray, prev_points, prev_bbox, frame_w, f
     if len(prev_points) < 2:
         return None, None
 
-    next_points, status, _ = cv2.calcOpticalFlowPyrLK(
+    next_points, status, err = cv2.calcOpticalFlowPyrLK(
         prev_gray,
         gray,
         prev_points,
@@ -660,10 +689,46 @@ def optical_flow_bbox_update(prev_gray, gray, prev_points, prev_bbox, frame_w, f
     if next_points is None or status is None:
         return None, None
 
-    good_old = prev_points[status.flatten() == 1]
-    good_new = next_points[status.flatten() == 1]
+    valid = status.flatten() == 1
+    if err is not None:
+        err_values = err.reshape(-1)
+        valid_errors = err_values[valid]
+        if valid_errors.size:
+            max_err = max(12.0, float(np.median(valid_errors)) * 2.75)
+            valid = valid & (err_values <= max_err)
+
+    good_old = prev_points[valid]
+    good_new = next_points[valid]
     if len(good_old) < 2 or len(good_new) < 2:
         return None, None
+
+    # Forward-backward LK validation rejects points that drift onto the
+    # background during camera pans or low-texture frames.
+    back_points, back_status, _ = cv2.calcOpticalFlowPyrLK(
+        gray,
+        prev_gray,
+        good_new,
+        None,
+        winSize=(21, 21),
+        maxLevel=3,
+        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03),
+    )
+    if back_points is not None and back_status is not None:
+        fb_error = np.linalg.norm(
+            back_points.reshape(-1, 2) - good_old.reshape(-1, 2),
+            axis=1,
+        )
+        bbox_w = max(1.0, float(prev_bbox[2] - prev_bbox[0]))
+        bbox_h = max(1.0, float(prev_bbox[3] - prev_bbox[1]))
+        max_fb_error = max(
+            OPTICAL_FLOW_FORWARD_BACK_MAX_ERROR,
+            min(bbox_w, bbox_h) * 0.045,
+        )
+        fb_valid = (back_status.flatten() == 1) & (fb_error <= max_fb_error)
+        good_old = good_old[fb_valid]
+        good_new = good_new[fb_valid]
+        if len(good_old) < 2 or len(good_new) < 2:
+            return None, None
 
     transformed_points = good_new.reshape(-1, 1, 2)
     if len(good_old) >= 4:
@@ -674,9 +739,17 @@ def optical_flow_bbox_update(prev_gray, gray, prev_points, prev_bbox, frame_w, f
             ransacReprojThreshold=3.0,
         )
         if matrix is not None:
+            inlier_ratio = 1.0
+            if inliers is not None and len(inliers) > 0:
+                inlier_ratio = float(np.mean(inliers))
+            scale = float(np.hypot(matrix[0, 0], matrix[1, 0]))
             corners = cv2.transform(bbox_corners(prev_bbox), matrix)
             bbox = corners_to_bbox(corners, frame_w, frame_h)
-            if bbox is not None:
+            if (
+                bbox is not None
+                and inlier_ratio >= OPTICAL_FLOW_MIN_AFFINE_INLIER_RATIO
+                and 0.55 <= scale <= 1.7
+            ):
                 if inliers is not None:
                     mask = inliers.flatten() == 1
                     if mask.any():
@@ -790,6 +863,47 @@ def merge_tracking_search_anchor(primary_bbox, secondary_bbox, frame_w, frame_h)
     return corners_to_bbox(merged_corners, frame_w, frame_h) or primary_bbox or secondary_bbox
 
 
+def weighted_fuse_bboxes(candidates, frame_w, frame_h):
+    """Fuse agreeing motion candidates as a small constant-velocity correction."""
+    valid = [
+        (bbox, max(0.0, float(weight)), name)
+        for bbox, weight, name in candidates
+        if bbox is not None and weight and weight > 0
+    ]
+    if not valid:
+        return None
+    anchor_bbox, _anchor_weight, _anchor_name = max(valid, key=lambda item: item[1])
+    anchor_diag = max(
+        1.0,
+        math.hypot(anchor_bbox[2] - anchor_bbox[0], anchor_bbox[3] - anchor_bbox[1]),
+    )
+    clustered = []
+    for bbox, weight, name in valid:
+        if (
+            bbox == anchor_bbox
+            or bbox_iou(bbox, anchor_bbox) >= 0.18
+            or bbox_center_distance(bbox, anchor_bbox) <= anchor_diag * 0.7
+        ):
+            clustered.append((bbox, weight, name))
+    if not clustered:
+        return anchor_bbox
+    total = sum(weight for _bbox, weight, _name in clustered)
+    if total <= 0:
+        return anchor_bbox
+
+    cx = cy = bw = bh = 0.0
+    for bbox, weight, _name in clustered:
+        state = bbox_to_state(bbox)
+        if state is None:
+            continue
+        ratio = weight / total
+        cx += state[0] * ratio
+        cy += state[1] * ratio
+        bw += state[2] * ratio
+        bh += state[3] * ratio
+    return state_to_bbox((cx, cy, bw, bh), frame_w, frame_h) or anchor_bbox
+
+
 def tracker_roi_to_frame_bbox(x, y, tw, th, scale_back, frame_w, frame_h, min_side=4):
     """Convert tracker ROI (x, y, w, h) in scaled space to clamped (x1, y1, x2, y2) in frame space.
     Ensures the blur area resizes with the tracker and stays within frame bounds."""
@@ -884,7 +998,7 @@ def initialize_auto_redaction_track(small_frame, gray_small, bbox, scale_back, k
         "last_bbox": bbox,
         "smoothed_bbox": bbox,
         "small_bbox": small_bbox,
-        "points": seed_tracking_points(gray_small, small_bbox) if small_bbox is not None else None,
+        "points": seed_track_points_for_kind(kind, gray_small, small_bbox) if small_bbox is not None else None,
         "fail_count": 0,
         "velocity": (0.0, 0.0, 0.0, 0.0),
         "frames_since_detection": 0,
@@ -956,7 +1070,7 @@ def reseed_existing_track(track, small_frame, gray_small, detection_bbox, scale_
         "last_bbox": smoothed,
         "smoothed_bbox": smoothed,
         "small_bbox": small_bbox,
-        "points": seed_tracking_points(gray_small, small_bbox) if small_bbox is not None else None,
+        "points": seed_track_points_for_kind(kind, gray_small, small_bbox) if small_bbox is not None else None,
         "velocity": velocity,
         "fail_count": 0,
         "frames_since_detection": 0,
@@ -1124,14 +1238,28 @@ def update_auto_redaction_track(
         except (cv2.error, AttributeError, Exception):
             pass
 
-    predicted_bbox = (
-        optical_bbox
-        if optical_ok
-        else (
-            global_bbox
-            if global_bbox is not None
-            else (tracker_bbox if tracker_ok else predicted_motion_bbox)
-        )
+    has_measured_motion = optical_ok or tracker_ok or global_bbox is not None
+    predicted_bbox = weighted_fuse_bboxes(
+        [
+            (optical_bbox, 3.2 if optical_ok else 0.0, "optical"),
+            (tracker_bbox, 2.2 if tracker_ok else 0.0, "tracker"),
+            (
+                global_bbox,
+                1.1 + global_motion_confidence if global_bbox is not None else 0.0,
+                "global",
+            ),
+            (
+                predicted_motion_bbox,
+                0.8 if (
+                    not has_measured_motion
+                    and predicted_motion_bbox is not None
+                    and frames_since_detection < TRACKER_PREDICTION_MAX_FRAMES
+                ) else 0.0,
+                "velocity",
+            ),
+        ],
+        frame_w,
+        frame_h,
     )
     resolved_bbox = predicted_bbox or last_bbox
     face_detected = False
@@ -1170,10 +1298,10 @@ def update_auto_redaction_track(
                 resolved_bbox = expand_tracked_face_bbox(tuple(relocked_face["bbox"]), frame_w, frame_h, motion_strength)
                 face_detected = True
                 tracking_success = True
-            elif predicted_motion_bbox is not None and frames_since_detection < TRACKER_PREDICTION_MAX_FRAMES:
+            elif (predicted_bbox or predicted_motion_bbox) is not None and frames_since_detection < TRACKER_PREDICTION_MAX_FRAMES:
                 # Hold the blur on the predicted location while detection
                 # briefly misses (very common during fast pans / zooms).
-                resolved_bbox = motion_bridge_bbox(predicted_motion_bbox, frame_w, frame_h, motion_strength)
+                resolved_bbox = motion_bridge_bbox(predicted_bbox or predicted_motion_bbox, frame_w, frame_h, motion_strength)
                 tracking_success = True
             elif global_bbox is not None and global_motion_confidence >= FACE_TRACK_BRIDGE_MIN_GLOBAL_CONFIDENCE and fail_count < FACE_TRACK_BRIDGE_MAX_FAILS:
                 # During a hard camera pan, a selected face can miss for a frame
@@ -1202,8 +1330,8 @@ def update_auto_redaction_track(
                 resolved_bbox = expand_tracked_face_bbox(refined_bbox, frame_w, frame_h, motion_strength)
                 face_detected = True
                 tracking_success = True
-            elif predicted_motion_bbox is not None and frames_since_detection < TRACKER_PREDICTION_MAX_FRAMES:
-                resolved_bbox = motion_bridge_bbox(predicted_motion_bbox, frame_w, frame_h, motion_strength)
+            elif (predicted_bbox or predicted_motion_bbox) is not None and frames_since_detection < TRACKER_PREDICTION_MAX_FRAMES:
+                resolved_bbox = motion_bridge_bbox(predicted_bbox or predicted_motion_bbox, frame_w, frame_h, motion_strength)
                 tracking_success = True
             elif global_bbox is not None and global_motion_confidence >= FACE_TRACK_BRIDGE_MIN_GLOBAL_CONFIDENCE:
                 resolved_bbox = motion_bridge_bbox(global_bbox, frame_w, frame_h, motion_strength)
@@ -1246,9 +1374,9 @@ def update_auto_redaction_track(
         if len(filtered_points) >= 6:
             next_points = np.array(filtered_points, dtype=np.float32).reshape(-1, 1, 2)
         else:
-            next_points = seed_tracking_points(gray_small, resolved_small_bbox)
+            next_points = seed_track_points_for_kind(kind, gray_small, resolved_small_bbox)
     else:
-        next_points = seed_tracking_points(gray_small, resolved_small_bbox) if resolved_small_bbox is not None else None
+        next_points = seed_track_points_for_kind(kind, gray_small, resolved_small_bbox) if resolved_small_bbox is not None else None
 
     if resolved_bbox is not None:
         if kind == "face":
@@ -1259,6 +1387,11 @@ def update_auto_redaction_track(
                 # when the face is genuinely moving so the blur does not
                 # jitter while the tracker chases the head.
                 pos_alpha, size_alpha = adaptive_lock_alpha(face_motion, scale_strength)
+            elif optical_ok or global_bbox is not None:
+                # Camera-motion bridges should move the blur with the frame,
+                # not lazily chase it, otherwise a fast pan can expose an edge.
+                pos_alpha = FACE_LOCK_MOTION_BRIDGE_ALPHA
+                size_alpha = FACE_LOCK_MOTION_BRIDGE_SIZE_ALPHA
             else:
                 # Pure prediction / tracker updates — bias toward smoother
                 # transitions so the blur does not drift on noisy frames.
@@ -1340,12 +1473,67 @@ def redact_video(
     preview_only=False,
     output_height=720,
     progress_callback=None,
+    face_lock_tracks=None,
 ):
     face_encodings = face_encodings or []
     face_targets = face_targets or []
     object_classes = object_classes or set()
     temporal_ranges = temporal_ranges or []
     custom_regions = custom_regions or []
+
+    # Face-lock lanes are precomputed per-frame bboxes for selected
+    # persons. When present, the lane is the source of truth for that
+    # person at every covered frame and the existing per-frame
+    # InsightFace path is skipped for those persons. This makes the blur
+    # locked-on across camera shakes/zooms because the lane was built
+    # offline on the local video using fused CSRT/optical-flow/global
+    # motion plus InsightFace anchors and TwelveLabs guidance.
+    face_lock_tracks = face_lock_tracks or {}
+    face_lock_lanes_by_person = {}
+    face_lock_bboxes_by_frame = {}
+    if face_lock_tracks:
+        for pid, lane_doc in face_lock_tracks.items():
+            if not lane_doc or not isinstance(lane_doc, dict):
+                continue
+            lane_array = lane_doc.get("lane") or []
+            if not lane_array:
+                continue
+            face_lock_lanes_by_person[str(pid)] = lane_doc
+            for entry in lane_array:
+                try:
+                    f = int(entry.get("f"))
+                except (TypeError, ValueError):
+                    continue
+                bbox = (
+                    float(entry.get("x1", 0.0)),
+                    float(entry.get("y1", 0.0)),
+                    float(entry.get("x2", 0.0)),
+                    float(entry.get("y2", 0.0)),
+                )
+                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                    continue
+                face_lock_bboxes_by_frame.setdefault(f, []).append({
+                    "person_id": str(pid),
+                    "bbox": bbox,
+                })
+
+    # Filter out persons whose lane will draw their blur, so the
+    # existing identity-relock loop never moves the blur for them.
+    # face_encodings here is rebuilt from the remaining targets' stored
+    # embeddings; this avoids double-processing without breaking the
+    # __ALL__ auto-mode (which uses no face_targets).
+    if face_lock_lanes_by_person and face_targets:
+        remaining_targets = [
+            face for face in face_targets
+            if str(get_face_identity(face) or "") not in face_lock_lanes_by_person
+        ]
+        if len(remaining_targets) != len(face_targets):
+            face_targets = remaining_targets
+            face_encodings = [
+                np.array(face["encoding"]) if not isinstance(face.get("encoding"), np.ndarray) else face["encoding"]
+                for face in face_targets
+                if face.get("encoding") is not None
+            ]
     prepared_custom_regions = []
     for reg in custom_regions:
         if not isinstance(reg, dict):
@@ -1490,6 +1678,17 @@ def redact_video(
             break
 
         current_sec = frame_idx / fps
+        # Apply face-lock lane blurs first so they always cover the
+        # face for selected persons regardless of what the per-frame
+        # detection/tracking path decides later in this iteration. The
+        # lane bbox is the source of truth: it was built bidirectionally
+        # on the local video using fused tracking + InsightFace anchors
+        # so it survives camera shakes, pans, zooms, and brief misses.
+        if face_lock_bboxes_by_frame and not preview_only:
+            for entry in face_lock_bboxes_by_frame.get(frame_idx, ()):  # iterates 0..N
+                lane_bbox = entry.get("bbox")
+                if lane_bbox:
+                    apply_redaction(frame, lane_bbox, redaction_style, blur_strength)
         frame_custom_display_bboxes = [None] * len(custom_regions)
         in_temporal_range = True
         if temporal_ranges:
@@ -1563,7 +1762,7 @@ def redact_video(
                 custom_face_boxes[idx] = face_bbox
                 custom_face_paddings[idx] = face_padding
                 custom_small_bboxes[idx] = frame_bbox_to_small_bbox(tracked_bbox, scale_back_actual, small.shape[1], small.shape[0])
-                custom_feature_points[idx] = seed_tracking_points(gray_small, custom_small_bboxes[idx])
+                custom_feature_points[idx] = seed_track_points_for_kind(mode, gray_small, custom_small_bboxes[idx])
                 custom_fail_count[idx] = 0
                 just_started.add(idx)
                 logger.info(
@@ -1579,6 +1778,8 @@ def redact_video(
                 idx for idx, started in enumerate(custom_started)
                 if started and custom_static_bboxes[idx] is not None
             ]
+            custom_global_motion = estimate_global_frame_motion(prev_small_gray, gray_small) if prev_small_gray is not None else None
+            custom_global_confidence = float((custom_global_motion or {}).get("confidence", 0.0) or 0.0)
 
             for idx in active_indices:
                 if idx in just_started:
@@ -1600,6 +1801,9 @@ def redact_video(
                 optical_bbox = None
                 optical_points = None
                 optical_ok = False
+                global_bbox = None
+                if custom_global_motion is not None and custom_global_confidence >= GLOBAL_MOTION_MIN_CONFIDENCE:
+                    global_bbox = apply_motion_to_bbox(use_bbox, custom_global_motion, w, h)
 
                 if tr is not None and periodic_reinit and use_bbox:
                     try:
@@ -1655,18 +1859,31 @@ def redact_video(
                     except (cv2.error, AttributeError, Exception):
                         pass
 
-                resolved_bbox = optical_bbox if optical_ok else (tracker_bbox if tracker_ok else None)
+                resolved_bbox = weighted_fuse_bboxes(
+                    [
+                        (optical_bbox, 3.0 if optical_ok else 0.0, "optical"),
+                        (tracker_bbox, 2.0 if tracker_ok else 0.0, "tracker"),
+                        (
+                            global_bbox,
+                            1.0 + custom_global_confidence if global_bbox is not None else 0.0,
+                            "global",
+                        ),
+                    ],
+                    w,
+                    h,
+                )
                 resolved_face_bbox = prev_face_bbox
                 face_detected = False
 
                 if mode == "face":
-                    search_anchor = optical_bbox or tracker_bbox or prev_face_bbox or use_bbox or static_bbox
+                    search_anchor = merge_tracking_search_anchor(resolved_bbox, global_bbox, w, h)
+                    search_anchor = search_anchor or optical_bbox or tracker_bbox or prev_face_bbox or use_bbox or static_bbox
                     if search_anchor is not None:
-                        search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
+                        search_factor = MANUAL_FACE_SEARCH_EXPAND_FACTOR if (optical_ok or tracker_ok or global_bbox is not None) else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
                         resolved_face_bbox = detect_best_face_bbox(
                             frame,
                             expand_bbox(search_anchor, w, h, search_factor),
-                            preferred_bbox=optical_bbox or tracker_bbox or prev_face_bbox or use_bbox,
+                            preferred_bbox=resolved_bbox or optical_bbox or tracker_bbox or global_bbox or prev_face_bbox or use_bbox,
                             allow_supplemental=(not tracker_ok or prev_face_bbox is None or fail_count > 0),
                         )
                     if resolved_face_bbox is not None:
@@ -1693,6 +1910,8 @@ def redact_video(
                                 pass
                     elif tracker_ok:
                         resolved_bbox = tracker_bbox
+                    elif global_bbox is not None:
+                        resolved_bbox = global_bbox
 
                 if resolved_bbox is None:
                     resolved_bbox = use_bbox
@@ -1707,9 +1926,9 @@ def redact_video(
                     if len(filtered_points) >= 6:
                         next_points = np.array(filtered_points, dtype=np.float32).reshape(-1, 1, 2)
                     else:
-                        next_points = seed_tracking_points(gray_small, resolved_small_bbox)
+                        next_points = seed_track_points_for_kind(mode, gray_small, resolved_small_bbox)
                 else:
-                    next_points = seed_tracking_points(gray_small, resolved_small_bbox)
+                    next_points = seed_track_points_for_kind(mode, gray_small, resolved_small_bbox)
 
                 if resolved_bbox is not None:
                     display_bbox = smooth_bbox(resolved_bbox, prev_smoothed, TRACKER_SMOOTHING_ALPHA, w, h)
@@ -1723,7 +1942,7 @@ def redact_video(
                     custom_last_bboxes[idx] = last_bbox
                     custom_smoothed_bboxes[idx] = prev_smoothed
 
-                tracking_success = tracker_ok or optical_ok or face_detected
+                tracking_success = tracker_ok or optical_ok or face_detected or global_bbox is not None
                 if not tracking_success and tr is not None and fail_count >= CUSTOM_TRACKER_REINIT_AFTER_FAILS and use_bbox:
                     try:
                         reinit_factor = TRACKER_REINIT_BBOX_EXPAND_FACTOR if mode != "face" else MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR
@@ -1894,30 +2113,53 @@ def redact_video(
                         )
                         drawn_detection_indices.add(d_idx)
 
-                # Allow recently-tracked subjects to survive a single detection
-                # miss (they are common during fast pans / zooms). Faces that
-                # the user specifically selected still drop the blur immediately
-                # to avoid leaking them onto another person.
+                # Allow recently-tracked subjects, including selected faces, to
+                # survive short detection misses. Selected faces stay
+                # identity-locked: the bridge uses only that track's own
+                # tracker/optical-flow/global-motion prediction, never another
+                # unmatched face detection.
                 for e_idx in sorted(unmatched_existing):
                     existing = trackers[e_idx]
                     requires_identity = existing.get("kind") == "face" and existing.get("known_face") is not None
-                    if requires_identity:
-                        continue
                     lost_count = int(existing.get("lost_count", 0) or 0) + 1
                     if lost_count > TRACK_LOST_GRACE_FRAMES:
                         continue
-                    refreshed = dict(existing)
+
+                    periodic_reinit = (frame_idx % AUTO_TRACKER_REINIT_INTERVAL == 0)
+                    refreshed, bridge_bbox = update_auto_redaction_track(
+                        existing,
+                        frame,
+                        small,
+                        gray_small,
+                        auto_prev_small_gray,
+                        scale_back_actual,
+                        w,
+                        h,
+                        periodic_reinit=periodic_reinit,
+                        reinit_after_fails=AUTO_TRACKER_REINIT_AFTER_FAILS,
+                    )
                     refreshed["lost_count"] = lost_count
-                    refreshed_trackers.append(refreshed)
-                    # Hold the blur on the last known location with a slight
-                    # velocity nudge so a single missed detection does not
-                    # reveal the face during a quick pan.
-                    bridge_state = bbox_to_state(refreshed.get("smoothed_bbox") or refreshed.get("last_bbox"))
-                    if bridge_state is not None:
-                        bridge_state = predict_state(bridge_state, refreshed.get("velocity") or (0.0, 0.0, 0.0, 0.0), frames=1)
-                        bridge_bbox = state_to_bbox(bridge_state, w, h) or refreshed.get("smoothed_bbox") or refreshed.get("last_bbox")
-                    else:
-                        bridge_bbox = refreshed.get("smoothed_bbox") or refreshed.get("last_bbox")
+
+                    if bridge_bbox is None and not requires_identity:
+                        # Generic faces/objects can fall back to a simple
+                        # velocity hold. Identity-locked selected faces do not:
+                        # if their own track cannot predict a box, we avoid
+                        # attaching blur to the wrong person.
+                        bridge_state = bbox_to_state(refreshed.get("smoothed_bbox") or refreshed.get("last_bbox"))
+                        if bridge_state is not None:
+                            bridge_state = predict_state(
+                                bridge_state,
+                                refreshed.get("velocity") or (0.0, 0.0, 0.0, 0.0),
+                                frames=1,
+                            )
+                            bridge_bbox = (
+                                state_to_bbox(bridge_state, w, h)
+                                or refreshed.get("smoothed_bbox")
+                                or refreshed.get("last_bbox")
+                            )
+                        else:
+                            bridge_bbox = refreshed.get("smoothed_bbox") or refreshed.get("last_bbox")
+
                     if bridge_bbox is not None:
                         apply_redaction(
                             frame,
@@ -1925,6 +2167,7 @@ def redact_video(
                             redaction_style,
                             blur_strength,
                         )
+                        refreshed_trackers.append(refreshed)
 
                 # Fallback: if the association block somehow did not draw a
                 # detection (it should always be associated to a track or a
