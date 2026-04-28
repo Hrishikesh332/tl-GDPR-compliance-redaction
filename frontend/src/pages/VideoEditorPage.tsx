@@ -358,10 +358,52 @@ type SearchSessionEntity = {
 }
 
 type SearchSessionResult = {
+  id?: string
   query: string
   queryText?: string
   entities?: SearchSessionEntity[]
   results: SearchVideoResult[]
+}
+
+function getSearchSessionId(session: SearchSessionResult, fallbackIndex = 0): string {
+  if (session.id) return session.id
+  const entityIds = (session.entities || [])
+    .map((entity) => entity?.id)
+    .filter(Boolean)
+    .join('|')
+  if (entityIds) return `entities:${entityIds}`
+  const resultIds = (session.results || [])
+    .map((result) => result?.id || result?.video_id)
+    .filter(Boolean)
+    .slice(0, 3)
+    .join('|')
+  return `search:${session.query || ''}:${session.queryText || ''}:${resultIds}:${fallbackIndex}`
+}
+
+function withSearchSessionId(session: SearchSessionResult, fallbackIndex = 0): SearchSessionResult {
+  return { ...session, id: getSearchSessionId(session, fallbackIndex) }
+}
+
+function normalizeStoredSearchSessions(value: unknown): SearchSessionResult[] {
+  const items = Array.isArray(value) ? value : [value]
+  return items
+    .filter((item): item is SearchSessionResult => (
+      !!item &&
+      typeof item === 'object' &&
+      typeof (item as SearchSessionResult).query === 'string' &&
+      Array.isArray((item as SearchSessionResult).results)
+    ))
+    .map((session, index) => withSearchSessionId(session, index))
+}
+
+function persistEditorSearchSessions(sessions: SearchSessionResult[]) {
+  try {
+    if (sessions.length === 0) {
+      sessionStorage.removeItem(EDITOR_LAST_SEARCH_SESSION_KEY)
+    } else {
+      sessionStorage.setItem(EDITOR_LAST_SEARCH_SESSION_KEY, JSON.stringify(sessions))
+    }
+  } catch {}
 }
 
 function getEntityMonogram(name: string): string {
@@ -496,6 +538,10 @@ const LIVE_FACE_PREDICTION_MAX_LAG_SEC = 0.05
 const LIVE_OBJECT_PREDICTION_MAX_LAG_SEC = 0.08
 // Hide the audio waveform so the lower lane can focus on entity-search matches.
 const SHOW_AUDIO_WAVEFORM = false
+// Hide the per-face timeline lane built from local detection metadata
+// (appearances / time ranges in detection_metadata.json). Only the
+// TwelveLabs entity-search lanes are shown for blurred faces.
+const SHOW_DETECTION_METADATA_FACE_LANE = false
 const ENTITY_SEARCH_LANE_COLOR = '#00dc82'
 const ENTITY_SEARCH_LANE_BORDER = 'rgba(0, 220, 130, 0.22)'
 const ENTITY_SEARCH_LANE_BACKGROUND = 'linear-gradient(90deg, rgba(0, 220, 130, 0.07) 0%, rgba(0, 220, 130, 0.025) 50%, rgba(0, 220, 130, 0.07) 100%)'
@@ -517,6 +563,7 @@ const ENTITY_SEARCH_LANE_EDGE_RIGHT = 'rgba(0, 220, 130, 0.35)'
 const ENTITY_SEARCH_LANE_HEIGHT_PX = 60
 const VIDEO_TIMELINE_LANE_HEIGHT_PX = 76
 const FACE_LANE_DEBUG_CACHE_KEY = 'video_redaction_face_lane_debug_cache_v1'
+const FACE_LOCK_INTRO_SEEN_KEY = 'video_redaction_face_lock_intro_seen_v1'
 const LIVE_REDACTION_OBJECT_CLASSES = [
   'backpack',
   'bicycle',
@@ -1773,6 +1820,148 @@ function drawCanvasBlurRegion(
 }
 
 /* ------------------------------------------------------------------ */
+/*  Face-lock progress ring                                             */
+/* ------------------------------------------------------------------ */
+
+function FaceLockProgressRing({ percent, active }: { percent: number; active: boolean }) {
+  const size = 22
+  const strokeWidth = 2.6
+  const radius = (size - strokeWidth) / 2
+  const circumference = 2 * Math.PI * radius
+  const clamped = Math.max(0, Math.min(100, percent))
+  const dashOffset = circumference * (1 - clamped / 100)
+
+  return (
+    <span className="relative inline-flex items-center justify-center" style={{ width: size, height: size }}>
+      <svg
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        className={active ? 'animate-pulse' : ''}
+        aria-hidden="true"
+      >
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeOpacity={0.15}
+          strokeWidth={strokeWidth}
+          className="text-text-tertiary"
+        />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={strokeWidth}
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={dashOffset}
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+          className={active ? 'text-emerald-400 transition-[stroke-dashoffset] duration-300' : 'text-emerald-400'}
+        />
+      </svg>
+      <span className="absolute text-[8px] font-semibold tabular-nums text-text-primary leading-none">
+        {active ? `${Math.round(clamped)}` : '✓'}
+      </span>
+    </span>
+  )
+}
+
+type FaceLockChipEntry = {
+  personId: string
+  label: string
+  snapBase64?: string | null
+  color?: string | null
+  percent: number
+  status: 'ready' | 'running' | 'queued' | 'failed' | 'pending'
+}
+
+function FaceLockChip({ entry, variant = 'inline' }: { entry: FaceLockChipEntry; variant?: 'inline' | 'row' }) {
+  const isReady = entry.status === 'ready'
+  const isFailed = entry.status === 'failed'
+  const accent = entry.color || '#34D399'
+  const avatarSize = variant === 'row' ? 28 : 22
+  const fallbackInitial = entry.label?.trim()?.charAt(0)?.toUpperCase() || '?'
+  const ringSize = variant === 'row' ? 18 : 16
+  const strokeWidth = 2.2
+  const ringRadius = (ringSize - strokeWidth) / 2
+  const ringCircumference = 2 * Math.PI * ringRadius
+  const ringDashOffset = ringCircumference * (1 - Math.max(0, Math.min(100, entry.percent)) / 100)
+  const ringColor = isFailed ? '#f87171' : isReady ? '#34d399' : accent
+
+  return (
+    <div
+      className={`flex items-center gap-2 ${variant === 'row' ? 'w-full' : 'rounded-full border border-border bg-card px-1.5 py-0.5'}`}
+      title={`${entry.label} - ${isFailed ? 'face-lock failed' : isReady ? 'locked' : `${entry.percent}% locked`}`}
+    >
+      <div
+        className="relative shrink-0 overflow-hidden rounded-full border bg-surface"
+        style={{
+          width: avatarSize,
+          height: avatarSize,
+          borderColor: isReady ? `${accent}66` : 'rgba(148,163,184,0.32)',
+        }}
+      >
+        {entry.snapBase64 ? (
+          <img
+            src={`data:image/png;base64,${entry.snapBase64}`}
+            alt=""
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-[10px] font-semibold text-text-secondary">
+            {fallbackInitial}
+          </div>
+        )}
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col leading-tight">
+        <span className={`truncate text-[11px] font-medium ${isFailed ? 'text-error' : 'text-text-primary'}`}>
+          {entry.label}
+        </span>
+        <span className="text-[10px] tabular-nums text-text-tertiary">
+          {isFailed ? 'Failed' : isReady ? 'Locked' : `${entry.percent}%`}
+        </span>
+      </div>
+      <span
+        className="relative inline-flex shrink-0 items-center justify-center"
+        style={{ width: ringSize, height: ringSize }}
+        aria-hidden
+      >
+        <svg width={ringSize} height={ringSize} viewBox={`0 0 ${ringSize} ${ringSize}`}>
+          <circle
+            cx={ringSize / 2}
+            cy={ringSize / 2}
+            r={ringRadius}
+            fill="none"
+            stroke="currentColor"
+            strokeOpacity={0.18}
+            strokeWidth={strokeWidth}
+            className="text-text-tertiary"
+          />
+          <circle
+            cx={ringSize / 2}
+            cy={ringSize / 2}
+            r={ringRadius}
+            fill="none"
+            stroke={ringColor}
+            strokeWidth={strokeWidth}
+            strokeLinecap="round"
+            strokeDasharray={ringCircumference}
+            strokeDashoffset={isFailed ? 0 : ringDashOffset}
+            transform={`rotate(-90 ${ringSize / 2} ${ringSize / 2})`}
+            className={!isReady && !isFailed ? 'transition-[stroke-dashoffset] duration-300' : ''}
+          />
+        </svg>
+      </span>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -1831,6 +2020,7 @@ export default function VideoEditorPage() {
   const faceLockBuildAttemptsRef = useRef<Record<string, boolean>>({})
   const lockedFacePersonIdsRef = useRef<string[]>([])
   const faceLockLabelByPersonIdRef = useRef<Record<string, string>>({})
+  const [showFaceLockIntroPopup, setShowFaceLockIntroPopup] = useState(false)
   const [excludedFromRedactionIds, setExcludedFromRedactionIds] = useState<string[]>([])
   const [redactionStyle, setRedactionStyle] = useState<RedactionStyle>('blur')
   const [blurIntensity, setBlurIntensity] = useState(60)
@@ -1839,6 +2029,8 @@ export default function VideoEditorPage() {
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true)
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const exportMenuRef = useRef<HTMLDivElement>(null)
+  const [faceLockListOpen, setFaceLockListOpen] = useState(false)
+  const faceLockListRef = useRef<HTMLDivElement>(null)
   const [exportRedactLoading, setExportRedactLoading] = useState(false)
   const [exportRedactError, setExportRedactError] = useState<string | null>(null)
   const [exportQuality, setExportQuality] = useState<ExportQuality>(720)
@@ -1860,7 +2052,15 @@ export default function VideoEditorPage() {
   const [summaryText, setSummaryText] = useState<string | null>(null)
   const [summaryTags, setSummaryTags] = useState<{ about?: string; topics?: string[]; categories?: string[] } | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
-  const [searchSessionResult, setSearchSessionResult] = useState<SearchSessionResult | null>(null)
+  const [searchSessionResults, setSearchSessionResults] = useState<SearchSessionResult[]>([])
+  const [activeSearchSessionId, setActiveSearchSessionId] = useState<string | null>(null)
+  const searchSessionResult = useMemo(() => {
+    if (searchSessionResults.length === 0) return null
+    return (
+      searchSessionResults.find((session) => getSearchSessionId(session) === activeSearchSessionId) ||
+      searchSessionResults[searchSessionResults.length - 1]
+    )
+  }, [activeSearchSessionId, searchSessionResults])
   const analyzeChatEndRef = useRef<HTMLDivElement>(null)
   const [timelineThumbnails, setTimelineThumbnails] = useState<string[]>([])
   const thumbnailsGeneratedRef = useRef(false)
@@ -1998,17 +2198,22 @@ export default function VideoEditorPage() {
     try {
       const raw = sessionStorage.getItem(EDITOR_LAST_SEARCH_SESSION_KEY)
       if (!raw) {
-        setSearchSessionResult(null)
+        setSearchSessionResults([])
+        setActiveSearchSessionId(null)
         return
       }
-      const parsed = JSON.parse(raw) as SearchSessionResult
-      if (!parsed || typeof parsed.query !== 'string' || !Array.isArray(parsed.results)) {
-        setSearchSessionResult(null)
+      const parsed = JSON.parse(raw)
+      const sessions = normalizeStoredSearchSessions(parsed)
+      if (sessions.length === 0) {
+        setSearchSessionResults([])
+        setActiveSearchSessionId(null)
         return
       }
-      setSearchSessionResult(parsed)
+      setSearchSessionResults(sessions)
+      setActiveSearchSessionId(getSearchSessionId(sessions[sessions.length - 1]))
     } catch {
-      setSearchSessionResult(null)
+      setSearchSessionResults([])
+      setActiveSearchSessionId(null)
     }
   }, [videoId])
 
@@ -2766,6 +2971,71 @@ export default function VideoEditorPage() {
   )
   const lockedFacePersonIdsSet = useMemo(() => new Set(lockedFacePersonIds), [lockedFacePersonIds])
 
+  // Aggregated build status across all selected persons. Each face-lock
+  // build runs in its own backend thread, so two clicks on different
+  // persons run in parallel — this aggregate is just the average for
+  // the small ring shown near the Export button.
+  const faceLockBuildSummary = useMemo(() => {
+    const buildingPersonIds = selectedFacePersonIds.filter((pid) => {
+      const state = faceLockBuildByPersonId[pid]
+      return state && (state.status === 'queued' || state.status === 'running')
+    })
+    const readyCount = lockedFacePersonIds.length
+    const totalCount = selectedFacePersonIds.length
+    let averagePercent = 0
+    if (buildingPersonIds.length > 0) {
+      averagePercent = Math.round(
+        buildingPersonIds.reduce(
+          (acc, pid) => acc + (faceLockBuildByPersonId[pid]?.percent || 0),
+          0,
+        ) / buildingPersonIds.length,
+      )
+    } else if (totalCount > 0 && readyCount === totalCount) {
+      averagePercent = 100
+    }
+    return {
+      buildingCount: buildingPersonIds.length,
+      readyCount,
+      totalCount,
+      averagePercent,
+      hasActive: buildingPersonIds.length > 0,
+    }
+  }, [faceLockBuildByPersonId, lockedFacePersonIds, selectedFacePersonIds])
+
+  // Per-person entry used to render the export-bar face-lock chips.
+  // Each entry has the face snap, label, and the current build percent.
+  const faceLockEntries = useMemo(() => {
+    const lockedSet = new Set(lockedFacePersonIds)
+    const entries: Array<{
+      personId: string
+      label: string
+      snapBase64?: string | null
+      color?: string | null
+      percent: number
+      status: 'ready' | 'running' | 'queued' | 'failed' | 'pending'
+    }> = []
+    for (const personId of selectedFacePersonIds) {
+      const item = faceDetectionItemsByPersonId[personId]
+      const state = faceLockBuildByPersonId[personId]
+      const isReady = lockedSet.has(personId) || state?.status === 'ready'
+      let status: 'ready' | 'running' | 'queued' | 'failed' | 'pending' = 'pending'
+      if (isReady) status = 'ready'
+      else if (state?.status === 'running') status = 'running'
+      else if (state?.status === 'queued') status = 'queued'
+      else if (state?.status === 'failed') status = 'failed'
+      const percent = isReady ? 100 : Math.max(0, Math.min(100, Math.round(state?.percent || 0)))
+      entries.push({
+        personId,
+        label: item?.label || personId,
+        snapBase64: item?.snapBase64 || null,
+        color: item?.color || null,
+        percent,
+        status,
+      })
+    }
+    return entries
+  }, [faceDetectionItemsByPersonId, faceLockBuildByPersonId, lockedFacePersonIds, selectedFacePersonIds])
+
   // Kick off (or resume) face-lock lane builds for any newly selected
   // person. Polls the build status until ready, then caches the lane
   // in component state. Once ready, the live overlay below uses the
@@ -2781,6 +3051,34 @@ export default function VideoEditorPage() {
       const attempts = faceLockBuildAttemptsRef.current
       if (attempts[personId]) return
       attempts[personId] = true
+
+      try {
+        // First, try to load the lane directly from the cached file
+        // on disk. If the backend already has a face-lock lane for
+        // this (job, person), there is no point queuing or polling a
+        // build — just apply the stored result and we're done.
+        const cachedRes = await fetch(
+          `${API_BASE}/api/face-lock-track/${encodeURIComponent(detectionJobId)}/${encodeURIComponent(personId)}?include_lane=true`,
+        )
+        if (cancelled) return
+        if (cachedRes.ok) {
+          const cachedData = await cachedRes.json().catch(() => ({})) as {
+            status?: FaceLockBuildState['status']
+            cached?: boolean
+            lane?: FaceLockLane
+          }
+          if (!cancelled && cachedData.status === 'ready' && cachedData.lane) {
+            setFaceLockLanesByPersonId((prev) => ({ ...prev, [personId]: cachedData.lane as FaceLockLane }))
+            setFaceLockBuildByPersonId((prev) => ({
+              ...prev,
+              [personId]: { status: 'ready', percent: 100, progress: 1, message: 'cached' },
+            }))
+            return
+          }
+        }
+      } catch {
+        // Ignore cache-fetch errors and fall through to a fresh build.
+      }
 
       setFaceLockBuildByPersonId((prev) => ({
         ...prev,
@@ -3113,13 +3411,15 @@ export default function VideoEditorPage() {
 
     try {
       const jobId = await resolveRedactionJobId()
-      // Persons whose face-lock lane is fully loaded are drawn locally
-      // by interpolating the precomputed lane against currentTime; we
-      // exclude them from the live-redaction request so the backend
-      // only spends time on objects and not-yet-locked faces.
-      const liveRequestPersonIds = hasRunDetection
-        ? selectedFacePersonIds.filter((pid) => !lockedFacePersonIdsSet.has(pid))
-        : undefined
+      // [FACE-LOCK LANE BLUR — DISABLED]
+      // When re-enabled, exclude lane-locked persons from this request
+      // so the backend only spends time on objects and not-yet-locked
+      // faces. For now, route every selected person through the
+      // /api/live-redaction/detect path:
+      // const liveRequestPersonIds = hasRunDetection
+      //   ? selectedFacePersonIds.filter((pid) => !lockedFacePersonIdsSet.has(pid))
+      //   : undefined
+      const liveRequestPersonIds = hasRunDetection ? selectedFacePersonIds : undefined
       const liveIncludeFaces = !hasRunDetection || (liveRequestPersonIds?.length ?? 0) > 0
       const res = await fetch(`${API_BASE}/api/live-redaction/detect`, {
         method: 'POST',
@@ -3458,6 +3758,16 @@ export default function VideoEditorPage() {
     return () => document.removeEventListener('pointerdown', onPointerDown)
   }, [exportMenuOpen])
 
+  useEffect(() => {
+    if (!faceLockListOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      if (faceLockListRef.current?.contains(e.target as Node)) return
+      setFaceLockListOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    return () => document.removeEventListener('pointerdown', onPointerDown)
+  }, [faceLockListOpen])
+
   /* ---- Tracker: viewport coords (0–1) ---- */
   const getNormFromEvent = useCallback((e: React.MouseEvent | MouseEvent) => {
     const el = videoContainerRef.current
@@ -3750,153 +4060,171 @@ export default function VideoEditorPage() {
       return a.label.localeCompare(b.label)
     })
   }, [currentTime, detectionFilter, detectionList, excludedFromRedactionIds, showAnonymizeOnly])
-  const searchResultForVideo = useMemo(() => {
-    if (!videoId || !searchSessionResult?.results?.length) return null
-    const result = searchSessionResult.results.find((entry) => entry?.id === videoId || entry?.video_id === videoId)
-    if (!result) return null
-    const clips = Array.isArray(result.clips)
-      ? result.clips
-        .filter((clip): clip is SearchClip => (
-          !!clip &&
-          Number.isFinite(clip.start) &&
-          Number.isFinite(clip.end)
-        ))
-        .map((clip) => ({
-          ...clip,
-          score: typeof clip.score === 'number' && Number.isFinite(clip.score) ? clip.score : 0,
-          rank: typeof clip.rank === 'number' && Number.isFinite(clip.rank) ? clip.rank : undefined,
-          thumbnailUrl: clip.thumbnailUrl || clip.thumbnail_url || undefined,
-        }))
-      : []
-    return {
-      ...result,
-      clips,
-    }
-  }, [searchSessionResult, videoId])
-  const orderedSearchClips = useMemo(() => {
-    const clips = [...(searchResultForVideo?.clips || [])]
-    clips.sort((a, b) => {
-      if (a.rank != null && b.rank != null && a.rank !== b.rank) return a.rank - b.rank
-      if (a.rank != null && b.rank == null) return -1
-      if (a.rank == null && b.rank != null) return 1
-      if ((b.score ?? 0) !== (a.score ?? 0)) return (b.score ?? 0) - (a.score ?? 0)
-      return a.start - b.start
+  const searchTimelineLanes = useMemo(() => {
+    if (!videoId) return []
+
+    return searchSessionResults.flatMap((session, sessionIndex) => {
+      const sessionId = getSearchSessionId(session, sessionIndex)
+      const result = session.results.find((entry) => entry?.id === videoId || entry?.video_id === videoId)
+      if (!result) return []
+
+      const clips = Array.isArray(result.clips)
+        ? result.clips
+          .filter((clip): clip is SearchClip => (
+            !!clip &&
+            Number.isFinite(clip.start) &&
+            Number.isFinite(clip.end)
+          ))
+          .map((clip) => ({
+            ...clip,
+            score: typeof clip.score === 'number' && Number.isFinite(clip.score) ? clip.score : 0,
+            rank: typeof clip.rank === 'number' && Number.isFinite(clip.rank) ? clip.rank : undefined,
+            thumbnailUrl: clip.thumbnailUrl || clip.thumbnail_url || undefined,
+          }))
+        : []
+      const orderedClips = [...clips].sort((a, b) => {
+        if (a.rank != null && b.rank != null && a.rank !== b.rank) return a.rank - b.rank
+        if (a.rank != null && b.rank == null) return -1
+        if (a.rank == null && b.rank != null) return 1
+        if ((b.score ?? 0) !== (a.score ?? 0)) return (b.score ?? 0) - (a.score ?? 0)
+        return a.start - b.start
+      })
+      if (orderedClips.length === 0) return []
+
+      const rankedClips = orderedClips.filter((clip) => clip.rank != null)
+      const maxRank = rankedClips.length > 0
+        ? Math.max(...rankedClips.map((clip) => clip.rank as number))
+        : 0
+      const waveformData = duration > 0
+        ? buildSearchWaveformSamples(orderedClips, duration, Math.min(320, Math.max(96, Math.floor(duration * 4))))
+        : []
+      const barCount = Math.min(144, Math.max(72, Math.floor(Math.max(duration, 12) * 1.8)))
+      const series = waveformData.length > 0 ? buildTimelineBarSeries(waveformData, barCount) : []
+      const maxValue = series.reduce((acc, value) => Math.max(acc, value), 0)
+      const peakCutoff = maxValue > 0.05 ? maxValue * ENTITY_SEARCH_LANE_PEAK_THRESHOLD : Infinity
+      const bars = series.map((value, index) => ({
+        value,
+        x: (index / Math.max(1, barCount)) * 1200,
+        width: Math.max(4, (1200 / Math.max(1, barCount)) - 1.6),
+        isPeak: value >= peakCutoff,
+      }))
+      const activeClipIndex = orderedClips.findIndex((clip) => currentTime >= clip.start && currentTime <= clip.end)
+      const segments = orderedClips.map((clip, index) => {
+        const clipStartPct = duration > 0 ? (clip.start / duration) * 100 : 0
+        const clipEndPct = duration > 0 ? (clip.end / duration) * 100 : 0
+        const clipWidthPct = Math.max(1.5, clipEndPct - clipStartPct)
+        return {
+          clip,
+          index,
+          isActive: activeClipIndex === index,
+          importance: getSearchClipImportance(clip, maxRank),
+          left: `${Math.max(0, Math.min(100, clipStartPct))}%`,
+          width: `${Math.max(clipWidthPct, 2)}%`,
+        }
+      })
+      const entities = (session.entities || []).filter((entity) => entity?.id && entity?.name)
+      const noteLines = entities.length === 1
+        ? [
+          `This lane visualizes where the entity search for ${entities[0].name} matches this video over time.`,
+          'Taller bars indicate a stronger entity match and usually mean that person is more clearly visible or more prominently present in that moment, while shorter bars suggest a weaker or briefer appearance.',
+        ]
+        : entities.length > 1
+          ? [
+            'This lane visualizes where the selected entity search matches this video over time.',
+            'Taller bars indicate stronger identity matches and usually mean one or more selected people are more clearly visible in that segment, while shorter bars suggest a weaker or less prominent appearance.',
+          ]
+          : [
+            'This lane visualizes where your normal search matches this video over time.',
+            'Taller bars indicate stronger relevance to your search and a more prominent match in that segment, while shorter bars indicate weaker or less certain matches.',
+          ]
+
+      return [{
+        session,
+        sessionId,
+        result: { ...result, clips },
+        orderedClips,
+        bars,
+        segments,
+        activeClipIndex,
+        activeRank: activeClipIndex >= 0 ? (orderedClips[activeClipIndex]?.rank ?? activeClipIndex + 1) : null,
+        entities,
+        visibleEntities: entities.slice(0, 3),
+        hiddenEntityCount: Math.max(0, entities.length - 3),
+        noteLines,
+      }]
     })
-    return clips
-  }, [searchResultForVideo])
-  const maxSearchRank = useMemo(() => {
-    const rankedClips = orderedSearchClips.filter((clip) => clip.rank != null)
-    return rankedClips.length > 0
-      ? Math.max(...rankedClips.map((clip) => clip.rank as number))
-      : 0
-  }, [orderedSearchClips])
-  const searchWaveformData = useMemo(() => {
-    if (!orderedSearchClips.length || duration <= 0) return []
-    const sampleCount = Math.min(320, Math.max(96, Math.floor(duration * 4)))
-    return buildSearchWaveformSamples(orderedSearchClips, duration, sampleCount)
-  }, [duration, orderedSearchClips])
-  const searchLaneBars = useMemo(() => {
-    if (!searchWaveformData.length) return []
-    const barCount = Math.min(144, Math.max(72, Math.floor(Math.max(duration, 12) * 1.8)))
-    const series = buildTimelineBarSeries(searchWaveformData, barCount)
-    // Use the absolute max so a single peak still marks just that bar; the
-    // floor avoids flagging bars in lanes that have no real signal.
-    const maxValue = series.reduce((acc, value) => Math.max(acc, value), 0)
-    const peakCutoff = maxValue > 0.05 ? maxValue * ENTITY_SEARCH_LANE_PEAK_THRESHOLD : Infinity
-    return series.map((value, index) => ({
-      value,
-      x: (index / Math.max(1, barCount)) * 1200,
-      width: Math.max(4, (1200 / Math.max(1, barCount)) - 1.6),
-      isPeak: value >= peakCutoff,
-    }))
-  }, [duration, searchWaveformData])
-  const activeSearchClipIndex = useMemo(
-    () => orderedSearchClips.findIndex((clip) => currentTime >= clip.start && currentTime <= clip.end),
-    [currentTime, orderedSearchClips]
-  )
-  const searchLaneSegments = useMemo(() => orderedSearchClips.map((clip, index) => {
-    const clipStartPct = duration > 0 ? (clip.start / duration) * 100 : 0
-    const clipEndPct = duration > 0 ? (clip.end / duration) * 100 : 0
-    const clipWidthPct = Math.max(1.5, clipEndPct - clipStartPct)
-    return {
-      clip,
-      index,
-      isActive: activeSearchClipIndex === index,
-      importance: getSearchClipImportance(clip, maxSearchRank),
-      left: `${Math.max(0, Math.min(100, clipStartPct))}%`,
-      width: `${Math.max(clipWidthPct, 2)}%`,
-    }
-  }), [activeSearchClipIndex, duration, maxSearchRank, orderedSearchClips])
-  const activeSearchRank = activeSearchClipIndex >= 0
-    ? (orderedSearchClips[activeSearchClipIndex]?.rank ?? activeSearchClipIndex + 1)
-    : null
-  const searchEntities = useMemo(
-    () => (searchSessionResult?.entities || []).filter((entity) => entity?.id && entity?.name),
-    [searchSessionResult]
-  )
-  const clearSearchTimelineLane = useCallback(() => {
-    setSearchSessionResult(null)
-    try {
-      sessionStorage.removeItem(EDITOR_LAST_SEARCH_SESSION_KEY)
-    } catch {}
+  }, [currentTime, duration, searchSessionResults, videoId])
+  const activeSearchTimelineLane = useMemo(() => (
+    searchTimelineLanes.find((lane) => lane.sessionId === activeSearchSessionId) ||
+    searchTimelineLanes[searchTimelineLanes.length - 1] ||
+    null
+  ), [activeSearchSessionId, searchTimelineLanes])
+  const searchResultForVideo = activeSearchTimelineLane?.result || null
+  const orderedSearchClips = activeSearchTimelineLane?.orderedClips || []
+  const activeSearchClipIndex = activeSearchTimelineLane?.activeClipIndex ?? -1
+  const activeSearchRank = activeSearchTimelineLane?.activeRank ?? null
+  const searchEntities = activeSearchTimelineLane?.entities || []
+  const activateSearchSession = useCallback((sessionId: string) => {
+    setActiveSearchSessionId(sessionId)
+    setActiveTool('search')
+    setRightSidebarOpen(true)
   }, [])
-  const visibleTimelineSearchEntities = useMemo(
-    () => searchEntities.slice(0, 3),
-    [searchEntities]
-  )
-  const hiddenTimelineSearchEntityCount = Math.max(0, searchEntities.length - visibleTimelineSearchEntities.length)
-  const searchLaneNoteLines = useMemo(() => {
-    if (searchEntities.length === 1) {
-      return [
-        `This lane visualizes where the entity search for ${searchEntities[0].name} matches this video over time.`,
-        'Taller bars indicate a stronger entity match and usually mean that person is more clearly visible or more prominently present in that moment, while shorter bars suggest a weaker or briefer appearance.',
-      ]
-    }
-    if (searchEntities.length > 1) {
-      return [
-        'This lane visualizes where the selected entity search matches this video over time.',
-        'Taller bars indicate stronger identity matches and usually mean one or more selected people are more clearly visible in that segment, while shorter bars suggest a weaker or less prominent appearance.',
-      ]
-    }
-    return [
-      'This lane visualizes where your normal search matches this video over time.',
-      'Taller bars indicate stronger relevance to your search and a more prominent match in that segment, while shorter bars indicate weaker or less certain matches.',
-    ]
-  }, [searchEntities])
-  // Lane-derived detections are computed locally from the precomputed
-  // face-lock lane and the video's current time. They have priority
-  // over any live-detection bbox for the same person and are recomputed
-  // every render tick (cheap: a binary search + linear interpolation
-  // per lane).
-  const faceLockOverlayDetections = useMemo<LiveRedactionDetection[]>(() => {
-    const lockedIds = lockedFacePersonIds
-    if (lockedIds.length === 0) return []
-    const playbackTime = videoRef.current?.currentTime ?? currentTime
-    const out: LiveRedactionDetection[] = []
-    for (const personId of lockedIds) {
-      const lane = faceLockLanesByPersonId[personId]
-      if (!lane) continue
-      const bbox = interpolateFaceLockLane(lane, playbackTime)
-      if (!bbox) continue
-      const item = faceDetectionItemsByPersonId[personId]
-      const label = item?.label || personId
-      out.push(laneBboxToLiveDetection(lane, bbox, personId, label))
-    }
-    return out
-  }, [currentTime, faceDetectionItemsByPersonId, faceLockLanesByPersonId, lockedFacePersonIds])
+  const clearSearchTimelineLane = useCallback((sessionId?: string) => {
+    setSearchSessionResults((previous) => {
+      const targetId = sessionId || activeSearchSessionId
+      if (!targetId) return previous
+      const next = previous.filter((session, index) => getSearchSessionId(session, index) !== targetId)
+      persistEditorSearchSessions(next)
+      if (activeSearchSessionId === targetId) {
+        setActiveSearchSessionId(next.length > 0 ? getSearchSessionId(next[next.length - 1]) : null)
+      }
+      return next
+    })
+  }, [activeSearchSessionId])
+  const clearAllSearchTimelineLanes = useCallback(() => {
+    setSearchSessionResults([])
+    setActiveSearchSessionId(null)
+    persistEditorSearchSessions([])
+  }, [])
+  // [FACE-LOCK LANE BLUR — TEMPORARILY DISABLED]
+  // The face-lock lane is still built and cached on the backend, but
+  // the live preview does NOT draw blur from it for now. We fall back
+  // to the existing per-frame /api/live-redaction/detect path for all
+  // selected persons. Re-enable by uncommenting the blocks below.
+  //
+  // const faceLockOverlayDetections = useMemo<LiveRedactionDetection[]>(() => {
+  //   const lockedIds = lockedFacePersonIds
+  //   if (lockedIds.length === 0) return []
+  //   const playbackTime = videoRef.current?.currentTime ?? currentTime
+  //   const out: LiveRedactionDetection[] = []
+  //   for (const personId of lockedIds) {
+  //     const lane = faceLockLanesByPersonId[personId]
+  //     if (!lane) continue
+  //     const bbox = interpolateFaceLockLane(lane, playbackTime)
+  //     if (!bbox) continue
+  //     const item = faceDetectionItemsByPersonId[personId]
+  //     const label = item?.label || personId
+  //     out.push(laneBboxToLiveDetection(lane, bbox, personId, label))
+  //   }
+  //   return out
+  // }, [currentTime, faceDetectionItemsByPersonId, faceLockLanesByPersonId, lockedFacePersonIds])
 
   const visibleLiveRedactionDetections = useMemo(() => {
     const now = Date.now()
     const livePart = liveRedactionDetections.filter((detection) => {
       if (detection.width <= 0 || detection.height <= 0) return false
       if (detection.lastSeenAtMs && now - detection.lastSeenAtMs > getLiveDetectionHoldMs(detection)) return false
-      // Suppress live face detections for lane-locked persons so the
-      // lane-derived bbox is the only source of truth for them.
-      if (detection.kind === 'face' && detection.personId && lockedFacePersonIdsSet.has(detection.personId)) return false
+      // [FACE-LOCK LANE BLUR — DISABLED] when re-enabled, also drop live
+      // face detections for lane-locked persons so the lane bbox is the
+      // only source of truth for them:
+      // if (detection.kind === 'face' && detection.personId && lockedFacePersonIdsSet.has(detection.personId)) return false
       return true
     })
-    return [...livePart, ...faceLockOverlayDetections]
-  }, [faceLockOverlayDetections, liveRedactionDetections, lockedFacePersonIdsSet])
+    // [FACE-LOCK LANE BLUR — DISABLED] when re-enabled, append the
+    // lane-derived detections here:
+    //   return [...livePart, ...faceLockOverlayDetections]
+    return livePart
+  }, [liveRedactionDetections])
   const renderedLiveRedactionDetections = useMemo(() => {
     const playbackTime = videoRef.current?.currentTime ?? currentTime
     return visibleLiveRedactionDetections.map((entry) => (
@@ -3929,6 +4257,12 @@ export default function VideoEditorPage() {
   useEffect(() => {
     lockedFacePersonIdsRef.current = lockedFacePersonIds
   }, [lockedFacePersonIds])
+
+  useEffect(() => {
+    if (!showFaceLockIntroPopup) return
+    const timer = window.setTimeout(() => setShowFaceLockIntroPopup(false), 8000)
+    return () => window.clearTimeout(timer)
+  }, [showFaceLockIntroPopup])
 
   useEffect(() => {
     const next: Record<string, string> = {}
@@ -4102,21 +4436,26 @@ export default function VideoEditorPage() {
     if (!ctx) return
 
     let cancelled = false
-    const computeLiveLaneDetections = (playbackTime: number): LiveRedactionDetection[] => {
-      const ids = lockedFacePersonIdsRef.current
-      if (!ids || ids.length === 0) return []
-      const lanes = faceLockLanesByPersonIdRef.current
-      const labels = faceLockLabelByPersonIdRef.current
-      const out: LiveRedactionDetection[] = []
-      for (const personId of ids) {
-        const lane = lanes[personId]
-        if (!lane) continue
-        const bbox = interpolateFaceLockLane(lane, playbackTime)
-        if (!bbox) continue
-        out.push(laneBboxToLiveDetection(lane, bbox, personId, labels[personId] || personId))
-      }
-      return out
-    }
+    // [FACE-LOCK LANE BLUR — TEMPORARILY DISABLED]
+    // When re-enabled, this re-computes lane-derived bboxes every
+    // animation frame from the precomputed lane + video.currentTime,
+    // and draws them on top of the live-detection blurs.
+    //
+    // const computeLiveLaneDetections = (playbackTime: number): LiveRedactionDetection[] => {
+    //   const ids = lockedFacePersonIdsRef.current
+    //   if (!ids || ids.length === 0) return []
+    //   const lanes = faceLockLanesByPersonIdRef.current
+    //   const labels = faceLockLabelByPersonIdRef.current
+    //   const out: LiveRedactionDetection[] = []
+    //   for (const personId of ids) {
+    //     const lane = lanes[personId]
+    //     if (!lane) continue
+    //     const bbox = interpolateFaceLockLane(lane, playbackTime)
+    //     if (!bbox) continue
+    //     out.push(laneBboxToLiveDetection(lane, bbox, personId, labels[personId] || personId))
+    //   }
+    //   return out
+    // }
     const drawFrame = (playbackTime: number) => {
       if (cancelled) return
       const width = Math.max(0, overlayViewport.width)
@@ -4129,19 +4468,16 @@ export default function VideoEditorPage() {
         height > 0 &&
         video.readyState >= 2
       ) {
-        // Lane detections are recomputed every animation frame from
-        // the precomputed lane + the video's current playback time so
-        // the blur stays glued to the face during smooth playback.
-        const laneDetections = computeLiveLaneDetections(playbackTime)
+        // [FACE-LOCK LANE BLUR — DISABLED] only the existing per-frame
+        // live-redaction blurs are drawn. To re-enable, restore:
+        //   const laneDetections = computeLiveLaneDetections(playbackTime)
+        //   ...and draw them after the liveDetections loop below.
         const liveDetections = visibleLiveRedactionDetectionsRef.current
           .filter((entry) => !entry.id.startsWith('face-lock-'))
           .map((entry) => predictLiveDetection(entry, playbackTime))
-        if (laneDetections.length === 0 && liveDetections.length === 0) return
+        if (liveDetections.length === 0) return
         try {
           for (const detection of liveDetections) {
-            drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
-          }
-          for (const detection of laneDetections) {
             drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
           }
         } catch {
@@ -4198,8 +4534,18 @@ export default function VideoEditorPage() {
 
   const toggleDetectionSelectionById = useCallback((selectionId: string, personId?: string | null) => {
     const isExcluded = excludedFromRedactionIds.includes(selectionId)
-    if (isExcluded && personId) {
+    const isActivatingFaceBlur = isExcluded && !!personId
+    if (isActivatingFaceBlur) {
       ensureFaceTimelineLane(personId)
+      try {
+        const seen = window.localStorage.getItem(FACE_LOCK_INTRO_SEEN_KEY)
+        if (seen !== '1') {
+          setShowFaceLockIntroPopup(true)
+          window.localStorage.setItem(FACE_LOCK_INTRO_SEEN_KEY, '1')
+        }
+      } catch {
+        // localStorage might be unavailable (private mode); no-op.
+      }
     }
     setExcludedFromRedactionIds((previous) => (
       previous.includes(selectionId)
@@ -4219,12 +4565,19 @@ export default function VideoEditorPage() {
 
     if (isActivatingBlur && videoId) {
       const showScopedSearchResult = (scopedSearchResult: SearchSessionResult) => {
-        setSearchSessionResult(scopedSearchResult)
+        const nextSession = withSearchSessionId(scopedSearchResult)
+        const nextSessionId = getSearchSessionId(nextSession)
+        setSearchSessionResults((previous) => {
+          const next = [
+            ...previous.filter((session, index) => getSearchSessionId(session, index) !== nextSessionId),
+            nextSession,
+          ]
+          persistEditorSearchSessions(next)
+          return next
+        })
+        setActiveSearchSessionId(nextSessionId)
         setActiveTool('search')
         setRightSidebarOpen(true)
-        try {
-          sessionStorage.setItem(EDITOR_LAST_SEARCH_SESSION_KEY, JSON.stringify(scopedSearchResult))
-        } catch {}
       }
 
       const fallbackToEntityRanges = () => {
@@ -4408,11 +4761,11 @@ export default function VideoEditorPage() {
   }, [activeSearchClipIndex])
 
   useEffect(() => {
-    if (searchResultForVideo && orderedSearchClips.length > 0) {
+    if (searchTimelineLanes.length > 0) {
       setActiveTool('search')
       setRightSidebarOpen(true)
     }
-  }, [orderedSearchClips.length, searchResultForVideo, videoId])
+  }, [searchTimelineLanes.length, videoId])
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background text-text-primary overflow-hidden">
@@ -4548,6 +4901,67 @@ export default function VideoEditorPage() {
               <span className="text-text-primary truncate" title={title}>{title || 'Untitled'}</span>
             </nav>
             <div className="min-w-0 flex-1" aria-hidden />
+            {faceLockEntries.length > 0 && (() => {
+              const visibleEntries = faceLockEntries.slice(0, 2)
+              const overflowEntries = faceLockEntries.slice(2)
+              const overflowCount = overflowEntries.length
+              return (
+                <div
+                  className="shrink-0 flex items-center gap-1.5 mr-2 relative"
+                  ref={faceLockListRef}
+                  role="status"
+                  aria-label={
+                    faceLockBuildSummary.hasActive
+                      ? `Building face-lock for ${faceLockBuildSummary.buildingCount} faces`
+                      : 'Face-lock progress per selected face'
+                  }
+                >
+                  {visibleEntries.map((entry) => (
+                    <FaceLockChip key={`face-lock-chip-${entry.personId}`} entry={entry} />
+                  ))}
+                  {overflowCount > 0 && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setFaceLockListOpen((open) => !open)}
+                        className={`h-7 px-2 rounded-md text-[11px] font-medium border transition-colors ${
+                          faceLockListOpen
+                            ? 'border-accent/40 bg-accent/10 text-accent'
+                            : 'border-border bg-card text-text-secondary hover:bg-background hover:text-text-primary'
+                        }`}
+                        aria-haspopup="true"
+                        aria-expanded={faceLockListOpen}
+                        title={`${overflowCount} more face${overflowCount === 1 ? '' : 's'}`}
+                      >
+                        +{overflowCount}
+                      </button>
+                      {faceLockListOpen && (
+                        <div className="absolute right-0 top-full mt-1 z-50 w-72 rounded-lg border border-border bg-surface shadow-xl py-1.5">
+                          <div className="px-3 py-1.5 border-b border-border flex items-center justify-between">
+                            <span className="text-[11px] font-medium uppercase tracking-wider text-text-tertiary">
+                              Face-lock progress
+                            </span>
+                            <span className="text-[11px] tabular-nums text-text-secondary">
+                              {faceLockBuildSummary.readyCount}/{faceLockBuildSummary.totalCount}
+                            </span>
+                          </div>
+                          <div className="max-h-72 overflow-y-auto py-1">
+                            {faceLockEntries.map((entry) => (
+                              <div
+                                key={`face-lock-row-${entry.personId}`}
+                                className="px-3 py-1.5 flex items-center gap-2.5"
+                              >
+                                <FaceLockChip entry={entry} variant="row" />
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )
+            })()}
             <div className="relative shrink-0" ref={exportMenuRef}>
               <button
                 type="button"
@@ -4811,6 +5225,51 @@ export default function VideoEditorPage() {
                         {liveRedactionError}
                       </div>
                     )}
+                    {showFaceLockIntroPopup && (
+                      <div
+                        role="status"
+                        className="absolute left-3 top-3 z-30 w-[260px] rounded-xl border border-accent/30 bg-surface/95 p-3 text-text-primary shadow-xl backdrop-blur-md"
+                      >
+                        <div className="flex items-start gap-2.5">
+                          <div className="relative shrink-0 mt-0.5">
+                            <span className="absolute inset-0 -m-0.5 rounded-full bg-accent/25 animate-ping" aria-hidden />
+                            <span className="relative inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/15 ring-1 ring-accent/40 text-accent">
+                              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
+                                <path
+                                  d="M12 2 4 6v6c0 5 3.4 9.4 8 10 4.6-.6 8-5 8-10V6l-8-4Z"
+                                  stroke="currentColor"
+                                  strokeWidth="1.8"
+                                  strokeLinejoin="round"
+                                />
+                                <path
+                                  d="m9 12 2 2 4-4"
+                                  stroke="currentColor"
+                                  strokeWidth="1.8"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                            </span>
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="text-[12px] font-semibold leading-tight">Locking onto this face</p>
+                            <p className="mt-1 text-[11px] leading-snug text-text-secondary">
+                              Once the build finishes, the blur snaps precisely to this face for the rest of the clip.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            aria-label="Dismiss"
+                            className="shrink-0 -mt-1 -mr-1 rounded p-1 text-text-tertiary hover:text-text-primary hover:bg-card transition-colors"
+                            onClick={() => setShowFaceLockIntroPopup(false)}
+                          >
+                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+                              <path d="M2 2L10 10M10 2L2 10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -4996,143 +5455,172 @@ export default function VideoEditorPage() {
                     )}
                   </div>
 
-                  {orderedSearchClips.length > 0 && (
-                    <div className="shrink-0 border-b border-border">
-                      <div className="relative" style={{ height: `${ENTITY_SEARCH_LANE_HEIGHT_PX}px` }}>
-                        <div
-                          className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
-                          style={{
-                            border: `1px solid ${ENTITY_SEARCH_LANE_BORDER}`,
-                            background: ENTITY_SEARCH_LANE_BACKGROUND,
-                          }}
-                        >
+                  {searchTimelineLanes.length > 0 && (
+                    <div
+                      className="shrink-0 border-b border-border"
+                      style={{ maxHeight: searchTimelineLanes.length > 3 ? 3 * (ENTITY_SEARCH_LANE_HEIGHT_PX + 50) : undefined }}
+                    >
+                      <div
+                        className={searchTimelineLanes.length > 3 ? 'overflow-y-auto overflow-x-hidden lane-scroller' : ''}
+                        style={searchTimelineLanes.length > 3 ? { maxHeight: 3 * (ENTITY_SEARCH_LANE_HEIGHT_PX + 50) } : undefined}
+                      >
+                        {searchTimelineLanes.map((lane) => (
                           <div
-                            className="absolute inset-0 pointer-events-none"
-                            style={{ background: ENTITY_SEARCH_LANE_OVERLAY }}
-                          />
-                          <div
-                            className="absolute inset-x-3 bottom-[9px] h-px"
-                            style={{ backgroundColor: ENTITY_SEARCH_LANE_BASELINE }}
-                          />
-                          {visibleTimelineSearchEntities.length > 0 && (
-                            <div className="absolute left-3 top-2 right-12 z-[4] flex items-center gap-1.5 overflow-hidden pointer-events-none">
-                              {visibleTimelineSearchEntities.map((entity) => (
-                                <SearchEntityChip
-                                  key={`timeline-search-entity-${entity.id}`}
-                                  entity={entity}
-                                  variant="timeline"
-                                />
-                              ))}
-                              {hiddenTimelineSearchEntityCount > 0 && (
-                                <div
-                                  className="inline-flex items-center rounded-full border border-white/10 bg-black/22 px-2 py-1 text-[10px] font-medium text-white/72 shadow-[0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-sm"
-                                  style={{ opacity: 0.8 }}
-                                >
-                                  +{hiddenTimelineSearchEntityCount} more
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          <button
-                            type="button"
-                            className="absolute right-3 top-2 z-[5] inline-flex h-5 w-5 items-center justify-center rounded-md border border-white/18 bg-black/20 text-white/80 transition hover:border-white/32 hover:bg-black/35 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/45"
-                            onClick={clearSearchTimelineLane}
-                            title="Remove entity lane"
-                            aria-label="Remove entity lane"
+                            key={`search-lane-${lane.sessionId}`}
+                            className="border-b border-border last:border-b-0"
                           >
-                            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" aria-hidden>
-                              <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                            </svg>
-                          </button>
-                          {searchLaneBars.length > 0 ? (
-                            <>
-                              <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
-                                {searchLaneBars.map((bar, index) => {
-                                  const barHeight = 8 + bar.value * 56
-                                  const y = 76 - barHeight
-                                  return (
-                                    <rect
-                                      key={`search-bar-base-${index}`}
-                                      x={bar.x.toFixed(2)}
-                                      y={y.toFixed(2)}
-                                      width={bar.width.toFixed(2)}
-                                      height={barHeight.toFixed(2)}
-                                      rx="1.8"
-                                      fill={bar.isPeak ? ENTITY_SEARCH_LANE_PEAK_BAR_BASE : ENTITY_SEARCH_LANE_BAR_BASE}
-                                    />
-                                  )
-                                })}
-                              </svg>
-                              <svg
-                                className="absolute inset-0 h-full w-full z-[2]"
-                                viewBox="0 0 1200 84"
-                                preserveAspectRatio="none"
-                                aria-hidden
-                                style={{ clipPath: `inset(0 ${Math.max(0, 100 - progress * 100)}% 0 0)` }}
-                              >
-                                {searchLaneBars.map((bar, index) => {
-                                  const barHeight = 8 + bar.value * 56
-                                  const y = 76 - barHeight
-                                  return (
-                                    <rect
-                                      key={`search-bar-active-${index}`}
-                                      x={bar.x.toFixed(2)}
-                                      y={y.toFixed(2)}
-                                      width={bar.width.toFixed(2)}
-                                      height={barHeight.toFixed(2)}
-                                      rx="1.8"
-                                      fill={bar.isPeak ? ENTITY_SEARCH_LANE_PEAK_COLOR : ENTITY_SEARCH_LANE_COLOR}
-                                    />
-                                  )
-                                })}
-                              </svg>
-                            </>
-                          ) : null}
-                          {searchLaneSegments.map(({ clip, index, isActive, importance, left, width }) => {
-                            return (
-                              <button
-                                key={`lane-hit-${clip.start}-${clip.end}-${index}`}
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  seekToTime(clip.start)
-                                }}
-                                className="absolute inset-y-0 z-[3] bg-transparent"
+                            <div className="relative" style={{ height: `${ENTITY_SEARCH_LANE_HEIGHT_PX}px` }}>
+                              <div
+                                className={`absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] ${activeSearchTimelineLane?.sessionId === lane.sessionId ? 'ring-1 ring-accent/45' : ''}`}
                                 style={{
-                                  left,
-                                  width,
+                                  border: `1px solid ${ENTITY_SEARCH_LANE_BORDER}`,
+                                  background: ENTITY_SEARCH_LANE_BACKGROUND,
                                 }}
-                                title={`${fmtShort(clip.start)} - ${fmtShort(clip.end)}`}
+                                onClick={() => activateSearchSession(lane.sessionId)}
+                                role="button"
+                                tabIndex={0}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault()
+                                    activateSearchSession(lane.sessionId)
+                                  }
+                                }}
                               >
-                                <span
-                                  className={`absolute inset-y-1 rounded-full transition-all ${isActive ? '' : 'hover:bg-[rgba(0,220,130,0.10)]'}`}
-                                  style={{
-                                    left: 0,
-                                    right: 0,
-                                    backgroundColor: isActive ? ENTITY_SEARCH_LANE_SEGMENT_ACTIVE : undefined,
-                                    boxShadow: isActive ? `0 0 0 1px ${ENTITY_SEARCH_LANE_SEGMENT_RING}` : undefined,
-                                    opacity: isActive ? 0.95 : 0.15 + importance * 0.42,
-                                  }}
+                                <div
+                                  className="absolute inset-0 pointer-events-none"
+                                  style={{ background: ENTITY_SEARCH_LANE_OVERLAY }}
                                 />
-                              </button>
-                            )
-                          })}
-                          <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_LEFT }} />
-                          <div className="absolute right-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_RIGHT }} />
-                        </div>
-                      </div>
-                      <div className="px-3 pb-2.5 pt-1.5">
-                        <p className="text-[11px] leading-4 text-text-tertiary">
-                          {searchLaneNoteLines[0]}
-                        </p>
-                        <p className="text-[11px] leading-4 text-text-tertiary">
-                          {searchLaneNoteLines[1]}
-                        </p>
+                                <div
+                                  className="absolute inset-x-3 bottom-[9px] h-px"
+                                  style={{ backgroundColor: ENTITY_SEARCH_LANE_BASELINE }}
+                                />
+                                {lane.visibleEntities.length > 0 && (
+                                  <div className="absolute left-3 top-2 right-12 z-[4] flex items-center gap-1.5 overflow-hidden pointer-events-none">
+                                    {lane.visibleEntities.map((entity) => (
+                                      <SearchEntityChip
+                                        key={`timeline-search-entity-${lane.sessionId}-${entity.id}`}
+                                        entity={entity}
+                                        variant="timeline"
+                                      />
+                                    ))}
+                                    {lane.hiddenEntityCount > 0 && (
+                                      <div
+                                        className="inline-flex items-center rounded-full border border-white/10 bg-black/22 px-2 py-1 text-[10px] font-medium text-white/72 shadow-[0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-sm"
+                                        style={{ opacity: 0.8 }}
+                                      >
+                                        +{lane.hiddenEntityCount} more
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                                <button
+                                  type="button"
+                                  className="absolute right-3 top-2 z-[5] inline-flex h-5 w-5 items-center justify-center rounded-md border border-white/18 bg-black/20 text-white/80 transition hover:border-white/32 hover:bg-black/35 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/45"
+                                  onClick={(event) => {
+                                    event.stopPropagation()
+                                    clearSearchTimelineLane(lane.sessionId)
+                                  }}
+                                  title="Remove entity lane"
+                                  aria-label="Remove entity lane"
+                                >
+                                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" aria-hidden>
+                                    <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                                  </svg>
+                                </button>
+                                {lane.bars.length > 0 ? (
+                                  <>
+                                    <svg className="absolute inset-0 h-full w-full z-[1]" viewBox="0 0 1200 84" preserveAspectRatio="none" aria-hidden>
+                                      {lane.bars.map((bar, index) => {
+                                        const barHeight = 8 + bar.value * 56
+                                        const y = 76 - barHeight
+                                        return (
+                                          <rect
+                                            key={`search-bar-base-${lane.sessionId}-${index}`}
+                                            x={bar.x.toFixed(2)}
+                                            y={y.toFixed(2)}
+                                            width={bar.width.toFixed(2)}
+                                            height={barHeight.toFixed(2)}
+                                            rx="1.8"
+                                            fill={bar.isPeak ? ENTITY_SEARCH_LANE_PEAK_BAR_BASE : ENTITY_SEARCH_LANE_BAR_BASE}
+                                          />
+                                        )
+                                      })}
+                                    </svg>
+                                    <svg
+                                      className="absolute inset-0 h-full w-full z-[2]"
+                                      viewBox="0 0 1200 84"
+                                      preserveAspectRatio="none"
+                                      aria-hidden
+                                      style={{ clipPath: `inset(0 ${Math.max(0, 100 - progress * 100)}% 0 0)` }}
+                                    >
+                                      {lane.bars.map((bar, index) => {
+                                        const barHeight = 8 + bar.value * 56
+                                        const y = 76 - barHeight
+                                        return (
+                                          <rect
+                                            key={`search-bar-active-${lane.sessionId}-${index}`}
+                                            x={bar.x.toFixed(2)}
+                                            y={y.toFixed(2)}
+                                            width={bar.width.toFixed(2)}
+                                            height={barHeight.toFixed(2)}
+                                            rx="1.8"
+                                            fill={bar.isPeak ? ENTITY_SEARCH_LANE_PEAK_COLOR : ENTITY_SEARCH_LANE_COLOR}
+                                          />
+                                        )
+                                      })}
+                                    </svg>
+                                  </>
+                                ) : null}
+                                {lane.segments.map(({ clip, index, isActive, importance, left, width }) => (
+                                  <button
+                                    key={`lane-hit-${lane.sessionId}-${clip.start}-${clip.end}-${index}`}
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      activateSearchSession(lane.sessionId)
+                                      seekToTime(clip.start)
+                                    }}
+                                    className="absolute inset-y-0 z-[3] bg-transparent"
+                                    style={{
+                                      left,
+                                      width,
+                                    }}
+                                    title={`${fmtShort(clip.start)} - ${fmtShort(clip.end)}`}
+                                  >
+                                    <span
+                                      className={`absolute inset-y-1 rounded-full transition-all ${isActive ? '' : 'hover:bg-[rgba(0,220,130,0.10)]'}`}
+                                      style={{
+                                        left: 0,
+                                        right: 0,
+                                        backgroundColor: isActive ? ENTITY_SEARCH_LANE_SEGMENT_ACTIVE : undefined,
+                                        boxShadow: isActive ? `0 0 0 1px ${ENTITY_SEARCH_LANE_SEGMENT_RING}` : undefined,
+                                        opacity: isActive ? 0.95 : 0.15 + importance * 0.42,
+                                      }}
+                                    />
+                                  </button>
+                                ))}
+                                <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_LEFT }} />
+                                <div className="absolute right-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: ENTITY_SEARCH_LANE_EDGE_RIGHT }} />
+                              </div>
+                            </div>
+                            <div className="px-3 pb-2.5 pt-1.5">
+                              <p className="text-[11px] leading-4 text-text-tertiary">
+                                {lane.noteLines[0]}
+                              </p>
+                              <p className="text-[11px] leading-4 text-text-tertiary">
+                                {lane.noteLines[1]}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   )}
 
-                  {personTimelineLanes.length > 0 && (
+                  {/* Per-face "Blur on / Blur off" lane built from detection metadata
+                      is intentionally hidden. The TwelveLabs entity search lane
+                      above is the only timeline shown for blurred faces. */}
+                  {SHOW_DETECTION_METADATA_FACE_LANE && personTimelineLanes.length > 0 && (
                     <div
                       className="shrink-0 relative"
                       style={{ maxHeight: personTimelineLanes.length > 3 ? 3 * 52 + 8 : undefined }}
@@ -5519,13 +6007,93 @@ export default function VideoEditorPage() {
                 <>
                   <div className="px-3 h-10 flex items-center justify-between border-b border-border shrink-0">
                     <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Search</span>
-                    <button type="button" onClick={() => setRightSidebarOpen(false)} className={`h-7 w-7 shrink-0 rounded-md ${btnBase}`} aria-label="Collapse sidebar" title="Collapse sidebar">
-                      <IconChevronRight className="w-4 h-4" />
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      {searchTimelineLanes.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={clearAllSearchTimelineLanes}
+                          className="h-7 rounded-md border border-border bg-card px-2 text-[10px] font-medium uppercase tracking-wide text-text-tertiary transition-colors hover:bg-background hover:text-text-primary"
+                        >
+                          Clear all
+                        </button>
+                      )}
+                      <button type="button" onClick={() => setRightSidebarOpen(false)} className={`h-7 w-7 shrink-0 rounded-md ${btnBase}`} aria-label="Collapse sidebar" title="Collapse sidebar">
+                        <IconChevronRight className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
                   {searchResultForVideo ? (
                     <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                       <div className="p-3 border-b border-border shrink-0 space-y-3">
+                        {searchTimelineLanes.length > 1 && (
+                          <div>
+                            <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider">Stacked searches</p>
+                            <div className="mt-2 flex flex-col gap-1.5">
+                              {searchTimelineLanes.map((lane) => {
+                                const isSelected = activeSearchTimelineLane?.sessionId === lane.sessionId
+                                const label = lane.entities.map((entity) => entity.name).join(', ') || lane.session.queryText || lane.session.query || 'Search'
+                                const previewEntities = lane.entities.slice(0, 3)
+                                const extraEntityCount = Math.max(0, lane.entities.length - previewEntities.length)
+                                return (
+                                  <button
+                                    key={`sidebar-search-stack-${lane.sessionId}`}
+                                    type="button"
+                                    onClick={() => activateSearchSession(lane.sessionId)}
+                                    className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-2 text-left text-xs transition-colors ${
+                                      isSelected
+                                        ? 'border-accent/35 bg-accent/10 text-accent'
+                                        : 'border-border bg-card text-text-secondary hover:bg-background hover:text-text-primary'
+                                    }`}
+                                  >
+                                    <div className="flex min-w-0 items-center gap-2">
+                                      {previewEntities.length > 0 && (
+                                        <div className="flex shrink-0 -space-x-1.5">
+                                          {previewEntities.map((entity) => (
+                                            <div
+                                              key={`sidebar-search-stack-${lane.sessionId}-entity-${entity.id}`}
+                                              className={`h-6 w-6 shrink-0 overflow-hidden rounded-full border bg-surface ring-1 ${
+                                                isSelected ? 'border-accent/50 ring-accent/20' : 'border-border ring-background'
+                                              }`}
+                                              title={entity.name}
+                                            >
+                                              {entity.previewUrl ? (
+                                                <img
+                                                  src={entity.previewUrl}
+                                                  alt={entity.name}
+                                                  className="h-full w-full object-cover"
+                                                />
+                                              ) : (
+                                                <div className="flex h-full w-full items-center justify-center text-[10px] font-semibold text-text-tertiary">
+                                                  {getEntityMonogram(entity.name)}
+                                                </div>
+                                              )}
+                                            </div>
+                                          ))}
+                                          {extraEntityCount > 0 && (
+                                            <div
+                                              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border bg-surface ring-1 text-[9px] font-semibold ${
+                                                isSelected
+                                                  ? 'border-accent/50 ring-accent/20 text-accent'
+                                                  : 'border-border ring-background text-text-tertiary'
+                                              }`}
+                                              title={`${extraEntityCount} more entit${extraEntityCount === 1 ? 'y' : 'ies'}`}
+                                            >
+                                              +{extraEntityCount}
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                      <span className="min-w-0 truncate">{label}</span>
+                                    </div>
+                                    <span className="shrink-0 rounded-full border border-current/20 px-1.5 py-0.5 text-[10px]">
+                                      {lane.orderedClips.length}
+                                    </span>
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        )}
                         {searchEntities.length > 0 && (
                           <div>
                             <p className="text-[10px] font-medium text-text-tertiary uppercase tracking-wider">Entity</p>
@@ -5718,6 +6286,35 @@ export default function VideoEditorPage() {
                           </div>
                           <div className="min-w-0 flex-1">
                             <p className="text-sm text-text-primary truncate">{d.label}</p>
+                            {(() => {
+                              const personId = d.kind === 'face' ? d.personId || null : null
+                              if (!personId || excluded) return null
+                              const lane = faceLockLanesByPersonId[personId]
+                              const buildState = faceLockBuildByPersonId[personId]
+                              if (lane) {
+                                return null
+                              }
+                              if (buildState && (buildState.status === 'queued' || buildState.status === 'running')) {
+                                return (
+                                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium bg-accent/10 border border-accent/30 text-accent">
+                                      <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+                                      Locking onto face... {buildState.percent || 0}%
+                                    </span>
+                                  </div>
+                                )
+                              }
+                              if (buildState && buildState.status === 'failed') {
+                                return (
+                                  <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-400/10 border border-amber-400/30 text-amber-300" title={buildState.message || ''}>
+                                      Face-lock fallback active
+                                    </span>
+                                  </div>
+                                )
+                              }
+                              return null
+                            })()}
                             {(visibleNow || nearestSeekTime !== null) && (
                               <div className="mt-1.5 flex flex-wrap gap-1.5">
                                 {visibleNow && (

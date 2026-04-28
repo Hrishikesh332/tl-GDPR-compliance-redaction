@@ -196,12 +196,14 @@ function Shell() {
                   <span className="text-[10px] md:text-[11px] font-brand-xbold uppercase tracking-[0.14em] text-accent truncate">
                     Video REDACTION
                   </span>
-                  <h1 className="text-base md:text-h5 font-medium truncate">Automated GDPR Compliance</h1>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <h1 className="text-base md:text-h5 font-medium truncate">Automated GDPR Compliance</h1>
+                    <span className="hidden md:inline-flex items-center px-2 py-0.5 rounded-sm border border-border bg-transparent text-text-secondary text-[10px] md:text-xs font-medium shrink-0 uppercase tracking-wide pointer-events-none select-none leading-none">
+                      Sample App
+                    </span>
+                  </div>
                 </div>
               </Link>
-              <span className="hidden md:inline-flex items-center px-2 py-1 rounded-sm border border-border bg-transparent text-text-secondary text-xs font-medium shrink-0 uppercase tracking-wide pointer-events-none select-none">
-                Sample App
-              </span>
             </div>
 
             <nav className="hidden md:flex items-center gap-0.5">

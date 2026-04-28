@@ -26,16 +26,16 @@ logger = logging.getLogger("video_redaction.routes.face_lock")
 
 face_lock_bp = Blueprint("face_lock", __name__)
 
-_active_builds = {}
-_active_builds_lock = threading.Lock()
+active_builds = {}
+active_builds_lock = threading.Lock()
 
 
-def _build_key(job_id, person_id):
+def build_status_key(job_id, person_id):
     return f"{job_id}:{person_id}"
 
 
-def _run_build(job_id, person_id, force_rebuild):
-    key = _build_key(job_id, person_id)
+def run_build_in_thread(job_id, person_id, force_rebuild):
+    key = build_status_key(job_id, person_id)
     try:
         build_face_lock_lane(job_id, person_id, force_rebuild=force_rebuild)
     except Exception as exc:
@@ -43,14 +43,14 @@ def _run_build(job_id, person_id, force_rebuild):
         # The builder writes "running" state into the shared dict; on
         # failure we record a failed status that the GET route will
         # surface to the client.
-        from services.face_lock_track import _set_build_state  # local import keeps the public surface clean
-        _set_build_state(
+        from services.face_lock_track import set_build_state
+        set_build_state(
             job_id, person_id,
             status="failed", progress=0.0, percent=0, message=str(exc) or "build failed",
         )
     finally:
-        with _active_builds_lock:
-            _active_builds.pop(key, None)
+        with active_builds_lock:
+            active_builds.pop(key, None)
 
 
 @face_lock_bp.route("/face-lock-track/build", methods=["POST"])
@@ -77,9 +77,9 @@ def start_face_lock_build():
                 "cached": True,
             })
 
-    key = _build_key(job_id, person_id)
-    with _active_builds_lock:
-        existing = _active_builds.get(key)
+    key = build_status_key(job_id, person_id)
+    with active_builds_lock:
+        existing = active_builds.get(key)
         if existing is not None and existing.is_alive() and not force_rebuild:
             status = get_face_lock_build_status(job_id, person_id)
             return jsonify({
@@ -92,11 +92,11 @@ def start_face_lock_build():
             })
 
         thread = threading.Thread(
-            target=_run_build,
+            target=run_build_in_thread,
             args=(job_id, person_id, force_rebuild),
             daemon=True,
         )
-        _active_builds[key] = thread
+        active_builds[key] = thread
         thread.start()
 
     return jsonify({
