@@ -23,6 +23,7 @@ import logging
 import math
 import os
 import threading
+import time
 from datetime import datetime, timezone
 
 import cv2
@@ -116,13 +117,19 @@ def face_lock_lane_path(job_id, person_id):
 
 
 def get_face_lock_lane(job_id, person_id):
-    """Return the cached lane dict if a usable lane file is present.
+    """Return the cached lane dict if a usable, current-version lane file
+    is on disk.
 
-    Any persisted lane for this (job_id, person_id) is reused as-is so a
-    rebuild is never triggered when a result is already on disk. The
-    ``build_version`` field is kept on the doc as metadata for debugging
-    but is no longer used to invalidate caches — if you need to force a
-    fresh build, pass ``force_rebuild=True`` from the caller.
+    The lane format and build algorithm are versioned via
+    ``LANE_BUILD_VERSION``. Any persisted lane whose ``build_version``
+    is older than the running build version is treated as stale and
+    discarded, forcing the caller to rebuild it under the current
+    algorithm. This is critical because the v1 -> v2 upgrade introduced
+    dense InsightFace verification, scale stabilization and
+    bidirectional smoothing — reusing a v1 lane gives objectively
+    worse tracking than a fresh v2 build, even though the JSON would
+    deserialize fine. Lanes built under the current version (or a
+    forward-compatible newer version) are returned as-is.
     """
     path = face_lock_lane_path(job_id, person_id)
     if not os.path.isfile(path):
@@ -137,6 +144,18 @@ def get_face_lock_lane(job_id, person_id):
         return None
     lane = data.get("lane")
     if not isinstance(lane, list) or not lane:
+        return None
+    try:
+        cached_version = int(data.get("build_version") or 0)
+    except (TypeError, ValueError):
+        cached_version = 0
+    if cached_version < LANE_BUILD_VERSION:
+        logger.info(
+            "Discarding stale face-lock lane at %s (build_version=%d, "
+            "current=%d); a fresh build will run on next request so the "
+            "tracker uses the current algorithm.",
+            path, cached_version, LANE_BUILD_VERSION,
+        )
         return None
     return data
 
@@ -339,6 +358,76 @@ def seek_and_read_frame(cap, target_frame, *, max_advance=240):
     return last_frame
 
 
+# JPEG quality used when buffering small frames for the backward
+# tracking pass. 92 keeps tracker-relevant detail (face contours, eye
+# corners for LK seed points) without blowing the memory budget; for
+# a 640x360 small frame this lands at ~30-50 KB per frame, so a
+# 1000-frame segment costs ~50 MB instead of the ~700 MB an
+# uncompressed buffer would need.
+BACKWARD_BUFFER_JPEG_QUALITY = 92
+
+
+def read_segment_small_frame_buffer(
+    cap,
+    start_frame,
+    end_frame,
+    *,
+    jpeg_quality=BACKWARD_BUFFER_JPEG_QUALITY,
+    max_dim=DEFAULT_TRACKER_MAX_DIM,
+):
+    """Read frames in ``[start_frame, end_frame]`` sequentially
+    (one cap.set + N cap.read calls) and return ``(buffer, scale_back)``.
+
+    ``buffer`` is a dict mapping ``frame_idx -> jpeg_bytes`` for the
+    downscaled tracking frame at each index. ``scale_back`` is the
+    common down/up-scale factor applied during ``small_frame_for_tracking``
+    (constant across the segment because frame dimensions don't change).
+
+    Used by the backward direction of ``track_segment_one_direction``
+    so it can walk the segment in reverse without re-issuing
+    ``cap.set(POS_FRAMES, ...)`` per step. On H.264-encoded video each
+    such backward seek rewinds to the previous keyframe (~95 frames
+    on a typical GOP) and decodes forward to the target — measured at
+    ~7.7 fps on this video versus ~805 fps for sequential reads, a
+    ~100x slowdown that turns long segments into multi-minute stalls.
+
+    On a read failure the buffer ends at the last successful frame;
+    callers are expected to break their loop when ``buffer.get(idx)``
+    returns ``None``.
+    """
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    buffer = {}
+    scale_back = None
+    encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
+    pos = start_frame
+    while pos <= end_frame:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
+        small_frame, sb = small_frame_for_tracking(frame, max_dim=max_dim)
+        if scale_back is None:
+            scale_back = sb
+        ok, jpg = cv2.imencode(".jpg", small_frame, encode_params)
+        if not ok:
+            break
+        buffer[pos] = jpg.tobytes()
+        pos += 1
+    return buffer, scale_back
+
+
+def decode_buffered_small_frame(jpg_bytes):
+    """Decode a JPEG-encoded small frame back to a BGR ndarray.
+
+    Returns ``None`` if ``jpg_bytes`` is falsy or the decode fails,
+    so callers can treat it as the same kind of "frame missing"
+    sentinel that ``cap.read()`` produces.
+    """
+    if not jpg_bytes:
+        return None
+    arr = np.frombuffer(jpg_bytes, dtype=np.uint8)
+    return cv2.imdecode(arr, cv2.IMREAD_COLOR)
+
+
 def bbox_diagonal(bbox):
     if not bbox:
         return 0.0
@@ -496,11 +585,45 @@ def track_segment_one_direction(
         cur = end_frame
         last = start_frame
 
-    frame = seek_and_read_frame(cap, cur)
-    if frame is None:
-        return results
+    # Backward direction: pre-buffer all small frames in the segment by
+    # reading sequentially forward, then iterate the buffer in reverse.
+    # Per-step backward seeking via cap.set rewinds to the previous
+    # H.264 keyframe (~95 frames on this video's GOP) and re-decodes
+    # forward, which on long segments turns the loop into O(N²) decode
+    # work and is the dominant cause of "stuck at 87%" stalls. A single
+    # forward sweep of the segment costs O(N) reads at sequential read
+    # speed (~100x faster than per-frame seeks measured on this video).
+    # Verification is disabled in backward because (a) we only have the
+    # downscaled small frame buffered, not the full frame InsightFace
+    # needs, and (b) the overlap region [first_anc, last_anc] is
+    # already covered by forward verification, so backward verification
+    # was redundant there; only the small pre-anchor window
+    # [seg_start, first_anc-1] (~15 frames per segment) loses
+    # verification, which the bidirectional smoothing pass and the
+    # tracker fusion mask out.
+    backward_small_buffer = None
+    backward_scale_back = None
+    if direction == "backward":
+        backward_small_buffer, backward_scale_back = read_segment_small_frame_buffer(
+            cap, start_frame, end_frame,
+        )
+        if not backward_small_buffer:
+            return results
+        verify_interval_frames = 0
 
-    small_frame, scale_back = small_frame_for_tracking(frame, max_dim=DEFAULT_TRACKER_MAX_DIM)
+    if direction == "backward":
+        small_frame = decode_buffered_small_frame(backward_small_buffer.get(cur))
+        if small_frame is None:
+            return results
+        scale_back = backward_scale_back
+        frame = None
+    else:
+        frame = seek_and_read_frame(cap, cur)
+        if frame is None:
+            return results
+        small_frame, scale_back = small_frame_for_tracking(
+            frame, max_dim=DEFAULT_TRACKER_MAX_DIM,
+        )
     gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
     init_bbox = anchor_bbox_initial
@@ -527,12 +650,20 @@ def track_segment_one_direction(
     while (step > 0 and next_idx <= last) or (step < 0 and next_idx >= last):
         if direction == "forward":
             frame = read_next_frame(cap)
+            if frame is None:
+                break
+            small_frame, scale_back = small_frame_for_tracking(
+                frame, max_dim=DEFAULT_TRACKER_MAX_DIM,
+            )
         else:
-            frame = seek_and_read_frame(cap, next_idx)
-        if frame is None:
-            break
-
-        small_frame, scale_back = small_frame_for_tracking(frame, max_dim=DEFAULT_TRACKER_MAX_DIM)
+            small_frame = decode_buffered_small_frame(
+                backward_small_buffer.get(next_idx)
+                if backward_small_buffer is not None else None
+            )
+            if small_frame is None:
+                break
+            scale_back = backward_scale_back
+            frame = None
         gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
         anchor_app = anchors_by_frame.get(next_idx)
@@ -987,6 +1118,13 @@ def build_segment_lane(
     first_bbox = anchors_by_frame[first_anchor_frame]["bbox"]
     last_bbox = anchors_by_frame[last_anchor_frame]["bbox"]
 
+    seg_t0 = time.monotonic()
+    logger.info(
+        "Face-lock segment build: frames [%d, %d] (anchors at [%d, %d], %d anchors)",
+        seg_start, seg_end, first_anchor_frame, last_anchor_frame, len(anchors_by_frame),
+    )
+
+    forward_t0 = time.monotonic()
     forward = track_segment_one_direction(
         cap,
         "forward",
@@ -999,7 +1137,14 @@ def build_segment_lane(
         on_frame=on_frame,
         known_face=known_face,
     )
+    forward_dt = time.monotonic() - forward_t0
+    logger.info(
+        "  forward [%d -> %d]: %d frames in %.2fs (%.1f fps)",
+        first_anchor_frame, seg_end, len(forward), forward_dt,
+        len(forward) / forward_dt if forward_dt > 0 else 0.0,
+    )
 
+    backward_t0 = time.monotonic()
     backward = track_segment_one_direction(
         cap,
         "backward",
@@ -1012,6 +1157,12 @@ def build_segment_lane(
         on_frame=on_frame,
         known_face=known_face,
     )
+    backward_dt = time.monotonic() - backward_t0
+    logger.info(
+        "  backward [%d <- %d]: %d frames in %.2fs (%.1f fps)",
+        seg_start, last_anchor_frame, len(backward), backward_dt,
+        len(backward) / backward_dt if backward_dt > 0 else 0.0,
+    )
 
     fused = fuse_directions(forward, backward, frame_w, frame_h)
     # Scale stability before smoothing: lock bbox sizes to the
@@ -1019,6 +1170,11 @@ def build_segment_lane(
     # surrounding textures cannot make the bbox swell.
     scale_stable = stabilize_scale_between_pins(fused, frame_w, frame_h)
     smoothed = bidirectional_smooth(scale_stable, frame_w, frame_h, alpha=0.62)
+
+    logger.info(
+        "  fused & smoothed: %d frames, total segment time %.2fs",
+        len(smoothed), time.monotonic() - seg_t0,
+    )
 
     return smoothed
 
@@ -1125,36 +1281,89 @@ def build_face_lock_lane(
                 f"could not build any face-lock segments for person {person_id}"
             )
 
-        total_anchor_frames = sum(seg["end_frame"] - seg["start_frame"] + 1 for seg in segments)
-        total_anchor_frames = max(1, total_anchor_frames)
-        # Each frame is processed twice (forward + backward), so the
-        # progress denominator is doubled.
-        denom_frames = total_anchor_frames * 2
+        # Compute the expected number of ``on_frame`` emits across the
+        # whole build. Forward walks ``first_anchor_frame -> seg_end_local``
+        # and backward walks ``seg_start_local <- last_anchor_frame`` for
+        # each segment, so frames outside the [first, last] anchor span
+        # only get one emit instead of two. Using the segment span * 2
+        # as a denominator overcounts by exactly that gap and pins the
+        # progress bar somewhere below 100%; computing the real expected
+        # emits lets the bar climb predictably for any segment shape.
+        seg_pad_frames = int(round(SEGMENT_TIME_PADDING_SEC * fps * 2))
+        expected_emits = 0
+        for seg in segments:
+            seg_anchors = seg.get("anchors") or []
+            if not seg_anchors:
+                continue
+            anchor_frames = [appearance_frame_index(a, fps) for a in seg_anchors]
+            if not anchor_frames:
+                continue
+            first_anc = min(anchor_frames)
+            last_anc = max(anchor_frames)
+            seg_start_local = max(0, max(seg["start_frame"], first_anc - seg_pad_frames))
+            seg_end_local = max(seg["start_frame"], min(seg["end_frame"], last_anc + seg_pad_frames))
+            forward_count = max(0, seg_end_local - first_anc + 1)
+            backward_count = max(0, last_anc - seg_start_local + 1)
+            expected_emits += forward_count + backward_count
+        denom_frames = max(1, expected_emits)
+        # Reserve the top 10% of the bar (90 -> 100%) for post-loop
+        # work (per-segment fusion+smoothing already happens inline,
+        # but the global serialize_lane + disk write run after the
+        # segment loop and were previously invisible to the user).
+        LOOP_PROGRESS_CAP = 0.90
         processed = {"count": 0}
         last_emit_pct = {"value": -1}
 
-        def emit_progress(frame_idx):
+        def emit_loop_progress(frame_idx):
             del frame_idx
             processed["count"] += 1
-            pct = int(round(min(0.95, processed["count"] / denom_frames) * 100))
-            if pct != last_emit_pct["value"]:
-                last_emit_pct["value"] = pct
-                set_build_state(
-                    job_id, person_id,
-                    status="running",
-                    progress=round(processed["count"] / denom_frames, 4),
-                    percent=pct,
-                    message=f"Building face-lock lane ({pct}%)",
-                )
-                if progress_callback is not None:
-                    try:
-                        progress_callback({
-                            "stage": "building",
-                            "progress": min(0.95, processed["count"] / denom_frames),
-                            "percent": pct,
-                        })
-                    except Exception:
-                        pass
+            raw = processed["count"] / denom_frames
+            pct = int(round(min(LOOP_PROGRESS_CAP, raw) * 100))
+            if pct == last_emit_pct["value"]:
+                return
+            last_emit_pct["value"] = pct
+            set_build_state(
+                job_id, person_id,
+                status="running",
+                progress=round(min(LOOP_PROGRESS_CAP, raw), 4),
+                percent=pct,
+                message=f"Building face-lock lane ({pct}%)",
+            )
+            if progress_callback is not None:
+                try:
+                    progress_callback({
+                        "stage": "building",
+                        "progress": min(LOOP_PROGRESS_CAP, raw),
+                        "percent": pct,
+                    })
+                except Exception:
+                    pass
+
+        def emit_stage_progress(percent, message):
+            """Snap the progress bar to a fixed percent for a discrete
+            post-loop stage (fusion / serialize / persist). Avoids the
+            bar appearing frozen between the last loop emit and the
+            final ``ready`` state."""
+            pct = int(max(0, min(100, percent)))
+            if pct == last_emit_pct["value"]:
+                return
+            last_emit_pct["value"] = pct
+            set_build_state(
+                job_id, person_id,
+                status="running" if pct < 100 else "ready",
+                progress=round(pct / 100.0, 4),
+                percent=pct,
+                message=message,
+            )
+            if progress_callback is not None:
+                try:
+                    progress_callback({
+                        "stage": "finalizing" if pct < 100 else "ready",
+                        "progress": pct / 100.0,
+                        "percent": pct,
+                    })
+                except Exception:
+                    pass
 
         set_build_state(
             job_id, person_id,
@@ -1166,7 +1375,7 @@ def build_face_lock_lane(
         for seg in segments:
             seg_lane = build_segment_lane(
                 cap, seg, frame_w, frame_h, fps,
-                on_frame=emit_progress,
+                on_frame=emit_loop_progress,
                 known_face=selected_face,
             )
             if seg_lane:
@@ -1181,7 +1390,13 @@ def build_face_lock_lane(
                 f"face-lock lane build for person {person_id} produced no frames"
             )
 
+        # Loop is done. Push the bar to the LOOP_PROGRESS_CAP so the
+        # user sees a clean handoff into the finalize stages even if
+        # the actual loop emits stopped a bit short (e.g. an early
+        # break on a segment seek failure).
+        emit_stage_progress(int(round(LOOP_PROGRESS_CAP * 100)), "Stabilizing lane")
         lane_array = serialize_lane(all_lane, fps, frame_w, frame_h)
+        emit_stage_progress(95, "Serializing lane")
         anchor_count = sum(
             1 for entry in all_lane.values() if entry.get("src") == "anchor"
         )
@@ -1215,16 +1430,31 @@ def build_face_lock_lane(
         path = face_lock_lane_path(job_id, person_id)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp_path = f"{path}.tmp"
+        emit_stage_progress(98, "Saving lane to disk")
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(lane_doc, f, separators=(",", ":"))
         os.replace(tmp_path, path)
 
+        # The dedicated `built_at`/`frames` metadata isn't carried by
+        # ``emit_stage_progress`` so set it on the final ready state
+        # explicitly. Setting status="ready" + percent=100 also makes
+        # the GET endpoint return the lane on the next poll.
         set_build_state(
             job_id, person_id,
             status="ready", progress=1.0, percent=100, message="ready",
             built_at=lane_doc["built_at"],
             frames=len(lane_array),
         )
+        last_emit_pct["value"] = 100
+        if progress_callback is not None:
+            try:
+                progress_callback({
+                    "stage": "ready",
+                    "progress": 1.0,
+                    "percent": 100,
+                })
+            except Exception:
+                pass
         logger.info(
             "Built face-lock lane for job=%s person=%s: %d frames across %d segments (%d anchors)",
             job_id, person_id, len(lane_array), len(all_segment_ranges), anchor_count,

@@ -4687,12 +4687,6 @@ export default function VideoEditorPage() {
     }, 0)
   }, [currentTime, effectiveStreamUrl, excludedFromRedactionIds, liveRedactionEnabled, removeFaceTimelineLane, seekToTime, toggleDetectionSelectionById, videoId])
 
-  const toggleLiveDetectionSelection = useCallback((detection: LiveRedactionDetection) => {
-    const selectionId = getSelectionIdForLiveDetection(detection)
-    if (!selectionId) return
-    toggleDetectionSelectionById(selectionId, detection.kind === 'face' ? detection.personId : null)
-  }, [toggleDetectionSelectionById])
-
   const previewResolvedRegions = useMemo(() => {
     return trackingRegions.flatMap((region) => {
       const resolved = resolveDisplayedTrackingRegion(region.id, currentTime)
@@ -5158,38 +5152,11 @@ export default function VideoEditorPage() {
                           </div>
                         </div>
                       )}
-                      {!showLiveRedactionSeekLoader && !isPlaying && hasRunDetection && renderedLiveRedactionDetections.map((detection) => {
-                        const selectionId = hasRunDetection ? getSelectionIdForLiveDetection(detection) : null
-                        if (!selectionId) return null
-                        const renderBox = getLiveRedactionRenderBox(detection)
-                        const overlayStyle = {
-                          left: `${renderBox.x * 100}%`,
-                          top: `${renderBox.y * 100}%`,
-                          width: `${renderBox.width * 100}%`,
-                          height: `${renderBox.height * 100}%`,
-                          borderColor: detection.kind === 'face' ? 'rgba(255,255,255,0.98)' : 'rgba(0,220,130,0.98)',
-                          backgroundColor: detection.kind === 'face' ? 'rgba(255,255,255,0.06)' : 'rgba(0,220,130,0.10)',
-                          transition: 'left 120ms linear, top 120ms linear, width 120ms linear, height 120ms linear',
-                          willChange: 'left, top, width, height',
-                        } satisfies React.CSSProperties
-
-                        return (
-                          <button
-                            key={`live-hit-${selectionId}`}
-                            type="button"
-                            className="absolute z-20 pointer-events-auto cursor-pointer rounded-sm border-0 bg-transparent p-0 outline-none focus:outline-none focus:ring-0"
-                            style={{ ...overlayStyle, borderWidth: 0, boxShadow: 'none', backgroundColor: 'transparent', borderColor: 'transparent' }}
-                            onClick={(event) => {
-                              event.stopPropagation()
-                              toggleLiveDetectionSelection(detection)
-                            }}
-                            onMouseDown={(event) => event.preventDefault()}
-                            tabIndex={-1}
-                            aria-label={`Toggle blur for ${detection.label}`}
-                            title={`Toggle blur for ${detection.label}`}
-                          />
-                        )
-                      })}
+                      {/*
+                        Active blur regions are intentionally non-interactive on the video surface so
+                        clicking the blur (accidentally or on purpose) cannot remove or alter it. To
+                        toggle a redaction, use the detections list in the right sidebar.
+                      */}
                     </div>
                     <div className="absolute top-3 right-3 rounded-lg bg-brand-charcoal/90 px-2.5 py-1.5 text-[11px] text-white shadow-lg border border-white/10 backdrop-blur-sm">
                       {showLiveRedactionSeekLoader
