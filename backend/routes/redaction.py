@@ -1,11 +1,15 @@
+import base64
 import json
 import logging
 import threading
 import uuid
 
+import cv2
+import numpy as np
+
 from flask import Blueprint, request, jsonify
 
-from services.detection import ObjectDetectionUnavailable
+from services.detection import ObjectDetectionUnavailable, detect_uploaded_reference_faces
 from services.face_identity import ensure_face_identity
 from services.pipeline import run_redaction, preview_redaction_tracks, get_job, get_enriched_faces
 from utils.video import EXPORT_HEIGHTS, normalize_export_height
@@ -106,6 +110,142 @@ def custom_region_is_face(region):
     return any(token in reason for token in ("face", "person", "head"))
 
 
+def _decode_face_image_base64(image_b64):
+    """Decode a base64-encoded face image to a BGR numpy array.
+
+    Accepts either the raw base64 payload or a full data URL ("data:...;base64,...").
+    Returns ``None`` if the data cannot be decoded into an image.
+    """
+    if not image_b64 or not isinstance(image_b64, str):
+        return None
+    payload = image_b64.strip()
+    if "," in payload and payload.startswith("data:"):
+        payload = payload.split(",", 1)[1]
+    try:
+        raw = base64.b64decode(payload, validate=False)
+    except (ValueError, TypeError):
+        return None
+    if not raw:
+        return None
+    try:
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    except Exception:
+        return None
+    if img is None or img.size == 0:
+        return None
+    return img
+
+
+def parse_face_images(data):
+    """Parse and validate the optional ``face_images`` field on a redact request.
+
+    Accepts a list of ``{person_id, label, image_base64}`` entries. Each entry's
+    base64 image is run through the InsightFace pipeline so we can attach a
+    real encoding for per-frame redaction at export time. Used for entities
+    that the user added via "Snap face from video" — those have no
+    pre-existing entry in the job's ``unique_faces`` list, so the only way
+    to redact them is to compute the encoding now from the image they
+    snapped.
+
+    Returns ``(face_targets, encoding_failures)`` where:
+      - ``face_targets`` is a list of dicts compatible with the existing
+        face target / encoding plumbing (each has ``encoding`` and a
+        synthetic ``person_id``).
+      - ``encoding_failures`` is a list of ``{person_id, label, reason}``
+        for images we could not decode or that contained no detectable
+        face — surfaced back to the client so the editor can show a
+        popup explaining what was skipped.
+    """
+    raw_value = data.get("face_images")
+    if raw_value is None:
+        raw_form = request.form.get("face_images", "")
+        if raw_form:
+            try:
+                raw_value = json.loads(raw_form)
+            except json.JSONDecodeError:
+                raw_value = None
+    if not isinstance(raw_value, list) or not raw_value:
+        return [], []
+
+    face_targets = []
+    failures = []
+    for index, entry in enumerate(raw_value):
+        if not isinstance(entry, dict):
+            continue
+        person_id = str(entry.get("person_id") or "").strip()
+        label = str(entry.get("label") or person_id or f"face_{index}").strip() or person_id
+        image_b64 = entry.get("image_base64") or entry.get("snap_base64") or ""
+        img = _decode_face_image_base64(image_b64)
+        if img is None:
+            failures.append({
+                "person_id": person_id,
+                "label": label,
+                "reason": "Could not decode face image",
+            })
+            continue
+        try:
+            detections = detect_uploaded_reference_faces(img, with_encodings=True)
+        except Exception as error:
+            logger.warning("InsightFace failed on snapped face %s: %s", person_id or label, error)
+            failures.append({
+                "person_id": person_id,
+                "label": label,
+                "reason": "Face detector failed on the snapped image",
+            })
+            continue
+        with_encoding = [
+            det for det in (detections or [])
+            if det.get("encoding") is not None
+        ]
+        if not with_encoding:
+            failures.append({
+                "person_id": person_id,
+                "label": label,
+                "reason": "No face encoding could be extracted from the snapped image",
+            })
+            continue
+        # Pick the highest-scoring face — typically the snapped image is a
+        # tight crop, so the largest/most-confident face is the right one.
+        with_encoding.sort(
+            key=lambda d: (
+                float(d.get("det_score") or d.get("confidence") or 0.0),
+                float(d.get("sharpness") or 0.0),
+            ),
+            reverse=True,
+        )
+        chosen = with_encoding[0]
+        encoding = chosen.get("encoding")
+        if encoding is None:
+            failures.append({
+                "person_id": person_id,
+                "label": label,
+                "reason": "Face encoding was empty",
+            })
+            continue
+        try:
+            encoding_list = np.asarray(encoding, dtype=np.float32).tolist()
+        except (TypeError, ValueError):
+            failures.append({
+                "person_id": person_id,
+                "label": label,
+                "reason": "Could not normalize face encoding",
+            })
+            continue
+        # Use the synthetic person_id from the editor so the snapped face
+        # is identifiable in logs/responses; if absent, generate one.
+        target_person_id = person_id or f"snap_{index}"
+        face_targets.append({
+            "person_id": target_person_id,
+            "name": label,
+            "description": label,
+            "encoding": encoding_list,
+            "is_snapped_entity": True,
+        })
+
+    return face_targets, failures
+
+
 def build_redaction_request(data):
     job_id = data.get("job_id") or request.form.get("job_id")
     if not job_id:
@@ -124,12 +264,25 @@ def build_redaction_request(data):
     person_ids = parse_list_field(data, "person_ids", split_csv=True) or []
     person_ids = [str(item).strip() for item in person_ids if str(item).strip()]
 
+    person_label_map_raw = data.get("person_labels")
+    if person_label_map_raw is None:
+        raw_label_form = request.form.get("person_labels", "")
+        if raw_label_form:
+            try:
+                person_label_map_raw = json.loads(raw_label_form)
+            except json.JSONDecodeError:
+                person_label_map_raw = None
+    person_label_map = {}
+    if isinstance(person_label_map_raw, dict):
+        for pid, label in person_label_map_raw.items():
+            person_label_map[str(pid).strip()] = str(label).strip()
+
     face_encodings = parse_list_field(data, "face_encodings") or []
     face_targets = []
+    matched_ids = []
     if person_ids:
         enriched = get_enriched_faces(job_id) or {}
         unique_faces = job.get("unique_faces") or enriched.get("unique_faces", [])
-        matched_ids = []
         for index, face in enumerate(unique_faces):
             stable_person_id = ensure_face_identity(face, fallback_index=index)
             if stable_person_id not in person_ids:
@@ -145,13 +298,34 @@ def build_redaction_request(data):
             len(face_targets),
             matched_ids,
         )
-        missing_person_ids = sorted(set(person_ids) - set(matched_ids))
-        if missing_person_ids:
-            raise RedactionRequestError(
-                "Some selected faces could not be resolved for redaction.",
-                400,
-                {"missing_person_ids": missing_person_ids},
-            )
+
+    # Snapped-face entities arrive via ``face_images`` (rather than via
+    # the job's ``unique_faces``). Run them through InsightFace now so
+    # their encodings join the per-frame relock pipeline like any other
+    # selected face. Anything that produces no encoding becomes a
+    # ``face_blur_failure`` we report back to the client.
+    snapped_face_targets, snapped_face_failures = parse_face_images(data)
+    for snap_face in snapped_face_targets:
+        snap_person_id = str(snap_face.get("person_id") or "").strip()
+        face_targets.append(snap_face)
+        face_encodings.append(snap_face["encoding"])
+        if snap_person_id and snap_person_id not in matched_ids:
+            matched_ids.append(snap_person_id)
+
+    # Person IDs that the editor sent but for which we found neither a
+    # matching ``unique_faces`` entry nor a snapped image with a usable
+    # encoding. These are surfaced back to the client so the editor can
+    # tell the user which faces could not be redacted, instead of the
+    # whole export silently failing with a 400.
+    unresolved_person_ids = []
+    for pid in person_ids:
+        if pid in matched_ids:
+            continue
+        unresolved_person_ids.append({
+            "person_id": pid,
+            "label": person_label_map.get(pid) or pid,
+            "reason": "No matching face encoding was available",
+        })
 
     object_classes = parse_list_field(data, "object_classes", split_csv=True) or []
     object_classes = [str(item).strip() for item in object_classes if str(item).strip()]
@@ -194,6 +368,19 @@ def build_redaction_request(data):
 
     total_targets = max(len(face_targets), len(face_encodings)) + len(object_classes) + len(custom_regions)
     if total_targets == 0 and not entity_ids:
+        # Differentiate the "you selected nothing" case from the "you
+        # selected only snapped faces but none of them had a usable
+        # encoding" case so the editor can show a helpful popup instead
+        # of a generic failure.
+        if unresolved_person_ids or snapped_face_failures:
+            raise RedactionRequestError(
+                "None of the selected faces could be redacted: their face encodings could not be resolved.",
+                400,
+                {
+                    "unresolved_person_ids": unresolved_person_ids,
+                    "face_blur_failures": snapped_face_failures,
+                },
+            )
         raise RedactionRequestError(
             "No targets selected. Provide person_ids, face_encodings, object_classes, entity_ids, or custom_regions (drawn regions with motion tracking).",
             400,
@@ -213,6 +400,9 @@ def build_redaction_request(data):
         "detect_every_seconds": detect_every_seconds,
         "use_temporal_optimization": use_temporal_optimization,
         "output_height": output_height,
+        "person_label_map": person_label_map,
+        "unresolved_person_ids": unresolved_person_ids,
+        "face_blur_failures": snapped_face_failures,
     }
 
 
@@ -235,6 +425,9 @@ def serialize_redaction_response(prepared, result):
         "entity_ids_used": result.get("entity_ids_used", []),
         "temporal_ranges_from_entity_search": result.get("temporal_ranges_from_entity_search", 0),
         "person_ids_used": prepared.get("person_ids", []),
+        "unresolved_person_ids": prepared.get("unresolved_person_ids", []),
+        "face_blur_failures": prepared.get("face_blur_failures", []),
+        "face_lock_failures": result.get("face_lock_failures", []),
     }
 
 

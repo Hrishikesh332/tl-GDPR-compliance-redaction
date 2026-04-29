@@ -1209,12 +1209,32 @@ def run_redaction(
     # inside redact_video so the lane never has to compete with a
     # potentially-drifting per-frame relock.
     face_lock_tracks = {}
+    face_lock_failures = []
     if face_targets:
         from services.face_lock_track import build_face_lock_lane
 
         for face in face_targets:
             person_id = get_face_identity(face)
             if not person_id:
+                continue
+            label = (
+                face.get("name")
+                or face.get("description")
+                or person_id
+            )
+            # Snapped-on-the-fly faces have no InsightFace appearances
+            # or TwelveLabs anchors, so a face-lock lane cannot be built
+            # for them — they get redacted via the per-frame relock
+            # path using the encoding we just computed instead. Record
+            # this so the editor can show "<label>: redacted via
+            # per-frame match (no face-lock lane available)" if needed.
+            if face.get("is_snapped_entity"):
+                face_lock_failures.append({
+                    "person_id": person_id,
+                    "label": label,
+                    "reason": "Snapped face has no anchor history; falling back to per-frame match",
+                    "fallback": "per_frame",
+                })
                 continue
             try:
                 lane_doc = build_face_lock_lane(job_id, person_id)
@@ -1224,11 +1244,24 @@ def run_redaction(
                         "Face-lock lane ready for person %s: %d frames",
                         person_id, len(lane_doc.get("lane") or []),
                     )
+                else:
+                    face_lock_failures.append({
+                        "person_id": person_id,
+                        "label": label,
+                        "reason": "Face-lock build returned empty lane",
+                        "fallback": "per_frame",
+                    })
             except Exception as exc:
                 logger.warning(
                     "Could not build face-lock lane for %s; falling back to per-frame relock: %s",
                     person_id, exc,
                 )
+                face_lock_failures.append({
+                    "person_id": person_id,
+                    "label": label,
+                    "reason": str(exc) or "Face-lock build failed",
+                    "fallback": "per_frame",
+                })
 
     result = redact_video(
         input_path=video_path,
@@ -1254,6 +1287,7 @@ def run_redaction(
     result["export_quality"] = f"{normalized_output_height}p"
     result["entity_ids_used"] = entity_ids or []
     result["temporal_ranges_from_entity_search"] = len(temporal_ranges)
+    result["face_lock_failures"] = face_lock_failures
     return result
 
 

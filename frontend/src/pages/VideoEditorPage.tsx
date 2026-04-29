@@ -6,6 +6,7 @@ import { useVideoCache } from '../contexts/VideoCache'
 import { API_BASE } from '../lib/api'
 import { storeLastEditorVideoId, DEMO_EDITOR_VIDEO_ID } from '../lib/editorRouting'
 import { EDITOR_LAST_SEARCH_SESSION_KEY } from '../lib/searchSession'
+import SnapFaceFromVideoModal, { type SnapFaceResult } from '../components/SnapFaceFromVideoModal'
 import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
@@ -1454,6 +1455,14 @@ function IconForward5({ className = 'w-4 h-4' }: { className?: string }) {
     </svg>
   )
 }
+function IconCameraSnap({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+      <circle cx="12" cy="13" r="4" />
+    </svg>
+  )
+}
 function IconVolumeUp({ className = 'w-4 h-4' }: { className?: string }) {
   return (<svg className={className} viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z" /></svg>)
 }
@@ -2040,6 +2049,21 @@ export default function VideoEditorPage() {
   const [trackingPreviewError, setTrackingPreviewError] = useState<string | null>(null)
   const [isScrubbing, setIsScrubbing] = useState(false)
   const [hoverTime, setHoverTime] = useState<number | null>(null)
+  const [snapFaceModalOpen, setSnapFaceModalOpen] = useState(false)
+  const [snapFaceFrameDataUrl, setSnapFaceFrameDataUrl] = useState<string | null>(null)
+  const [snapFaceCapturedAtSec, setSnapFaceCapturedAtSec] = useState(0)
+  const [snapFaceError, setSnapFaceError] = useState<string | null>(null)
+  const [snapFaceCapturing, setSnapFaceCapturing] = useState(false)
+  const snapFaceCounterRef = useRef(0)
+  type RedactionWarningEntry = { person_id?: string; label?: string; reason?: string; fallback?: string }
+  type RedactionWarnings = {
+    unresolved: RedactionWarningEntry[]
+    blurFailures: RedactionWarningEntry[]
+    faceLockFailures: RedactionWarningEntry[]
+  }
+  const [redactionWarnings, setRedactionWarnings] = useState<RedactionWarnings | null>(null)
+  const [faceLockBuildAlert, setFaceLockBuildAlert] = useState<{ personId: string; label: string; reason?: string } | null>(null)
+  const announcedFaceLockFailuresRef = useRef<Record<string, true>>({})
   const [trackMuted, setTrackMuted] = useState<{ video: boolean; audio: boolean }>({ video: false, audio: false })
   const [trackLocked, setTrackLocked] = useState<{ video: boolean; audio: boolean }>({ video: false, audio: false })
   const [overviewTagsExpanded, setOverviewTagsExpanded] = useState(true)
@@ -2654,6 +2678,88 @@ export default function VideoEditorPage() {
     }
   }, [])
 
+  const handleSnapFaceFromVideo = useCallback(async () => {
+    const v = videoRef.current
+    if (!v) {
+      setSnapFaceError('Video is not ready yet.')
+      return
+    }
+    if (!v.paused) {
+      try { v.pause() } catch { /* ignore */ }
+    }
+
+    setSnapFaceError(null)
+    setSnapFaceCapturing(true)
+    try {
+      const naturalWidth = v.videoWidth
+      const naturalHeight = v.videoHeight
+      if (!naturalWidth || !naturalHeight) {
+        setSnapFaceError('Video frame is not ready yet. Try again in a moment.')
+        return
+      }
+      // Downscale the captured frame so the upload stays well under any
+      // reverse-proxy or backend request-size limits. 1280px on the long
+      // side is plenty for face detection (the detector itself runs at
+      // 640px) and keeps the JPEG payload at a few hundred KB even for
+      // 4K source video, which avoids spurious HTTP 413 errors.
+      const MAX_CAPTURE_DIM = 1280
+      const longSide = Math.max(naturalWidth, naturalHeight)
+      const captureScale = longSide > MAX_CAPTURE_DIM ? MAX_CAPTURE_DIM / longSide : 1
+      const captureWidth = Math.max(1, Math.round(naturalWidth * captureScale))
+      const captureHeight = Math.max(1, Math.round(naturalHeight * captureScale))
+      const canvas = document.createElement('canvas')
+      canvas.width = captureWidth
+      canvas.height = captureHeight
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        setSnapFaceError('Could not capture the current video frame.')
+        return
+      }
+      ctx.drawImage(v, 0, 0, captureWidth, captureHeight)
+      let dataUrl: string
+      try {
+        dataUrl = canvas.toDataURL('image/jpeg', 0.9)
+      } catch {
+        setSnapFaceError('The video source blocked frame capture (CORS). Cannot snap from this video.')
+        return
+      }
+      const capturedTime = Number.isFinite(v.currentTime) ? v.currentTime : 0
+      setSnapFaceFrameDataUrl(dataUrl)
+      setSnapFaceCapturedAtSec(capturedTime)
+      setSnapFaceModalOpen(true)
+    } finally {
+      setSnapFaceCapturing(false)
+    }
+  }, [])
+
+  const handleSnapFaceAdded = useCallback((result: SnapFaceResult) => {
+    snapFaceCounterRef.current += 1
+    const personId = `snap_${result.entityId.slice(-8)}_${snapFaceCounterRef.current}`
+    const itemId = `face-${personId}`
+    const newItem: DetectionItem = {
+      id: itemId,
+      kind: 'face',
+      label: result.name.slice(0, 60),
+      tags: normalizeDetectionTags([], { shouldAnonymize: true, isOfficial: false }),
+      color: '#F59E0B',
+      snapBase64: result.faceBase64,
+      personId,
+      timeRanges: [],
+      appearances: [],
+      entityId: result.entityId,
+      appearanceCount: 0,
+      shouldAnonymize: true,
+      isOfficial: false,
+    }
+    setApiDetections((previous) => sortDetectionItems([...previous, newItem]))
+    setExcludedFromRedactionIds((previous) => previous.filter((id) => id !== itemId))
+    setHasRunDetection(true)
+    setShowAnonymizeOnly(true)
+    setRightSidebarOpen(true)
+    setSnapFaceModalOpen(false)
+    setSnapFaceFrameDataUrl(null)
+  }, [])
+
   useEffect(() => {
     const onFullscreenChange = () => setIsFullscreen(!!document.fullscreenElement)
     document.addEventListener('fullscreenchange', onFullscreenChange)
@@ -2958,6 +3064,26 @@ export default function VideoEditorPage() {
     }
     return map
   }, [apiDetections])
+
+  // Surface the first face-lock build failure as a one-shot toast so
+  // the user knows the live preview / export will fall back to
+  // per-frame relock for that face. We deduplicate per personId so a
+  // single failure doesn't keep re-announcing as React re-renders.
+  useEffect(() => {
+    for (const [personId, state] of Object.entries(faceLockBuildByPersonId)) {
+      if (!state || state.status !== 'failed') continue
+      if (announcedFaceLockFailuresRef.current[personId]) continue
+      announcedFaceLockFailuresRef.current[personId] = true
+      const item = faceDetectionItemsByPersonId[personId]
+      const label = item?.label || faceLockLabelByPersonIdRef.current[personId] || personId
+      setFaceLockBuildAlert({
+        personId,
+        label,
+        reason: state.message || undefined,
+      })
+      break
+    }
+  }, [faceDetectionItemsByPersonId, faceLockBuildByPersonId])
 
   // Locked persons are those whose precomputed face-lock lane is fully
   // loaded. The blur for these persons is drawn from the lane (which was
@@ -3532,10 +3658,11 @@ export default function VideoEditorPage() {
   const exportRedacted = useCallback(async () => {
     setExportRedactError(null)
     setExportRedactLoading(true)
+    setRedactionWarnings(null)
     setExportRedactProgress({ percent: 0, message: 'Starting...' })
     try {
       const jobId = await resolveRedactionJobId()
-      const body: any = {
+      const body: Record<string, unknown> = {
         job_id: jobId,
         detect_every_n: 1,
         use_temporal_optimization: false,
@@ -3548,9 +3675,45 @@ export default function VideoEditorPage() {
       if (customRegions.length > 0) {
         body.custom_regions = customRegions
       }
+
+      // Snap-face entities have a synthetic personId (e.g. "snap_xxx_1")
+      // and live only on the client; send their cropped face image so
+      // the backend can compute an InsightFace encoding for per-frame
+      // matching, instead of failing the export with "person_id not
+      // found in unique_faces".
+      const snapFaceImages: Array<{ person_id: string; label: string; image_base64: string }> = []
+      const detectedFacePersonIds: string[] = []
+      const personLabelMap: Record<string, string> = {}
       if (hasRunDetection) {
-        if (selectedFacePersonIds.length > 0) {
-          body.person_ids = selectedFacePersonIds
+        for (const item of apiDetections) {
+          if (item.kind !== 'face' || !item.personId) continue
+          if (excludedFromRedactionIds.includes(item.id)) continue
+          personLabelMap[item.personId] = item.label
+          if (item.personId.startsWith('snap_')) {
+            if (item.snapBase64) {
+              snapFaceImages.push({
+                person_id: item.personId,
+                label: item.label,
+                image_base64: item.snapBase64,
+              })
+            } else {
+              // No image cached for this snap entity — keep the
+              // person_id so backend reports it as unresolved and the
+              // user gets a warning popup.
+              detectedFacePersonIds.push(item.personId)
+            }
+          } else {
+            detectedFacePersonIds.push(item.personId)
+          }
+        }
+        if (detectedFacePersonIds.length > 0) {
+          body.person_ids = detectedFacePersonIds
+        }
+        if (snapFaceImages.length > 0) {
+          body.face_images = snapFaceImages
+        }
+        if (Object.keys(personLabelMap).length > 0) {
+          body.person_labels = personLabelMap
         }
         if (selectedObjectClasses.length > 0) {
           body.object_classes = selectedObjectClasses
@@ -3566,8 +3729,19 @@ export default function VideoEditorPage() {
         body: JSON.stringify(body),
       })
       if (!startRes.ok) {
-        const err = await startRes.json().catch(() => ({}))
-        throw new Error((err as { error?: string }).error || startRes.statusText)
+        const err = await startRes.json().catch(() => ({})) as {
+          error?: string
+          unresolved_person_ids?: RedactionWarningEntry[]
+          face_blur_failures?: RedactionWarningEntry[]
+        }
+        if (Array.isArray(err.unresolved_person_ids) && err.unresolved_person_ids.length > 0) {
+          setRedactionWarnings({
+            unresolved: err.unresolved_person_ids,
+            blurFailures: err.face_blur_failures || [],
+            faceLockFailures: [],
+          })
+        }
+        throw new Error(err.error || startRes.statusText)
       }
       const startData = (await startRes.json()) as { redaction_job_id: string }
       const redactionJobId = startData.redaction_job_id
@@ -3579,22 +3753,40 @@ export default function VideoEditorPage() {
         if (!pollRes.ok) throw new Error('Failed to check render status')
         const poll = (await pollRes.json()) as {
           status: string; percent?: number; message?: string; error?: string
-          result?: { download_url?: string; output_path?: string; download_filename?: string; download_ready?: boolean }
+          result?: {
+            download_url?: string
+            output_path?: string
+            download_filename?: string
+            download_ready?: boolean
+            unresolved_person_ids?: RedactionWarningEntry[]
+            face_blur_failures?: RedactionWarningEntry[]
+            face_lock_failures?: RedactionWarningEntry[]
+          }
         }
         setExportRedactProgress({ percent: poll.percent ?? 0, message: poll.message ?? 'Rendering...' })
 
         if (poll.status === 'completed') {
           resolved = true
           const result = poll.result
-          let resolvedFilename = 'redacted-video.mp4'
           if (!result?.download_url || result.download_ready === false) {
             throw new Error('Redaction completed but the MP4 is not ready for download')
           }
           const resolvedDownloadUrl = result.download_url.startsWith('http') ? result.download_url : `${API_BASE}${result.download_url}`
-          resolvedFilename = ensureMp4Filename(
+          const resolvedFilename = ensureMp4Filename(
             result?.download_filename || (result?.output_path ? result.output_path.split('/').pop() : null),
           )
           setExportRedactProgress({ percent: 100, message: 'Done!' })
+
+          const unresolved = Array.isArray(result.unresolved_person_ids) ? result.unresolved_person_ids : []
+          const blurFailures = Array.isArray(result.face_blur_failures) ? result.face_blur_failures : []
+          const lockFailures = Array.isArray(result.face_lock_failures) ? result.face_lock_failures : []
+          if (unresolved.length > 0 || blurFailures.length > 0 || lockFailures.length > 0) {
+            setRedactionWarnings({
+              unresolved,
+              blurFailures,
+              faceLockFailures: lockFailures,
+            })
+          }
           if (resolvedDownloadUrl) {
             await triggerFileDownload(resolvedDownloadUrl, resolvedFilename)
             setExportMenuOpen(false)
@@ -3609,7 +3801,7 @@ export default function VideoEditorPage() {
       setExportRedactLoading(false)
       setTimeout(() => setExportRedactProgress(null), 3000)
     }
-  }, [blurIntensity, buildCustomRegionPayload, exportQuality, hasRunDetection, redactionStyle, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses, trackingRegions])
+  }, [apiDetections, blurIntensity, buildCustomRegionPayload, excludedFromRedactionIds, exportQuality, hasRunDetection, redactionStyle, resolveRedactionJobId, selectedObjectClasses, trackingRegions])
 
   useEffect(() => {
     if (!liveRedactionPreviewActive || !effectiveStreamUrl) {
@@ -5288,11 +5480,33 @@ export default function VideoEditorPage() {
               </button>
             </div>
 
+            <button
+              type="button"
+              onClick={handleSnapFaceFromVideo}
+              disabled={!effectiveStreamUrl || snapFaceCapturing}
+              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md border border-accent/30 bg-accent/10 text-accent text-xs font-medium hover:bg-accent/15 hover:border-accent/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              aria-label="Snap face from video and add to anonymize list"
+              title="Pause and snap a face from this frame to anonymize"
+            >
+              {snapFaceCapturing ? (
+                <span className="w-3.5 h-3.5 border-2 border-accent/30 border-t-accent rounded-full animate-spin" aria-hidden />
+              ) : (
+                <IconCameraSnap className="w-4 h-4" />
+              )}
+              <span>Snap face</span>
+            </button>
+
             <div className="flex items-center gap-2 text-xs">
               <span className="font-mono text-text-secondary tabular-nums">{fmtTime(currentTime)}</span>
               <span className="text-text-tertiary">/</span>
               <span className="font-mono text-text-secondary tabular-nums">{fmtTime(duration)}</span>
             </div>
+
+            {snapFaceError && (
+              <p className="text-[11px] text-red-400 max-w-[16rem] truncate" title={snapFaceError}>
+                {snapFaceError}
+              </p>
+            )}
 
             <div className="flex items-center gap-2">
               <label className="text-xs text-text-tertiary whitespace-nowrap">Speed</label>
@@ -6376,6 +6590,192 @@ export default function VideoEditorPage() {
             </div>
           )}
         </aside>
+      </div>
+      <SnapFaceFromVideoModal
+        open={snapFaceModalOpen}
+        onClose={() => {
+          setSnapFaceModalOpen(false)
+          setSnapFaceFrameDataUrl(null)
+        }}
+        frameDataUrl={snapFaceFrameDataUrl}
+        capturedAtSec={snapFaceCapturedAtSec}
+        onFaceAdded={handleSnapFaceAdded}
+      />
+
+      {redactionWarnings && (
+        <RedactionWarningsModal
+          warnings={redactionWarnings}
+          onClose={() => setRedactionWarnings(null)}
+        />
+      )}
+
+      {faceLockBuildAlert && (
+        <FaceLockFailureToast
+          label={faceLockBuildAlert.label}
+          reason={faceLockBuildAlert.reason}
+          onDismiss={() => setFaceLockBuildAlert(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+interface RedactionWarningsModalProps {
+  warnings: {
+    unresolved: { person_id?: string; label?: string; reason?: string; fallback?: string }[]
+    blurFailures: { person_id?: string; label?: string; reason?: string; fallback?: string }[]
+    faceLockFailures: { person_id?: string; label?: string; reason?: string; fallback?: string }[]
+  }
+  onClose: () => void
+}
+
+function RedactionWarningsModal({ warnings, onClose }: RedactionWarningsModalProps) {
+  type WarningSection = {
+    title: string
+    description: string
+    entries: typeof warnings.unresolved
+    tone: 'amber' | 'red'
+  }
+  const sections: WarningSection[] = ([
+    {
+      title: 'Faces that could not be redacted',
+      description:
+        'These faces appeared in the detection list but the server could not resolve a face encoding for them. They are NOT blurred in the downloaded video.',
+      entries: [...warnings.unresolved, ...warnings.blurFailures],
+      tone: 'red' as const,
+    },
+    {
+      title: 'Face-lock fell back to per-frame match',
+      description:
+        'For these faces, the face-lock track could not be built so the redactor used the per-frame InsightFace path instead. The blur is still applied, but it may shift slightly under fast motion or sudden cuts.',
+      entries: warnings.faceLockFailures,
+      tone: 'amber' as const,
+    },
+  ] as WarningSection[]).filter((section) => section.entries.length > 0)
+
+  return (
+    <div className="fixed inset-0 z-[210] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-brand-charcoal/45 backdrop-blur-sm" onClick={onClose} aria-hidden />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="redaction-warnings-title"
+        className="relative w-full max-w-md rounded-xl border border-gray-200 bg-surface shadow-xl"
+      >
+        <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-amber-500/15 text-amber-600">
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+                <line x1="12" y1="9" x2="12" y2="13" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+            </span>
+            <h2 id="redaction-warnings-title" className="text-lg font-semibold text-gray-900">
+              Redaction completed with warnings
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-2 rounded-lg text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+            aria-label="Close"
+          >
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+          {sections.length === 0 ? (
+            <p className="text-sm text-gray-600">No issues to report.</p>
+          ) : (
+            sections.map((section) => (
+              <div key={section.title} className={`rounded-xl border p-4 ${section.tone === 'red' ? 'border-red-200 bg-red-50' : 'border-amber-200 bg-amber-50'}`}>
+                <p className={`text-sm font-medium ${section.tone === 'red' ? 'text-red-800' : 'text-amber-800'}`}>{section.title}</p>
+                <p className={`mt-1 text-xs ${section.tone === 'red' ? 'text-red-700/85' : 'text-amber-700/85'}`}>{section.description}</p>
+                <ul className="mt-3 space-y-2">
+                  {section.entries.map((entry, idx) => {
+                    const display = entry.label || entry.person_id || `Face ${idx + 1}`
+                    return (
+                      <li
+                        key={`${entry.person_id || 'face'}-${idx}`}
+                        className={`flex items-start gap-2 rounded-md border bg-white/70 px-3 py-2 ${section.tone === 'red' ? 'border-red-200/70' : 'border-amber-200/70'}`}
+                      >
+                        <span className={`mt-0.5 inline-flex h-1.5 w-1.5 shrink-0 rounded-full ${section.tone === 'red' ? 'bg-red-500' : 'bg-amber-500'}`} aria-hidden />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium text-gray-900 truncate">{display}</p>
+                          {entry.reason && (
+                            <p className="mt-0.5 text-xs text-gray-600">{entry.reason}</p>
+                          )}
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="flex justify-end border-t border-gray-200 px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-8 px-3 rounded-[9.6px] text-sm font-medium bg-brand-charcoal text-brand-white hover:bg-gray-700 transition-colors"
+          >
+            Got it
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface FaceLockFailureToastProps {
+  label: string
+  reason?: string
+  onDismiss: () => void
+}
+
+function FaceLockFailureToast({ label, reason, onDismiss }: FaceLockFailureToastProps) {
+  useEffect(() => {
+    const t = window.setTimeout(onDismiss, 8000)
+    return () => window.clearTimeout(t)
+  }, [onDismiss])
+
+  return (
+    <div className="fixed bottom-6 right-6 z-[180] w-[320px] rounded-xl border border-amber-300/60 bg-amber-50 shadow-xl">
+      <div className="flex items-start gap-3 p-4">
+        <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-amber-500/20 text-amber-700 shrink-0">
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-amber-900">Face-lock could not be built</p>
+          <p className="mt-0.5 text-xs text-amber-800 truncate" title={label}>
+            {label}
+          </p>
+          <p className="mt-1 text-[11px] leading-snug text-amber-800/85">
+            {reason || 'The redactor will fall back to per-frame face matching for this person.'}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="-mr-1 -mt-1 rounded p-1 text-amber-700 hover:text-amber-900 hover:bg-amber-100/60 transition-colors shrink-0"
+          aria-label="Dismiss"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
       </div>
     </div>
   )

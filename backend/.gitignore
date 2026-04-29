@@ -55,3 +55,4 @@ Thumbs.db
 
 # Docs
 *.md
+!README.md
