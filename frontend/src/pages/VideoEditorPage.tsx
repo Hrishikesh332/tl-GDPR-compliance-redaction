@@ -7357,6 +7357,17 @@ export default function VideoEditorPage() {
 
                   <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                     <div className="shrink-0 border-b border-border p-3 space-y-3 bg-surface/40">
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => runPegasusAssist(false)}
+                          disabled={!videoId || pegasusLoading}
+                          className="h-9 flex-1 rounded-md border border-accent bg-accent px-3 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {pegasusLoading ? 'Analyzing...' : pegasusResult ? 'Re-run Meta Insights' : 'Run Meta Insights'}
+                        </button>
+                      </div>
+
                       {pegasusError && (
                         <p className="rounded-md border border-red-400/25 bg-red-400/10 px-2.5 py-2 text-xs leading-relaxed text-red-300">
                           {pegasusError}
