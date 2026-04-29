@@ -128,6 +128,7 @@ The frontend runs at `http://localhost:5173`.
 This app combines multimodal video understanding with local redaction logic:
 
 - **TwelveLabs indexing and search** — Semantic video search, video-level metadata, person/object summaries, and scene context.
+- **Meta Insights** — Meta Insights uses TwelveLabs Pegasus 1.5 for structured video understanding. It highlights the verdict subject, protected people, and sensitive details on the timeline before export.
 - **Entity workflows** — Upload face assets, build reusable person entities, and retrieve time ranges for targeted redaction.
 - **Local detection and tracking** — OpenCV face detection, InsightFace embeddings, YOLO object detection, and tracker-assisted motion handling.
 - **Video export pipeline** — Render blurred or blacked-out regions and optionally re-encode output with FFmpeg.

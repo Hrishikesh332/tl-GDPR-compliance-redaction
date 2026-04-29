@@ -1,23 +1,3 @@
-"""Face-lock track builder.
-
-Builds a contiguous, per-frame bounding-box lane for a single selected
-person by fusing visual trackers (CSRT forward + backward, Lucas-Kanade
-optical flow with forward-back validation, global frame motion) with the
-InsightFace ``appearances`` saved in ``detection_metadata.json`` (used
-only as anchors and a sparse sanity-check signal) and any TwelveLabs
-entity time-ranges available for the person.
-
-The visual tracker output is the source of truth for where the blur is
-drawn at every frame. InsightFace is reduced to a guidance / anchor /
-verification role and never directly decides the lane bbox at playback
-or export time.
-
-The resulting lane is persisted at
-``backend/snaps/<job_id>/face_lock_tracks/<person_id>.json`` and re-used
-for both the live overlay and the exported MP4 so the blur stays
-identically locked across both surfaces.
-"""
-
 import json
 import logging
 import math
