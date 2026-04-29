@@ -57,6 +57,11 @@ LIVE_TRACK_FACE_RELOCK_MAX_CENTER_SHIFT = 0.9
 LIVE_TRACK_FACE_IDENTIFIED_RELOCK_MAX_CENTER_SHIFT = 0.72
 
 
+def _is_twelvelabs_timeout(exc):
+    text = str(exc).lower()
+    return "read timed out" in text or "read timeout" in text or "timed out" in text or "timeout" in text
+
+
 def normalize_bbox(bbox, frame_w, frame_h):
     if not bbox or frame_w <= 0 or frame_h <= 0:
         return None
@@ -835,8 +840,20 @@ def analyze_custom():
     if not video_id or not prompt:
         return jsonify({"error": "video_id and prompt are required"}), 400
 
-    result = twelvelabs_service.analyze_video_custom(video_id, prompt)
-    return jsonify(result)
+    try:
+        result = twelvelabs_service.analyze_video_custom(video_id, prompt)
+        return jsonify(result)
+    except Exception as exc:
+        if _is_twelvelabs_timeout(exc):
+            logger.warning("TwelveLabs analyze request timed out for video %s: %s", video_id, exc)
+            return jsonify({
+                "error": (
+                    "TwelveLabs analysis timed out while generating the response. "
+                    "Try a narrower question, or run it again in a moment."
+                )
+            }), 504
+        logger.exception("TwelveLabs analyze request failed for video %s", video_id)
+        return jsonify({"error": str(exc)}), 502
 
 
 @analysis_bp.route("/live-redaction/detect", methods=["POST"])

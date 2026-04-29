@@ -10,6 +10,7 @@ import SnapFaceFromVideoModal, { type SnapFaceResult } from '../components/SnapF
 import visionIconUrl from '../../strand/icons/vision.svg?url'
 import searchV2IconUrl from '../../strand/icons/search-v2.svg?url'
 import analyzeIconUrl from '../../strand/icons/analyze.svg?url'
+import metaInsightsIconUrl from '../../strand/icons/embed.svg?url'
 
 const ANALYZE_SUGGESTIONS: string[] = [
   'Courtroom summary with key timestamps',
@@ -333,7 +334,7 @@ async function sampleWaveformFromMediaElement(
 /*  Toolbar config                                                     */
 /* ------------------------------------------------------------------ */
 
-type ToolId = 'tracker' | 'search' | 'captions'
+type ToolId = 'tracker' | 'search' | 'captions' | 'pegasus'
 
 type SearchClip = {
   start: number
@@ -364,6 +365,112 @@ type SearchSessionResult = {
   queryText?: string
   entities?: SearchSessionEntity[]
   results: SearchVideoResult[]
+}
+
+type PegasusJobStatus = 'idle' | 'queued' | 'processing' | 'ready' | 'failed'
+type PegasusSeverity = 'low' | 'medium' | 'high'
+type PegasusTimelineCategory = 'person' | 'face' | 'screen' | 'document' | 'text' | 'license_plate' | 'logo' | 'object' | 'scene'
+type PegasusActionType = 'select_detected_entity' | 'select_object_class' | 'create_review_bookmark' | 'jump_to_time' | 'draw_custom_region_prompt'
+
+type PegasusMetadata = {
+  artifact_id?: string
+  job_id?: string
+  video_id?: string
+  local_job_id?: string | null
+  source_fingerprint?: string
+  model?: string
+  prompt_version?: string
+  schema_version?: string
+  duration_sec?: number
+  created_at?: string
+  updated_at?: string
+  status?: PegasusJobStatus | string
+  source_type?: string
+  usage?: Record<string, unknown>
+}
+
+type PegasusTimelineEvent = {
+  id: string
+  start_sec: number
+  end_sec: number
+  severity: PegasusSeverity
+  category: PegasusTimelineCategory
+  label: string
+  description?: string
+  reason?: string
+  redaction_target?: string | null
+  scene_role?: string | null
+  redaction_decision?: string | null
+  subject_selection?: string | null
+  inclusion_reason?: string | null
+  handling_note?: string | null
+  confidence?: number
+  review_required?: boolean
+  recommended_action_ids?: string[]
+}
+
+type PegasusRecommendedAction = {
+  id: string
+  type: PegasusActionType
+  label: string
+  reason?: string
+  confidence?: number
+  event_ids?: string[]
+  target?: {
+    object_class?: string | null
+    entity_id?: string | null
+    redaction_target?: string | null
+    scene_role?: string | null
+    redaction_decision?: string | null
+    subject_selection?: string | null
+    inclusion_reason?: string | null
+    start_sec?: number
+    end_sec?: number
+  }
+  apply_mode?: 'automatic_if_matched' | 'review_only'
+}
+
+type PegasusResult = {
+  metadata: PegasusMetadata
+  summary: {
+    overall_summary?: string
+    privacy_risk_level?: PegasusSeverity | string
+    review_priority?: PegasusSeverity | string
+  }
+  timeline_events: PegasusTimelineEvent[]
+  recommended_actions: PegasusRecommendedAction[]
+  raw_output?: string
+}
+
+type PegasusJobResponse = {
+  job_id?: string
+  status?: PegasusJobStatus | string
+  cached?: boolean
+  result?: PegasusResult
+  error?: string
+}
+
+type PegasusApplyPreviewItem = {
+  action_id?: string
+  type?: string
+  selection_id?: string
+  person_id?: string
+  object_class?: string
+  label?: string
+  event_ids?: string[]
+  reason?: string
+}
+
+type PegasusApplyPreview = {
+  can_apply: PegasusApplyPreviewItem[]
+  review_only: PegasusApplyPreviewItem[]
+  unsupported: PegasusApplyPreviewItem[]
+  summary?: {
+    selected_faces?: number
+    selected_object_classes?: number
+    review_bookmarks?: number
+  }
+  error?: string
 }
 
 function getSearchSessionId(session: SearchSessionResult, fallbackIndex = 0): string {
@@ -511,6 +618,7 @@ const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
   { id: 'tracker', label: 'Live Blur', iconUrl: visionIconUrl },
   { id: 'search', label: 'Search', iconUrl: searchV2IconUrl },
   { id: 'captions', label: 'Analyze/Transcript', iconUrl: analyzeIconUrl },
+  { id: 'pegasus', label: 'Meta Insights', iconUrl: metaInsightsIconUrl },
 ]
 
 type TutorialTargetId = 'player' | ToolId | 'timeline' | 'export'
@@ -530,7 +638,7 @@ const EDITOR_TUTORIAL_STEPS: Array<{
   },
   {
     title: 'Detect and blur targets',
-    body: 'In Live Blur, run Detect to load saved faces and objects. Use Blur or Unblur beside each item to decide what stays redacted.',
+    body: 'In Live Blur, run Detect to load saved faces and objects. This is where anonymize mode is managed: use Blur or Unblur beside each item to decide what stays redacted.',
     target: 'tracker',
     placement: 'right',
   },
@@ -544,6 +652,12 @@ const EDITOR_TUTORIAL_STEPS: Array<{
     title: 'Ask for context',
     body: 'Open Analyze/Transcript to ask questions, summarize the scene, or get topics and categories that help guide review.',
     target: 'captions',
+    placement: 'right',
+  },
+  {
+    title: 'Review privacy hotspots',
+    body: 'Open Meta Insights to run structured privacy analysis and preview privacy hotspots on the timeline before export.',
+    target: 'pegasus',
     placement: 'right',
   },
   {
@@ -612,6 +726,7 @@ const ENTITY_SEARCH_LANE_SEGMENT_RING = 'rgba(0, 220, 130, 0.28)'
 const ENTITY_SEARCH_LANE_EDGE_LEFT = 'rgba(0, 220, 130, 0.55)'
 const ENTITY_SEARCH_LANE_EDGE_RIGHT = 'rgba(0, 220, 130, 0.35)'
 const ENTITY_SEARCH_LANE_HEIGHT_PX = 60
+const PEGASUS_LANE_HEIGHT_PX = 68
 const VIDEO_TIMELINE_LANE_HEIGHT_PX = 76
 const FACE_LANE_DEBUG_CACHE_KEY = 'video_redaction_face_lane_debug_cache_v1'
 const FACE_LOCK_INTRO_SEEN_KEY = 'video_redaction_face_lock_intro_seen_v1'
@@ -937,6 +1052,58 @@ function clampUnit(value: number): number {
 function normalizeObjectClass(value?: string | null): string | null {
   const normalized = (value || '').trim().toLowerCase()
   return normalized || null
+}
+
+function formatPegasusLabel(value?: string | null): string {
+  const normalized = (value || '').replace(/_/g, ' ').trim()
+  return normalized ? normalized.replace(/\b\w/g, (char) => char.toUpperCase()) : 'Review'
+}
+
+function getPegasusSeverityStyle(severity?: string | null): {
+  color: string
+  soft: string
+  border: string
+  text: string
+} {
+  if (severity === 'high') {
+    return {
+      color: '#f87171',
+      soft: 'rgba(248, 113, 113, 0.09)',
+      border: 'rgba(248, 113, 113, 0.24)',
+      text: 'text-text-secondary',
+    }
+  }
+  if (severity === 'medium') {
+    return {
+      color: '#fbbf24',
+      soft: 'rgba(251, 191, 36, 0.08)',
+      border: 'rgba(251, 191, 36, 0.22)',
+      text: 'text-text-secondary',
+    }
+  }
+  return {
+    color: '#7dd3fc',
+    soft: 'rgba(125, 211, 252, 0.07)',
+    border: 'rgba(125, 211, 252, 0.2)',
+    text: 'text-text-secondary',
+  }
+}
+
+function formatPegasusDate(value?: string | null): string {
+  if (!value) return 'Not generated'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function formatPegasusConfidence(value?: number | null): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 'N/A'
+  return `${Math.round(clampUnit(value) * 100)}%`
 }
 
 function ensureMp4Filename(filename?: string | null): string {
@@ -1568,6 +1735,39 @@ function IconHelp({ className = 'w-4 h-4' }: { className?: string }) {
   )
 }
 
+function IconFilter({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 6h16M7 12h10M10 18h4" />
+    </svg>
+  )
+}
+
+function IconPegasusCategory({ category, className = 'w-3.5 h-3.5' }: { category: PegasusTimelineCategory; className?: string }) {
+  if (category === 'person' || category === 'face') {
+    return (
+      <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M20 21a8 8 0 0 0-16 0" />
+        <circle cx="12" cy="8" r="4" />
+      </svg>
+    )
+  }
+  if (category === 'screen' || category === 'document' || category === 'text' || category === 'license_plate') {
+    return (
+      <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="4" width="18" height="14" rx="2" />
+        <path d="M8 20h8" />
+      </svg>
+    )
+  }
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20.59 13.41 11 3.83A2 2 0 0 0 9.59 3H4a1 1 0 0 0-1 1v5.59a2 2 0 0 0 .59 1.41l9.58 9.59a2 2 0 0 0 2.83 0l4.59-4.59a2 2 0 0 0 0-2.83Z" />
+      <circle cx="7.5" cy="7.5" r="1.25" />
+    </svg>
+  )
+}
+
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
@@ -2107,6 +2307,7 @@ export default function VideoEditorPage() {
     tracker: null,
     search: null,
     captions: null,
+    pegasus: null,
   })
   const [faceLockListOpen, setFaceLockListOpen] = useState(false)
   const faceLockListRef = useRef<HTMLDivElement>(null)
@@ -2148,6 +2349,25 @@ export default function VideoEditorPage() {
   const [summaryLoading, setSummaryLoading] = useState(false)
   const [searchSessionResults, setSearchSessionResults] = useState<SearchSessionResult[]>([])
   const [activeSearchSessionId, setActiveSearchSessionId] = useState<string | null>(null)
+  const [pegasusJobId, setPegasusJobId] = useState<string | null>(null)
+  const [pegasusStatus, setPegasusStatus] = useState<PegasusJobStatus>('idle')
+  const [pegasusResult, setPegasusResult] = useState<PegasusResult | null>(null)
+  const [pegasusCached, setPegasusCached] = useState(false)
+  const [pegasusLoading, setPegasusLoading] = useState(false)
+  const [pegasusError, setPegasusError] = useState<string | null>(null)
+  const [pegasusApplyLoading, setPegasusApplyLoading] = useState(false)
+  const [pegasusApplyError, setPegasusApplyError] = useState<string | null>(null)
+  const [pegasusApplyPreview, setPegasusApplyPreview] = useState<PegasusApplyPreview | null>(null)
+  const [pegasusApplyModalOpen, setPegasusApplyModalOpen] = useState(false)
+  const [pegasusCategoryFilter, setPegasusCategoryFilter] = useState<'all' | PegasusTimelineCategory>('all')
+  const [pegasusSeverityFilter, setPegasusSeverityFilter] = useState<Record<PegasusSeverity, boolean>>({
+    high: true,
+    medium: true,
+    low: true,
+  })
+  const [pegasusFocusedEventId, setPegasusFocusedEventId] = useState<string | null>(null)
+  const [pegasusBookmarkedEventIds, setPegasusBookmarkedEventIds] = useState<string[]>([])
+  const pegasusRequestIdRef = useRef(0)
   const searchSessionResult = useMemo(() => {
     if (searchSessionResults.length === 0) return null
     return (
@@ -2267,6 +2487,19 @@ export default function VideoEditorPage() {
     setLiveRedactionSeekPending(false)
     setLiveRedactionError(null)
     setExportRedactError(null)
+    pegasusRequestIdRef.current += 1
+    setPegasusJobId(null)
+    setPegasusStatus('idle')
+    setPegasusResult(null)
+    setPegasusCached(false)
+    setPegasusLoading(false)
+    setPegasusError(null)
+    setPegasusApplyLoading(false)
+    setPegasusApplyError(null)
+    setPegasusApplyPreview(null)
+    setPegasusApplyModalOpen(false)
+    setPegasusFocusedEventId(null)
+    setPegasusBookmarkedEventIds([])
     liveRedactionPendingTimeRef.current = null
     liveRedactionRequestIdRef.current = 0
     liveRedactionLastResolvedTimeRef.current = null
@@ -3111,6 +3344,124 @@ export default function VideoEditorPage() {
     await hydrateStoredDetections({ ensure: true, interactive: true })
   }, [hydrateStoredDetections])
 
+  const loadPegasusJob = useCallback(async (
+    jobId: string,
+    requestId: number,
+    options: { poll?: boolean } = {},
+  ) => {
+    const shouldPoll = options.poll ?? true
+    let attempts = 0
+    while (attempts < 90) {
+      if (pegasusRequestIdRef.current !== requestId) return
+      const res = await fetch(`${API_BASE}/api/pegasus/privacy-assist/jobs/${encodeURIComponent(jobId)}`)
+      const json = await res.json().catch(() => ({})) as PegasusJobResponse
+      if (pegasusRequestIdRef.current !== requestId) return
+      if (!res.ok) {
+        throw new Error(json.error || `Pegasus request failed (${res.status})`)
+      }
+
+      const status = (json.status || 'processing') as PegasusJobStatus
+      setPegasusStatus(status)
+      setPegasusCached(Boolean(json.cached))
+      if (json.result) {
+        setPegasusResult(json.result)
+        setPegasusFocusedEventId(json.result.timeline_events?.[0]?.id || null)
+      }
+      if (status === 'ready' || status === 'failed' || !shouldPoll) {
+        if (status === 'failed') {
+          setPegasusError(json.error || 'Pegasus analysis failed.')
+        }
+        return
+      }
+      attempts += 1
+      await delay(2000)
+    }
+    throw new Error('Pegasus analysis is still processing. Try again in a moment.')
+  }, [])
+
+  const runPegasusAssist = useCallback(async (force = false) => {
+    if (!videoId) {
+      setPegasusError('Video not loaded.')
+      return
+    }
+    const requestId = pegasusRequestIdRef.current + 1
+    pegasusRequestIdRef.current = requestId
+    setPegasusError(null)
+    setPegasusLoading(true)
+    setPegasusStatus('queued')
+    try {
+      const res = await fetch(`${API_BASE}/api/pegasus/privacy-assist/jobs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          video_id: videoId,
+          local_job_id: detectionJobId || undefined,
+          force,
+        }),
+      })
+      const json = await res.json().catch(() => ({})) as PegasusJobResponse
+      if (pegasusRequestIdRef.current !== requestId) return
+      if (!res.ok) {
+        throw new Error(json.error || `Pegasus request failed (${res.status})`)
+      }
+      const jobId = json.job_id || json.result?.metadata?.artifact_id
+      if (!jobId) {
+        throw new Error('Pegasus did not return a job id.')
+      }
+      setPegasusJobId(jobId)
+      setPegasusCached(Boolean(json.cached))
+      setPegasusStatus((json.status || 'processing') as PegasusJobStatus)
+      if (json.result) {
+        setPegasusResult(json.result)
+        setPegasusFocusedEventId(json.result.timeline_events?.[0]?.id || null)
+      }
+      if ((json.status || '') !== 'ready') {
+        await loadPegasusJob(jobId, requestId, { poll: true })
+      }
+    } catch (e) {
+      if (pegasusRequestIdRef.current === requestId) {
+        setPegasusStatus('failed')
+        setPegasusError(e instanceof Error ? e.message : 'Pegasus analysis failed.')
+      }
+    } finally {
+      if (pegasusRequestIdRef.current === requestId) {
+        setPegasusLoading(false)
+      }
+    }
+  }, [detectionJobId, loadPegasusJob, videoId])
+
+  const openPegasusApplyPreview = useCallback(async () => {
+    const jobId = pegasusJobId || pegasusResult?.metadata?.job_id || pegasusResult?.metadata?.artifact_id
+    if (!jobId || pegasusStatus !== 'ready') {
+      setPegasusApplyError('Run Meta Insights before applying recommendations.')
+      return
+    }
+    setPegasusApplyLoading(true)
+    setPegasusApplyError(null)
+    try {
+      const res = await fetch(`${API_BASE}/api/pegasus/privacy-assist/jobs/${encodeURIComponent(jobId)}/apply-preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ local_job_id: detectionJobId || undefined }),
+      })
+      const json = await res.json().catch(() => ({})) as PegasusApplyPreview
+      if (!res.ok) {
+        throw new Error(json.error || `Pegasus apply preview failed (${res.status})`)
+      }
+      setPegasusApplyPreview({
+        can_apply: Array.isArray(json.can_apply) ? json.can_apply : [],
+        review_only: Array.isArray(json.review_only) ? json.review_only : [],
+        unsupported: Array.isArray(json.unsupported) ? json.unsupported : [],
+        summary: json.summary || {},
+      })
+      setPegasusApplyModalOpen(true)
+    } catch (e) {
+      setPegasusApplyError(e instanceof Error ? e.message : 'Pegasus apply preview failed.')
+    } finally {
+      setPegasusApplyLoading(false)
+    }
+  }, [detectionJobId, pegasusJobId, pegasusResult, pegasusStatus])
+
   const selectedFacePersonIds = useMemo(
     () =>
       apiDetections
@@ -3448,6 +3799,27 @@ export default function VideoEditorPage() {
       previous.includes(personId) ? previous : [...previous, personId]
     ))
   }, [])
+
+  const confirmPegasusApply = useCallback(() => {
+    if (!pegasusApplyPreview) return
+    const selectionIds = new Set(
+      pegasusApplyPreview.can_apply
+        .map((item) => item.selection_id)
+        .filter((id): id is string => Boolean(id))
+    )
+    if (selectionIds.size > 0) {
+      setExcludedFromRedactionIds((previous) => previous.filter((id) => !selectionIds.has(id)))
+    }
+    for (const item of pegasusApplyPreview.can_apply) {
+      if (item.person_id) ensureFaceTimelineLane(item.person_id)
+    }
+    const reviewEventIds = pegasusApplyPreview.review_only.flatMap((item) => item.event_ids || [])
+    if (reviewEventIds.length > 0) {
+      setPegasusBookmarkedEventIds((previous) => Array.from(new Set([...previous, ...reviewEventIds])))
+      setPegasusFocusedEventId((current) => current || reviewEventIds[0] || null)
+    }
+    setPegasusApplyModalOpen(false)
+  }, [ensureFaceTimelineLane, pegasusApplyPreview])
 
   const removeFaceTimelineLane = useCallback((personId: string) => {
     setPersonLaneIds((previous) => previous.filter((id) => id !== personId))
@@ -4444,6 +4816,69 @@ export default function VideoEditorPage() {
   const activeSearchClipIndex = activeSearchTimelineLane?.activeClipIndex ?? -1
   const activeSearchRank = activeSearchTimelineLane?.activeRank ?? null
   const searchEntities = activeSearchTimelineLane?.entities || []
+  const pegasusEvents = useMemo(() => (
+    (pegasusResult?.timeline_events || [])
+      .filter((event) => Number.isFinite(event.start_sec) && Number.isFinite(event.end_sec))
+      .map((event) => ({
+        ...event,
+        start_sec: Math.max(0, event.start_sec),
+        end_sec: Math.max(event.start_sec, event.end_sec),
+        severity: (['low', 'medium', 'high'].includes(event.severity) ? event.severity : 'medium') as PegasusSeverity,
+      }))
+      .sort((a, b) => a.start_sec - b.start_sec)
+  ), [pegasusResult])
+  const pegasusCategories = useMemo(() => {
+    const categories = Array.from(new Set(pegasusEvents.map((event) => event.category)))
+    return categories.sort((a, b) => formatPegasusLabel(a).localeCompare(formatPegasusLabel(b)))
+  }, [pegasusEvents])
+  const filteredPegasusEvents = useMemo(() => (
+    pegasusEvents.filter((event) => (
+      pegasusSeverityFilter[event.severity] &&
+      (pegasusCategoryFilter === 'all' || event.category === pegasusCategoryFilter)
+    ))
+  ), [pegasusCategoryFilter, pegasusEvents, pegasusSeverityFilter])
+  const focusedPegasusEvent = useMemo(() => (
+    pegasusEvents.find((event) => event.id === pegasusFocusedEventId) || filteredPegasusEvents[0] || null
+  ), [filteredPegasusEvents, pegasusEvents, pegasusFocusedEventId])
+  const pegasusEventsByGroup = useMemo(() => {
+    const groups = {
+      high: [] as PegasusTimelineEvent[],
+      people: [] as PegasusTimelineEvent[],
+      sensitive: [] as PegasusTimelineEvent[],
+      objects: [] as PegasusTimelineEvent[],
+    }
+    for (const event of filteredPegasusEvents) {
+      if (event.severity === 'high') groups.high.push(event)
+      if (event.category === 'person' || event.category === 'face') {
+        groups.people.push(event)
+      } else if (['screen', 'document', 'text', 'license_plate'].includes(event.category)) {
+        groups.sensitive.push(event)
+      } else {
+        groups.objects.push(event)
+      }
+    }
+    return groups
+  }, [filteredPegasusEvents])
+  const pegasusActionById = useMemo(() => {
+    const map: Record<string, PegasusRecommendedAction> = {}
+    for (const action of pegasusResult?.recommended_actions || []) {
+      if (action.id) map[action.id] = action
+    }
+    return map
+  }, [pegasusResult])
+  const pegasusRiskLevel = (pegasusResult?.summary?.privacy_risk_level || 'low').toString().toLowerCase()
+  const pegasusHighEventCount = useMemo(
+    () => pegasusEvents.filter((event) => event.severity === 'high').length,
+    [pegasusEvents],
+  )
+  const pegasusReviewOnlyCount = useMemo(
+    () => (pegasusResult?.recommended_actions || []).filter((action) => action.apply_mode === 'review_only').length,
+    [pegasusResult],
+  )
+  const pegasusAutomaticActionCount = useMemo(
+    () => (pegasusResult?.recommended_actions || []).filter((action) => action.apply_mode === 'automatic_if_matched').length,
+    [pegasusResult],
+  )
   const activateSearchSession = useCallback((sessionId: string) => {
     setActiveSearchSessionId(sessionId)
     setActiveTool('search')
@@ -5133,6 +5568,109 @@ export default function VideoEditorPage() {
     tutorialStep.placement,
     tutorialStep.target,
   ])
+
+  const renderPegasusEventButton = (event: PegasusTimelineEvent) => {
+    const style = getPegasusSeverityStyle(event.severity)
+    const action = (event.recommended_action_ids || [])
+      .map((id) => pegasusActionById[id])
+      .find(Boolean)
+    const bookmarked = pegasusBookmarkedEventIds.includes(event.id)
+    return (
+      <button
+        key={`pegasus-sidebar-event-${event.id}`}
+        type="button"
+        onClick={() => {
+          setPegasusFocusedEventId(event.id)
+          seekToTime(event.start_sec, { play: false })
+        }}
+        className={`w-full rounded-lg border px-3 py-3 text-left transition-colors ${
+          focusedPegasusEvent?.id === event.id
+            ? 'border-accent/35 bg-accent/10'
+            : 'border-border bg-surface/40 hover:border-border/80 hover:bg-card'
+        }`}
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span
+                className={`rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${style.text}`}
+                style={{ borderColor: style.border, backgroundColor: style.soft }}
+              >
+                {event.severity}
+              </span>
+              {bookmarked && (
+                <span className="rounded-full border border-white/10 bg-card px-1.5 py-0.5 text-[9px] text-text-tertiary">
+                  Bookmarked
+                </span>
+              )}
+            </div>
+            <p className="mt-1.5 truncate text-sm font-medium text-text-primary">{event.label}</p>
+            <p className="mt-1 text-[11px] text-text-tertiary">
+              {fmtShort(event.start_sec)} - {fmtShort(event.end_sec)} · {formatPegasusLabel(event.category)}
+            </p>
+            {(event.reason || action?.reason) && (
+              <p className="mt-1.5 line-clamp-2 text-xs leading-relaxed text-text-secondary">
+                {event.reason || action?.reason}
+              </p>
+            )}
+            <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-text-tertiary">
+              {event.redaction_decision && (
+                <span className="rounded-full border border-border bg-card px-1.5 py-0.5 uppercase tracking-wide">
+                  {formatPegasusLabel(event.redaction_decision)}
+                </span>
+              )}
+              {event.redaction_target && (
+                <span className="rounded-full border border-border bg-card px-1.5 py-0.5 uppercase tracking-wide">
+                  {formatPegasusLabel(event.redaction_target)}
+                </span>
+              )}
+              {event.subject_selection && (
+                <span className="rounded-full border border-border bg-card px-1.5 py-0.5 uppercase tracking-wide">
+                  {formatPegasusLabel(event.subject_selection)}
+                </span>
+              )}
+              {event.scene_role && (
+                <span className="rounded-full border border-border bg-card px-1.5 py-0.5 uppercase tracking-wide">
+                  {formatPegasusLabel(event.scene_role)}
+                </span>
+              )}
+              <span className="rounded-full border border-border bg-card px-1.5 py-0.5 tabular-nums">
+                {formatPegasusConfidence(event.confidence)}
+              </span>
+            </div>
+            {event.handling_note && (
+              <p className="mt-1.5 text-[11px] leading-relaxed text-text-tertiary">
+                {event.handling_note}
+              </p>
+            )}
+            {event.inclusion_reason && event.inclusion_reason !== event.reason && (
+              <p className="mt-1.5 text-[11px] leading-relaxed text-text-tertiary">
+                {event.inclusion_reason}
+              </p>
+            )}
+          </div>
+          <span className="shrink-0 rounded-md border border-border bg-card px-1.5 py-0.5 text-[10px] text-text-tertiary">
+            {fmtShort(event.start_sec)}
+          </span>
+        </div>
+      </button>
+    )
+  }
+
+  const renderPegasusEventGroup = (label: string, events: PegasusTimelineEvent[]) => {
+    if (events.length === 0) return null
+    return (
+      <div className="border-t border-border/80">
+        <div className="sticky top-0 z-[1] flex items-center justify-between border-b border-border/60 bg-surface/85 px-3 py-2 backdrop-blur-sm">
+          <span className="text-[10px] font-medium uppercase tracking-wider text-text-tertiary">{label}</span>
+          <span className="text-[10px] text-text-tertiary tabular-nums">{events.length}</span>
+        </div>
+        <div className="space-y-1.5 p-2">
+          {events.map(renderPegasusEventButton)}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background text-text-primary overflow-hidden">
@@ -6088,6 +6626,95 @@ export default function VideoEditorPage() {
                     </div>
                   )}
 
+                  {pegasusStatus === 'ready' && filteredPegasusEvents.length > 0 && (
+                    <div className="shrink-0 border-b border-border">
+                      <div className="relative" style={{ height: `${PEGASUS_LANE_HEIGHT_PX}px` }}>
+                        <div
+                          className="absolute inset-x-0 inset-y-1.5 rounded-lg overflow-hidden border border-border bg-card shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+                          onClick={() => {
+                            setActiveTool('pegasus')
+                            setRightSidebarOpen(true)
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault()
+                              setActiveTool('pegasus')
+                              setRightSidebarOpen(true)
+                            }
+                          }}
+                        >
+                          <div className="absolute inset-0 pointer-events-none bg-gradient-to-b from-white/[0.025] via-transparent to-black/[0.05]" />
+                          <div className="absolute inset-x-3 bottom-[10px] h-px bg-border/70" />
+                          <div className="absolute left-3 top-2 right-3 z-[4] flex items-center justify-between gap-2 pointer-events-none">
+                            <div className="inline-flex min-w-0 items-center gap-2 rounded-full border border-border bg-surface/80 px-2 py-1 shadow-[0_1px_0_rgba(255,255,255,0.03)] backdrop-blur-sm">
+                              <img src={metaInsightsIconUrl} alt="" className="h-3.5 w-3.5 opacity-80" />
+                              <span className="truncate text-[10px] font-medium text-text-secondary">Meta Insights</span>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1.5">
+                              <span className="rounded-full border border-border bg-surface/80 px-2 py-1 text-[9px] font-medium uppercase tracking-wide text-text-tertiary">
+                                {filteredPegasusEvents.length} hotspot{filteredPegasusEvents.length === 1 ? '' : 's'}
+                              </span>
+                            </div>
+                          </div>
+                          {filteredPegasusEvents.map((event) => {
+                            const style = getPegasusSeverityStyle(event.severity)
+                            const startPct = duration > 0 ? (event.start_sec / duration) * 100 : 0
+                            const endPct = duration > 0 ? (event.end_sec / duration) * 100 : startPct
+                            const widthPct = Math.max(1.4, endPct - startPct)
+                            const isActive = currentTime >= event.start_sec && currentTime <= event.end_sec
+                            const isFocused = focusedPegasusEvent?.id === event.id
+                            const bookmarked = pegasusBookmarkedEventIds.includes(event.id)
+                            const action = (event.recommended_action_ids || [])
+                              .map((id) => pegasusActionById[id])
+                              .find(Boolean)
+                            return (
+                              <button
+                                key={`pegasus-event-${event.id}`}
+                                type="button"
+                                onClick={(clickEvent) => {
+                                  clickEvent.stopPropagation()
+                                  setActiveTool('pegasus')
+                                  setRightSidebarOpen(true)
+                                  setPegasusFocusedEventId(event.id)
+                                  seekToTime(event.start_sec, { play: false })
+                                }}
+                                className="absolute inset-y-0 z-[3] bg-transparent"
+                                style={{
+                                  left: `${Math.max(0, Math.min(100, startPct))}%`,
+                                  width: `${Math.min(100, Math.max(widthPct, 2))}%`,
+                                }}
+                                title={`${formatPegasusLabel(event.category)} - ${event.label} (${fmtShort(event.start_sec)} - ${fmtShort(event.end_sec)}): ${event.reason || action?.reason || 'Review this moment.'}`}
+                              >
+                                <span
+                                  className="absolute inset-y-2 rounded-full transition-all"
+                                  style={{
+                                    left: 0,
+                                    right: 0,
+                                    backgroundColor: isActive || isFocused ? style.soft : `${style.color}20`,
+                                    border: `1px solid ${bookmarked ? 'rgba(255,255,255,0.66)' : style.border}`,
+                                    boxShadow: isActive || isFocused ? `0 0 0 1px ${style.color}55, 0 0 18px ${style.color}28` : undefined,
+                                  }}
+                                />
+                              </button>
+                            )
+                          })}
+                          {focusedPegasusEvent && (
+                            <div className="absolute bottom-2 right-3 z-[5] max-w-[18rem] rounded-lg border border-border bg-surface/90 px-2.5 py-1.5 text-left shadow-lg backdrop-blur-sm pointer-events-none">
+                              <p className="truncate text-[10px] font-semibold text-text-primary">{focusedPegasusEvent.label}</p>
+                              <p className="mt-0.5 truncate text-[9px] text-text-tertiary">
+                                {formatPegasusLabel(focusedPegasusEvent.category)} · {fmtShort(focusedPegasusEvent.start_sec)} - {fmtShort(focusedPegasusEvent.end_sec)}
+                              </p>
+                            </div>
+                          )}
+                          <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-accent/45" />
+                          <div className="absolute right-0 top-0 bottom-0 w-1.5 bg-border" />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Per-face "Blur on / Blur off" lane built from detection metadata
                       is intentionally hidden. The TwelveLabs entity search lane
                       above is the only timeline shown for blurred faces. */}
@@ -6467,7 +7094,7 @@ export default function VideoEditorPage() {
                           {analyzeLoading ? (
                             <span className="w-4 h-4 border-2 border-white/60 border-t-white rounded-full animate-spin" aria-hidden />
                           ) : (
-                            <img src={analyzeIconUrl} alt="" className="w-4 h-4" />
+                            <img src={metaInsightsIconUrl} alt="" className="w-4 h-4" />
                           )}
                         </button>
                       </div>
@@ -6670,6 +7297,163 @@ export default function VideoEditorPage() {
                       </p>
                     </div>
                   )}
+                </>
+              ) : activeTool === 'pegasus' ? (
+                <>
+                  <div className="px-3 h-10 flex items-center justify-between border-b border-border shrink-0">
+                    <div className="min-w-0 flex items-center gap-2">
+                      <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Meta Insights</span>
+                      {pegasusResult && (
+                        <span className="rounded-full border border-border bg-card px-1.5 py-0.5 text-[10px] tabular-nums text-text-tertiary">
+                          {filteredPegasusEvents.length}
+                        </span>
+                      )}
+                    </div>
+                    <button type="button" onClick={() => setRightSidebarOpen(false)} className={`h-7 w-7 rounded-md ${btnBase}`} aria-label="Collapse sidebar" title="Collapse sidebar">
+                      <IconChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+                    <div className="shrink-0 border-b border-border p-3 space-y-3 bg-surface/40">
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => runPegasusAssist(false)}
+                          disabled={!videoId || pegasusLoading}
+                          className="h-9 flex-1 rounded-md border border-accent bg-accent px-3 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          {pegasusLoading ? 'Analyzing...' : pegasusResult ? 'Re-run Meta Insights' : 'Run Meta Insights'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => runPegasusAssist(true)}
+                          disabled={!videoId || pegasusLoading}
+                          className="h-9 rounded-md border border-border bg-card px-3 text-xs font-medium text-text-secondary transition-colors hover:bg-surface hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Refresh
+                        </button>
+                      </div>
+
+                      {pegasusError && (
+                        <p className="rounded-md border border-red-400/25 bg-red-400/10 px-2.5 py-2 text-xs leading-relaxed text-red-300">
+                          {pegasusError}
+                        </p>
+                      )}
+
+                      {pegasusStatus !== 'ready' && !pegasusResult && (
+                        <div className="rounded-lg border border-border bg-card/80 p-3">
+                          <p className="text-xs leading-relaxed text-text-tertiary">
+                            Finds only the verdict subject, protected people, and sensitive details that need redaction review.
+                          </p>
+                        </div>
+                      )}
+
+                      {pegasusResult && (
+                        <div className="space-y-3">
+                          <div className="grid grid-cols-3 gap-2">
+                            <div className="rounded-lg border border-border bg-card px-2.5 py-2 text-center">
+                              <p className="text-[10px] uppercase tracking-wide text-text-tertiary">High risk</p>
+                              <p className="mt-1 text-base font-semibold tabular-nums text-text-primary">{pegasusHighEventCount}</p>
+                            </div>
+                            <div className="rounded-lg border border-border bg-card px-2.5 py-2 text-center">
+                              <p className="text-[10px] uppercase tracking-wide text-text-tertiary">Review only</p>
+                              <p className="mt-1 text-base font-semibold tabular-nums text-text-primary">{pegasusReviewOnlyCount}</p>
+                            </div>
+                            <div className="rounded-lg border border-border bg-card px-2.5 py-2 text-center">
+                              <p className="text-[10px] uppercase tracking-wide text-text-tertiary">Auto-match</p>
+                              <p className="mt-1 text-base font-semibold tabular-nums text-text-primary">{pegasusAutomaticActionCount}</p>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2 rounded-lg border border-border bg-card/80 p-2.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-medium uppercase tracking-wider text-text-tertiary">Filters</span>
+                              <span className="text-[10px] text-text-tertiary tabular-nums">{filteredPegasusEvents.length}/{pegasusEvents.length}</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setPegasusCategoryFilter('all')}
+                                aria-pressed={pegasusCategoryFilter === 'all'}
+                                className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[10px] font-semibold uppercase tracking-wide transition-colors ${
+                                  pegasusCategoryFilter === 'all'
+                                    ? 'border-accent/40 bg-accent/10 text-accent'
+                                    : 'border-border bg-card text-text-secondary hover:border-border/80 hover:text-text-primary'
+                                }`}
+                              >
+                                <IconFilter className="h-3.5 w-3.5" />
+                                <span>All</span>
+                              </button>
+                              {pegasusCategories.map((category) => (
+                                <button
+                                  key={category}
+                                  type="button"
+                                  onClick={() => setPegasusCategoryFilter(category)}
+                                  aria-pressed={pegasusCategoryFilter === category}
+                                  className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-[10px] font-semibold uppercase tracking-wide transition-colors ${
+                                    pegasusCategoryFilter === category
+                                      ? 'border-accent/40 bg-accent/10 text-accent'
+                                      : 'border-border bg-card text-text-secondary hover:border-border/80 hover:text-text-primary'
+                                  }`}
+                                  title={formatPegasusLabel(category)}
+                                >
+                                  <IconPegasusCategory category={category} className="h-3.5 w-3.5" />
+                                  <span>{formatPegasusLabel(category)}</span>
+                                </button>
+                              ))}
+                            </div>
+                            <div className="grid grid-cols-3 gap-1.5">
+                              {(['high', 'medium', 'low'] as PegasusSeverity[]).map((severity) => {
+                                const style = getPegasusSeverityStyle(severity)
+                                return (
+                                  <button
+                                    key={severity}
+                                    type="button"
+                                    onClick={() => setPegasusSeverityFilter((previous) => ({
+                                      ...previous,
+                                      [severity]: !previous[severity],
+                                    }))}
+                                    className={`h-7 rounded-md border text-[10px] font-semibold uppercase tracking-wide transition-opacity ${
+                                      pegasusSeverityFilter[severity] ? '' : 'opacity-50'
+                                    } ${pegasusSeverityFilter[severity] ? '' : 'border-border bg-card'}`}
+                                    style={pegasusSeverityFilter[severity]
+                                      ? { borderColor: style.border, backgroundColor: style.soft }
+                                      : undefined}
+                                  >
+                                    <span className={style.text}>{severity}</span>
+                                  </button>
+                                )
+                              })}
+                            </div>
+                          </div>
+
+                        </div>
+                      )}
+                    </div>
+
+                    {pegasusResult ? (
+                      <div className="flex-1 min-h-0 overflow-y-auto">
+                        {renderPegasusEventGroup('High priority', pegasusEventsByGroup.high)}
+                        {renderPegasusEventGroup('People / faces', pegasusEventsByGroup.people)}
+                        {renderPegasusEventGroup('Screens / documents / text', pegasusEventsByGroup.sensitive)}
+                        {renderPegasusEventGroup('Objects / logos / scenes', pegasusEventsByGroup.objects)}
+                        {filteredPegasusEvents.length === 0 && (
+                          <div className="flex min-h-[9rem] items-center justify-center px-4 py-8">
+                            <p className="max-w-[220px] text-center text-xs leading-relaxed text-text-tertiary">
+                              No Pegasus hotspots match the current filters.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+	                      <div className="flex-1 min-h-0 flex items-center justify-center p-4">
+	                        <p className="max-w-[220px] text-center text-xs leading-relaxed text-text-tertiary">
+	                          Run Meta Insights to show only redaction-worthy moments on the timeline.
+	                        </p>
+	                      </div>
+                    )}
+                  </div>
                 </>
               ) : (
             /* Detection sidebar (Tracker or Detection selected) — same flex pattern as Analyze so video player middle behaves identically */
@@ -6899,6 +7683,14 @@ export default function VideoEditorPage() {
         />
       )}
 
+      {pegasusApplyModalOpen && pegasusApplyPreview && (
+        <PegasusApplyPreviewModal
+          preview={pegasusApplyPreview}
+          onClose={() => setPegasusApplyModalOpen(false)}
+          onConfirm={confirmPegasusApply}
+        />
+      )}
+
       {faceLockBuildAlert && (
         <FaceLockFailureToast
           label={faceLockBuildAlert.label}
@@ -7017,6 +7809,129 @@ function RedactionWarningsModal({ warnings, onClose }: RedactionWarningsModalPro
             className="h-8 px-3 rounded-[9.6px] text-sm font-medium bg-brand-charcoal text-brand-white hover:bg-gray-700 transition-colors"
           >
             Got it
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+interface PegasusApplyPreviewModalProps {
+  preview: PegasusApplyPreview
+  onClose: () => void
+  onConfirm: () => void
+}
+
+function PegasusApplyPreviewModal({ preview, onClose, onConfirm }: PegasusApplyPreviewModalProps) {
+  const canApplyCount = preview.can_apply.length
+  const reviewOnlyCount = preview.review_only.length
+  const unsupportedCount = preview.unsupported.length
+  const renderItems = (items: PegasusApplyPreviewItem[], emptyText: string) => (
+    items.length > 0 ? (
+      <div className="space-y-2">
+        {items.slice(0, 5).map((item, index) => (
+          <div key={`${item.action_id || item.selection_id || item.label || 'item'}-${index}`} className="rounded-lg border border-border bg-surface/70 px-3 py-2">
+            <p className="truncate text-sm font-medium text-text-primary">
+              {item.label || formatPegasusLabel(item.type)}
+            </p>
+            <p className="mt-0.5 text-[11px] text-text-tertiary">
+              {formatPegasusLabel(item.type)}{item.event_ids?.length ? ` · ${item.event_ids.length} timeline item${item.event_ids.length === 1 ? '' : 's'}` : ''}
+            </p>
+            {item.reason && (
+              <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-text-secondary">
+                {item.reason}
+              </p>
+            )}
+          </div>
+        ))}
+        {items.length > 5 && (
+          <p className="text-[11px] text-text-tertiary">+{items.length - 5} more</p>
+        )}
+      </div>
+    ) : (
+      <p className="rounded-lg border border-border bg-surface/60 px-3 py-2 text-xs text-text-tertiary">
+        {emptyText}
+      </p>
+    )
+  )
+
+  return (
+    <div className="fixed inset-0 z-[220] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-brand-charcoal/45 backdrop-blur-sm" onClick={onClose} aria-hidden />
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pegasus-apply-preview-title"
+        className="relative flex max-h-[82vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-border bg-card shadow-xl"
+      >
+        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4">
+          <div>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-text-tertiary">Meta Insights</p>
+            <h2 id="pegasus-apply-preview-title" className="mt-1 text-lg font-semibold text-text-primary">
+              Review recommendations
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg p-2 text-text-tertiary transition-colors hover:bg-surface hover:text-text-primary"
+            aria-label="Close"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+          <div className="grid grid-cols-3 gap-2">
+            <div className="rounded-lg border border-border bg-surface/60 px-3 py-2 text-center">
+              <p className="text-base font-semibold tabular-nums text-text-primary">{canApplyCount}</p>
+              <p className="text-[10px] uppercase tracking-wide text-text-tertiary">Auto-match</p>
+            </div>
+            <div className="rounded-lg border border-border bg-surface/60 px-3 py-2 text-center">
+              <p className="text-base font-semibold tabular-nums text-text-primary">{reviewOnlyCount}</p>
+              <p className="text-[10px] uppercase tracking-wide text-text-tertiary">Bookmarks</p>
+            </div>
+            <div className="rounded-lg border border-border bg-surface/60 px-3 py-2 text-center">
+              <p className="text-base font-semibold tabular-nums text-text-primary">{unsupportedCount}</p>
+              <p className="text-[10px] uppercase tracking-wide text-text-tertiary">Unsupported</p>
+            </div>
+          </div>
+
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-tertiary">Will apply</h3>
+            {renderItems(preview.can_apply, 'No saved faces or object classes matched automatically.')}
+          </section>
+
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-tertiary">Review only</h3>
+            {renderItems(preview.review_only, 'No review bookmarks will be added.')}
+          </section>
+
+          {unsupportedCount > 0 && (
+            <section>
+              <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-text-tertiary">Unsupported</h3>
+              {renderItems(preview.unsupported, 'No unsupported recommendations.')}
+            </section>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-8 rounded-md border border-border bg-surface px-3 text-sm font-medium text-text-secondary transition-colors hover:text-text-primary"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="h-8 rounded-md bg-accent px-3 text-sm font-semibold text-white transition-colors hover:bg-accent/90"
+          >
+            Confirm apply
           </button>
         </div>
       </div>

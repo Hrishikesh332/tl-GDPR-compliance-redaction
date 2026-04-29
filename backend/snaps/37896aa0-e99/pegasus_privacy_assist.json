@@ -1,0 +1,290 @@
+{
+  "metadata": {
+    "artifact_id": "pegasus_3369b9e5d881a549",
+    "job_id": "pegasus_3369b9e5d881a549",
+    "video_id": "69b677662fc4a03916fba00e",
+    "local_job_id": "37896aa0-e99",
+    "source_fingerprint": "file:index_fai5_hgh.mp4:228059834:1777228009",
+    "cache_key": "69b677662fc4a03916fba00e|file:index_fai5_hgh.mp4:228059834:1777228009|1.2|privacy-assist-v4",
+    "model": "pegasus1.5",
+    "prompt_version": "privacy-assist-v4",
+    "schema_version": "1.2",
+    "duration_sec": 673.32,
+    "created_at": "2026-04-29T12:30:13.362719Z",
+    "status": "ready",
+    "twelvelabs_task_id": "69f1f9d5f8474e137ef4bbf7",
+    "source_type": "asset_id_from_indexed_video_id",
+    "usage": {},
+    "updated_at": "2026-04-29T12:40:59.168120Z"
+  },
+  "summary": {
+    "overall_summary": "Pegasus found 9 privacy review segments for this video.",
+    "privacy_risk_level": "high",
+    "review_priority": "high"
+  },
+  "timeline_events": [
+    {
+      "id": "evt_001",
+      "start_sec": 220.0,
+      "end_sec": 229.0,
+      "severity": "high",
+      "category": "document",
+      "label": "Court document with PII",
+      "description": "A close-up of a court document from the Landgericht N\u00fcrnberg-F\u00fcrth, showing the defendant's name, address, and case details.",
+      "reason": "This document contains personally identifiable information (PII) of the main verdict subject, including full name and address.",
+      "redaction_target": "sensitive_document",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "The document contains sensitive PII of the main verdict subject.",
+      "handling_note": "Blur or redact all text containing names, addresses, and case numbers.",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_002",
+      "start_sec": 244.0,
+      "end_sec": 280.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is escorted into the courtroom by officers and a lawyer, walking towards his seat.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "Blur face and upper body.",
+      "confidence": 0.98,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_002"
+      ]
+    },
+    {
+      "id": "evt_003",
+      "start_sec": 322.0,
+      "end_sec": 335.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is seated at the table, looking down while a lawyer stands nearby.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "Blur face and upper body.",
+      "confidence": 0.98,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_002"
+      ]
+    },
+    {
+      "id": "evt_004",
+      "start_sec": 341.0,
+      "end_sec": 351.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is seated at the table, with a lawyer standing behind him.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "Blur face and upper body.",
+      "confidence": 0.98,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_002"
+      ]
+    },
+    {
+      "id": "evt_005",
+      "start_sec": 359.0,
+      "end_sec": 364.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "A side profile view of the accused seated at the table.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "Blur face and upper body.",
+      "confidence": 0.98,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_002"
+      ]
+    },
+    {
+      "id": "evt_006",
+      "start_sec": 373.0,
+      "end_sec": 388.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is seated at the table, looking towards the front of the courtroom.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "Blur face and upper body.",
+      "confidence": 0.98,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_002"
+      ]
+    },
+    {
+      "id": "evt_007",
+      "start_sec": 389.0,
+      "end_sec": 401.0,
+      "severity": "medium",
+      "category": "object",
+      "label": "Shackles on main verdict subject",
+      "description": "A close-up of the accused's feet, showing he is wearing shackles.",
+      "reason": "This is a sensitive detail related to the main verdict subject's custody status.",
+      "redaction_target": "sensitive_object",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "handle_with_care",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "This object is directly related to the main verdict subject and indicates his custody status.",
+      "handling_note": "Review for potential redaction or blurring.",
+      "confidence": 0.9,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_003"
+      ]
+    },
+    {
+      "id": "evt_008",
+      "start_sec": 402.0,
+      "end_sec": 408.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "A side profile view of the accused seated at the table.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "Blur face and upper body.",
+      "confidence": 0.98,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_002"
+      ]
+    },
+    {
+      "id": "evt_009",
+      "start_sec": 409.0,
+      "end_sec": 413.0,
+      "severity": "medium",
+      "category": "object",
+      "label": "Shackles on main verdict subject",
+      "description": "A close-up of the accused's feet, showing he is wearing shackles.",
+      "reason": "This is a sensitive detail related to the main verdict subject's custody status.",
+      "redaction_target": "sensitive_object",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "handle_with_care",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "This object is directly related to the main verdict subject and indicates his custody status.",
+      "handling_note": "Review for potential redaction or blurring.",
+      "confidence": 0.9,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_003"
+      ]
+    }
+  ],
+  "recommended_actions": [
+    {
+      "id": "act_001",
+      "type": "select_object_class",
+      "label": "Court document with PII: select object class",
+      "reason": "This document contains personally identifiable information (PII) of the main verdict subject, including full name and address.",
+      "confidence": 0.95,
+      "event_ids": [
+        "evt_001"
+      ],
+      "target": {
+        "object_class": "document",
+        "entity_id": "Court document",
+        "redaction_target": "sensitive_document",
+        "scene_role": "verdict_subject",
+        "redaction_decision": "redact",
+        "subject_selection": "sensitive_visual_detail",
+        "inclusion_reason": "The document contains sensitive PII of the main verdict subject.",
+        "start_sec": 220.0,
+        "end_sec": 229.0
+      },
+      "apply_mode": "automatic_if_matched"
+    },
+    {
+      "id": "act_002",
+      "type": "select_detected_entity",
+      "label": "Main verdict subject: select detected entity",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "confidence": 0.98,
+      "event_ids": [
+        "evt_002",
+        "evt_003",
+        "evt_004",
+        "evt_005",
+        "evt_006",
+        "evt_008"
+      ],
+      "target": {
+        "object_class": "person",
+        "entity_id": "Defendant",
+        "redaction_target": "main_verdict_subject",
+        "scene_role": "verdict_subject",
+        "redaction_decision": "redact",
+        "subject_selection": "main_verdict_subject",
+        "inclusion_reason": "This person is the main verdict subject of the trial.",
+        "start_sec": 244.0,
+        "end_sec": 408.0
+      },
+      "apply_mode": "automatic_if_matched"
+    },
+    {
+      "id": "act_003",
+      "type": "select_object_class",
+      "label": "Shackles on main verdict subject: select object class",
+      "reason": "This is a sensitive detail related to the main verdict subject's custody status.",
+      "confidence": 0.9,
+      "event_ids": [
+        "evt_007",
+        "evt_009"
+      ],
+      "target": {
+        "object_class": "object",
+        "entity_id": "Shackles",
+        "redaction_target": "sensitive_object",
+        "scene_role": "verdict_subject",
+        "redaction_decision": "handle_with_care",
+        "subject_selection": "sensitive_visual_detail",
+        "inclusion_reason": "This object is directly related to the main verdict subject and indicates his custody status.",
+        "start_sec": 389.0,
+        "end_sec": 413.0
+      },
+      "apply_mode": "automatic_if_matched"
+    }
+  ]
+}

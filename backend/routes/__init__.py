@@ -6,6 +6,7 @@ from routes.download import download_bp
 from routes.entity import entity_bp
 from routes.indexing import indexing_bp
 from routes.face_lock import face_lock_bp
+from routes.pegasus import pegasus_bp
 
 
 def register_blueprints(app):
@@ -17,3 +18,4 @@ def register_blueprints(app):
     app.register_blueprint(entity_bp, url_prefix="/api")
     app.register_blueprint(indexing_bp, url_prefix="/api")
     app.register_blueprint(face_lock_bp, url_prefix="/api")
+    app.register_blueprint(pegasus_bp, url_prefix="/api")

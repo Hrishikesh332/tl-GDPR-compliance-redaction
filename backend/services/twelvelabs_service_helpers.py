@@ -320,16 +320,23 @@ def twelvelabs_api_request(
     if not api_key:
         raise RuntimeError("TWELVELABS_API_KEY is not configured.")
 
-    response = requests.request(
-        method=method,
-        url=get_twelvelabs_api_url(path),
-        headers={"x-api-key": api_key},
-        params=params,
-        json=json_body,
-        data=data,
-        files=files,
-        timeout=timeout,
-    )
+    try:
+        response = requests.request(
+            method=method,
+            url=get_twelvelabs_api_url(path),
+            headers={"x-api-key": api_key},
+            params=params,
+            json=json_body,
+            data=data,
+            files=files,
+            timeout=timeout,
+        )
+    except requests.exceptions.Timeout as exc:
+        raise RuntimeError(
+            f"TwelveLabs API timed out after {timeout} seconds. Try again in a moment or narrow the request."
+        ) from exc
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(f"TwelveLabs API request failed: {exc}") from exc
     if response.status_code not in expected_status:
         raise RuntimeError(extract_api_error(response))
     if response.status_code == 204 or not response.content:

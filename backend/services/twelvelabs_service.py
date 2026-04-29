@@ -42,6 +42,9 @@ logger = logging.getLogger("video_redaction.twelvelabs")
 
 twelvelabs_client = None
 cached_entity_collection_id = TWELVELABS_ENTITY_COLLECTION_ID or None
+TWELVELABS_SDK_TIMEOUT_SEC = float(os.environ.get("TWELVELABS_SDK_TIMEOUT_SEC", "180"))
+TWELVELABS_ANALYZE_TIMEOUT_SEC = float(os.environ.get("TWELVELABS_ANALYZE_TIMEOUT_SEC", TWELVELABS_SDK_TIMEOUT_SEC))
+TWELVELABS_REST_TIMEOUT_SEC = float(os.environ.get("TWELVELABS_REST_TIMEOUT_SEC", "180"))
 
 PEOPLE_DESCRIPTION_PROMPT = (
     "List every distinct person visible in this video. "
@@ -100,7 +103,10 @@ OVERVIEW_CATEGORIES_KEY = "overview_categories"
 def get_client():
     global twelvelabs_client
     if twelvelabs_client is None:
-        twelvelabs_client = TwelveLabs(api_key=TWELVELABS_API_KEY)
+        twelvelabs_client = TwelveLabs(
+            api_key=TWELVELABS_API_KEY,
+            timeout=TWELVELABS_SDK_TIMEOUT_SEC,
+        )
     return twelvelabs_client
 
 
@@ -161,7 +167,12 @@ def wait_for_task_completion(task_id, callback=None):
 def analyze_video_to_json(video_id, prompt, *, fallback_key, warning_message, log_message):
     client = get_client()
     logger.info(log_message, video_id)
-    result = client.analyze(video_id=video_id, prompt=prompt, temperature=0.1)
+    result = client.analyze(
+        video_id=video_id,
+        prompt=prompt,
+        temperature=0.1,
+        request_options={"timeout_in_seconds": TWELVELABS_ANALYZE_TIMEOUT_SEC},
+    )
     return parse_analysis_response(
         result.data,
         fallback_key=fallback_key,
@@ -313,7 +324,12 @@ def analyze_video_custom(video_id, prompt):
     client = get_client()
     logger.info("Custom analysis on video %s", video_id)
     enhanced_prompt = f"{ANALYZE_FORMAT_INSTRUCTION}\n\n{prompt}"
-    result = client.analyze(video_id=video_id, prompt=enhanced_prompt, temperature=0.2)
+    result = client.analyze(
+        video_id=video_id,
+        prompt=enhanced_prompt,
+        temperature=0.2,
+        request_options={"timeout_in_seconds": TWELVELABS_ANALYZE_TIMEOUT_SEC},
+    )
     return {"data": result.data, "id": result.id}
 
 
@@ -566,8 +582,9 @@ def twelvelabs_api_request(
     data=None,
     files=None,
     expected_status=(200,),
-    timeout=60,
+    timeout=None,
 ):
+    effective_timeout = TWELVELABS_REST_TIMEOUT_SEC if timeout is None else timeout
     return helper_twelvelabs_api_request(
         method,
         path,
@@ -577,7 +594,7 @@ def twelvelabs_api_request(
         data=data,
         files=files,
         expected_status=expected_status,
-        timeout=timeout,
+        timeout=effective_timeout,
     )
 
 
@@ -679,6 +696,38 @@ def upload_face_asset_from_url(image_url):
         asset_id = get_value(asset, "_id", "id")
         logger.info("Created asset via REST: %s", asset_id)
         return asset_id
+
+
+def create_pegasus_privacy_task(asset_id, *, response_format):
+    """Create a Pegasus 1.5 async structured-analysis task from an existing asset id."""
+    body = {
+        "video": {
+            "type": "asset_id",
+            "asset_id": asset_id,
+        },
+        "model_name": "pegasus1.5",
+        "analysis_mode": "time_based_metadata",
+        "response_format": response_format,
+        "temperature": 0.1,
+    }
+    logger.info("Creating Pegasus 1.5 privacy task from asset id %s", asset_id)
+    return twelvelabs_api_request(
+        "POST",
+        "analyze/tasks",
+        json_body=body,
+        expected_status=(200, 201, 202),
+        timeout=TWELVELABS_REST_TIMEOUT_SEC,
+    )
+
+
+def retrieve_pegasus_privacy_task(task_id):
+    logger.info("Retrieving Pegasus privacy task %s", task_id)
+    return twelvelabs_api_request(
+        "GET",
+        f"analyze/tasks/{task_id}",
+        expected_status=(200,),
+        timeout=TWELVELABS_REST_TIMEOUT_SEC,
+    )
 
 
 def create_entity(name, asset_ids, description=None, metadata=None):
