@@ -22,6 +22,31 @@ def _service_error_status(error):
     return 500
 
 
+@pegasus_bp.route("/pegasus/privacy-assist/cache", methods=["GET"])
+def get_cached_privacy_assist():
+    video_id = str(request.args.get("video_id") or "").strip()
+    local_job_id = str(request.args.get("local_job_id") or "").strip() or None
+
+    if not video_id:
+        return jsonify({"error": "video_id is required"}), 400
+
+    try:
+        return jsonify(pegasus_privacy.get_cached_privacy_assist(
+            video_id,
+            local_job_id=local_job_id,
+        ))
+    except FileNotFoundError:
+        return jsonify({"cached": False, "status": "missing"}), 404
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        logger.warning("Pegasus cache lookup failed: %s", exc)
+        return jsonify({"error": str(exc)}), _service_error_status(exc)
+    except Exception as exc:
+        logger.exception("Pegasus cache lookup failed")
+        return jsonify({"error": str(exc)}), _service_error_status(exc)
+
+
 @pegasus_bp.route("/pegasus/privacy-assist/jobs", methods=["POST"])
 def create_privacy_assist_job():
     data = request.get_json(silent=True) or {}

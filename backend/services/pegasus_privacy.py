@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from config import OUTPUT_DIR
+from config import OUTPUT_DIR, SNAPS_DIR
 from services import twelvelabs_service
 from utils.storage import (
     get_run_dir,
@@ -959,7 +959,24 @@ def _cache_key(video_id: str, source_fingerprint: str) -> str:
 def _artifact_path(video_id: str, local_job_id: str | None, cache_digest: str) -> str:
     if local_job_id:
         return os.path.join(get_run_dir(local_job_id), PEGASUS_ARTIFACT_FILENAME)
+    return _canonical_artifact_path(video_id, cache_digest)
+
+
+def _canonical_artifact_path(video_id: str, cache_digest: str) -> str:
     return os.path.join(PEGASUS_ARTIFACT_DIR, f"{_safe_id(video_id)}_{cache_digest[:12]}.json")
+
+
+def _candidate_artifact_paths(video_id: str, local_job_id: str | None, cache_digest: str) -> list[str]:
+    paths: list[str] = []
+    if local_job_id:
+        paths.append(os.path.join(get_run_dir(local_job_id), PEGASUS_ARTIFACT_FILENAME))
+    paths.append(_canonical_artifact_path(video_id, cache_digest))
+    if os.path.isdir(SNAPS_DIR):
+        for run_id in sorted(os.listdir(SNAPS_DIR)):
+            path = os.path.join(SNAPS_DIR, run_id, PEGASUS_ARTIFACT_FILENAME)
+            if path not in paths:
+                paths.append(path)
+    return paths
 
 
 def _job_path(job_id: str) -> str:
@@ -993,6 +1010,43 @@ def _load_cached_artifact(path: str, cache_key: str) -> dict[str, Any] | None:
     return artifact
 
 
+def _find_cached_artifact(
+    video_id: str,
+    local_job_id: str | None,
+    cache_digest: str,
+    cache_key: str,
+) -> tuple[dict[str, Any], str] | tuple[None, None]:
+    for path in _candidate_artifact_paths(video_id, local_job_id, cache_digest):
+        artifact = _load_cached_artifact(path, cache_key)
+        if artifact:
+            return artifact, path
+    return None, None
+
+
+def get_cached_privacy_assist(video_id: str, *, local_job_id: str | None = None) -> dict[str, Any]:
+    if not video_id:
+        raise ValueError("video_id is required")
+
+    resolved_job_id, job = _resolve_local_job(local_job_id, video_id)
+    info = {} if _string_value(job.get("video_path")) else _resolve_video_info(video_id)
+    source_fingerprint, _duration_sec = _source_fingerprint(video_id, job, info)
+    cache_key = _cache_key(video_id, source_fingerprint)
+    cache_digest = _sha256_text(cache_key)
+    assist_job_id = f"pegasus_{cache_digest[:16]}"
+    cached_artifact, path = _find_cached_artifact(video_id, resolved_job_id, cache_digest, cache_key)
+    if not cached_artifact or not path:
+        raise FileNotFoundError("Cached Pegasus artifact not found")
+
+    _sync_job_record(assist_job_id, cached_artifact, path, cached=True)
+    status = cached_artifact.get("metadata", {}).get("status", "ready")
+    return {
+        "job_id": assist_job_id,
+        "status": status,
+        "cached": True,
+        "result": cached_artifact if status == "ready" else None,
+    }
+
+
 def start_privacy_assist_job(video_id: str, *, local_job_id: str | None = None, force: bool = False) -> dict[str, Any]:
     if not video_id:
         raise ValueError("video_id is required")
@@ -1005,9 +1059,9 @@ def start_privacy_assist_job(video_id: str, *, local_job_id: str | None = None, 
     assist_job_id = f"pegasus_{cache_digest[:16]}"
     path = _artifact_path(video_id, resolved_job_id, cache_digest)
 
-    cached_artifact = None if force else _load_cached_artifact(path, cache_key)
-    if cached_artifact:
-        _sync_job_record(assist_job_id, cached_artifact, path, cached=True)
+    cached_artifact, cached_path = (None, None) if force else _find_cached_artifact(video_id, resolved_job_id, cache_digest, cache_key)
+    if cached_artifact and cached_path:
+        _sync_job_record(assist_job_id, cached_artifact, cached_path, cached=True)
         return {
             "job_id": assist_job_id,
             "status": cached_artifact.get("metadata", {}).get("status", "ready"),
@@ -1040,6 +1094,9 @@ def start_privacy_assist_job(video_id: str, *, local_job_id: str | None = None, 
         "recommended_actions": [],
     }
     _write_json(path, artifact)
+    canonical_path = _canonical_artifact_path(video_id, cache_digest)
+    if canonical_path != path:
+        _write_json(canonical_path, artifact)
     _sync_job_record(assist_job_id, artifact, path, cached=False)
     return {
         "job_id": assist_job_id,
@@ -1080,6 +1137,12 @@ def get_privacy_assist_job(job_id: str) -> dict[str, Any]:
     if task_status == "ready":
         ready_artifact = normalize_pegasus_result(task_payload, metadata=metadata)
         _write_json(artifact_path, ready_artifact)
+        cache_key = _string_value(metadata.get("cache_key"))
+        video_id = _string_value(metadata.get("video_id"))
+        if cache_key and video_id:
+            canonical_path = _canonical_artifact_path(video_id, _sha256_text(cache_key))
+            if canonical_path != artifact_path:
+                _write_json(canonical_path, ready_artifact)
         _sync_job_record(job_id, ready_artifact, artifact_path, cached=bool(record.get("cached")))
         return {"job_id": job_id, "status": "ready", "cached": bool(record.get("cached")), "result": ready_artifact}
 

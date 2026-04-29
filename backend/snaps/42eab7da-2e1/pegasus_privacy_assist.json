@@ -1,0 +1,180 @@
+{
+  "metadata": {
+    "artifact_id": "pegasus_d3fb5b12da0af546",
+    "job_id": "pegasus_d3fb5b12da0af546",
+    "video_id": "69b67a433571b38304a513f1",
+    "local_job_id": "42eab7da-2e1",
+    "source_fingerprint": "file:index_071ejd4v.mp4:106593916:1777228009",
+    "cache_key": "69b67a433571b38304a513f1|file:index_071ejd4v.mp4:106593916:1777228009|1.2|privacy-assist-v4",
+    "model": "pegasus1.5",
+    "prompt_version": "privacy-assist-v4",
+    "schema_version": "1.2",
+    "duration_sec": 365.0,
+    "created_at": "2026-04-29T12:58:13.016276Z",
+    "status": "ready",
+    "twelvelabs_task_id": "69f200644dad723457b0542b",
+    "source_type": "asset_id_from_indexed_video_id",
+    "usage": {},
+    "updated_at": "2026-04-29T12:59:00.245844Z"
+  },
+  "summary": {
+    "overall_summary": "Pegasus found 4 privacy review segments for this video.",
+    "privacy_risk_level": "medium",
+    "review_priority": "medium"
+  },
+  "timeline_events": [
+    {
+      "id": "evt_001",
+      "start_sec": 42.5,
+      "end_sec": 49.0,
+      "severity": "medium",
+      "category": "screen",
+      "label": "Phone screen",
+      "description": "A lawyer in a black robe is looking at his phone. The screen content is visible and may contain sensitive information.",
+      "reason": "The phone screen may display sensitive or private information that should be reviewed for redaction.",
+      "redaction_target": "sensitive_screen",
+      "scene_role": "unknown",
+      "redaction_decision": "review_only",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "The phone screen is a sensitive visual detail that may require redaction.",
+      "handling_note": "Review timestamp for potential screen redaction.",
+      "confidence": 0.85,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_002",
+      "start_sec": 80.0,
+      "end_sec": 99.0,
+      "severity": "medium",
+      "category": "document",
+      "label": "Documents on table",
+      "description": "A stack of documents and a pen are visible on the table. The content of the documents is not clearly legible but may contain sensitive information.",
+      "reason": "The documents may contain sensitive case-related information that should be reviewed for redaction.",
+      "redaction_target": "sensitive_document",
+      "scene_role": "unknown",
+      "redaction_decision": "review_only",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "The documents are a sensitive visual detail that may require redaction.",
+      "handling_note": "Review timestamp for potential document redaction.",
+      "confidence": 0.75,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_002"
+      ]
+    },
+    {
+      "id": "evt_003",
+      "start_sec": 153.5,
+      "end_sec": 166.0,
+      "severity": "medium",
+      "category": "screen",
+      "label": "Phone screen",
+      "description": "A man in a dark jacket is looking at his phone while talking to a lawyer. The screen content is visible and may contain sensitive information.",
+      "reason": "The phone screen may display sensitive or private information that should be reviewed for redaction.",
+      "redaction_target": "sensitive_screen",
+      "scene_role": "unknown",
+      "redaction_decision": "review_only",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "The phone screen is a sensitive visual detail that may require redaction.",
+      "handling_note": "Review timestamp for potential screen redaction.",
+      "confidence": 0.85,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_004",
+      "start_sec": 210.5,
+      "end_sec": 215.0,
+      "severity": "medium",
+      "category": "screen",
+      "label": "Camera screen",
+      "description": "A close-up of a camera screen showing the footage being recorded. The screen content may reveal sensitive details.",
+      "reason": "The camera screen may display sensitive or private information that should be reviewed for redaction.",
+      "redaction_target": "sensitive_screen",
+      "scene_role": "unknown",
+      "redaction_decision": "review_only",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "The camera screen is a sensitive visual detail that may require redaction.",
+      "handling_note": "Review timestamp for potential screen redaction.",
+      "confidence": 0.8,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_003"
+      ]
+    }
+  ],
+  "recommended_actions": [
+    {
+      "id": "act_001",
+      "type": "jump_to_time",
+      "label": "Phone screen: jump to time",
+      "reason": "The phone screen may display sensitive or private information that should be reviewed for redaction.",
+      "confidence": 0.85,
+      "event_ids": [
+        "evt_001",
+        "evt_003"
+      ],
+      "target": {
+        "object_class": "screen",
+        "entity_id": "phone",
+        "redaction_target": "sensitive_screen",
+        "scene_role": "unknown",
+        "redaction_decision": "review_only",
+        "subject_selection": "sensitive_visual_detail",
+        "inclusion_reason": "The phone screen is a sensitive visual detail that may require redaction.",
+        "start_sec": 42.5,
+        "end_sec": 166.0
+      },
+      "apply_mode": "review_only"
+    },
+    {
+      "id": "act_002",
+      "type": "jump_to_time",
+      "label": "Documents on table: jump to time",
+      "reason": "The documents may contain sensitive case-related information that should be reviewed for redaction.",
+      "confidence": 0.75,
+      "event_ids": [
+        "evt_002"
+      ],
+      "target": {
+        "object_class": "document",
+        "entity_id": "case_files",
+        "redaction_target": "sensitive_document",
+        "scene_role": "unknown",
+        "redaction_decision": "review_only",
+        "subject_selection": "sensitive_visual_detail",
+        "inclusion_reason": "The documents are a sensitive visual detail that may require redaction.",
+        "start_sec": 80.0,
+        "end_sec": 99.0
+      },
+      "apply_mode": "review_only"
+    },
+    {
+      "id": "act_003",
+      "type": "jump_to_time",
+      "label": "Camera screen: jump to time",
+      "reason": "The camera screen may display sensitive or private information that should be reviewed for redaction.",
+      "confidence": 0.8,
+      "event_ids": [
+        "evt_004"
+      ],
+      "target": {
+        "object_class": "screen",
+        "entity_id": "camera_display",
+        "redaction_target": "sensitive_screen",
+        "scene_role": "unknown",
+        "redaction_decision": "review_only",
+        "subject_selection": "sensitive_visual_detail",
+        "inclusion_reason": "The camera screen is a sensitive visual detail that may require redaction.",
+        "start_sec": 210.5,
+        "end_sec": 215.0
+      },
+      "apply_mode": "review_only"
+    }
+  ]
+}

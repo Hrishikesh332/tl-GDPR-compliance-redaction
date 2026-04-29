@@ -638,7 +638,7 @@ const EDITOR_TUTORIAL_STEPS: Array<{
   },
   {
     title: 'Detect and blur targets',
-    body: 'In Live Blur, run Detect to load saved faces and objects. This is where anonymize mode is managed: use Blur or Unblur beside each item to decide what stays redacted.',
+    body: 'In Live Blur, run Detect to load saved faces and objects. This is where anonymize mode is managed, use Blur or Unblur beside each item to decide what stays redacted.',
     target: 'tracker',
     placement: 'right',
   },
@@ -656,7 +656,7 @@ const EDITOR_TUTORIAL_STEPS: Array<{
   },
   {
     title: 'Review privacy hotspots',
-    body: 'Open Meta Insights to run structured privacy analysis and preview privacy hotspots on the timeline before export.',
+    body: 'Meta Insights uses TwelveLabs Pegasus 1.5 for structured video understanding. It highlights the verdict subject, protected people, and sensitive details on the timeline before export.',
     target: 'pegasus',
     placement: 'right',
   },
@@ -2368,6 +2368,7 @@ export default function VideoEditorPage() {
   const [pegasusFocusedEventId, setPegasusFocusedEventId] = useState<string | null>(null)
   const [pegasusBookmarkedEventIds, setPegasusBookmarkedEventIds] = useState<string[]>([])
   const pegasusRequestIdRef = useRef(0)
+  const pegasusCacheLookupKeyRef = useRef<string | null>(null)
   const searchSessionResult = useMemo(() => {
     if (searchSessionResults.length === 0) return null
     return (
@@ -2500,6 +2501,7 @@ export default function VideoEditorPage() {
     setPegasusApplyModalOpen(false)
     setPegasusFocusedEventId(null)
     setPegasusBookmarkedEventIds([])
+    pegasusCacheLookupKeyRef.current = null
     liveRedactionPendingTimeRef.current = null
     liveRedactionRequestIdRef.current = 0
     liveRedactionLastResolvedTimeRef.current = null
@@ -3378,6 +3380,40 @@ export default function VideoEditorPage() {
     }
     throw new Error('Pegasus analysis is still processing. Try again in a moment.')
   }, [])
+
+  const loadCachedPegasusAssist = useCallback(async () => {
+    if (!videoId || pegasusLoading || pegasusResult) return
+    const lookupKey = `${videoId}:${detectionJobId || ''}`
+    if (pegasusCacheLookupKeyRef.current === lookupKey) return
+    pegasusCacheLookupKeyRef.current = lookupKey
+
+    const requestId = pegasusRequestIdRef.current + 1
+    pegasusRequestIdRef.current = requestId
+    try {
+      const params = new URLSearchParams({ video_id: videoId })
+      if (detectionJobId) params.set('local_job_id', detectionJobId)
+      const res = await fetch(`${API_BASE}/api/pegasus/privacy-assist/cache?${params.toString()}`)
+      const json = await res.json().catch(() => ({})) as PegasusJobResponse
+      if (pegasusRequestIdRef.current !== requestId) return
+      if (res.status === 404) return
+      if (!res.ok) return
+
+      const jobId = json.job_id || json.result?.metadata?.artifact_id
+      if (jobId) setPegasusJobId(jobId)
+      setPegasusCached(Boolean(json.cached))
+      setPegasusStatus((json.status || 'ready') as PegasusJobStatus)
+      if (json.result) {
+        setPegasusResult(json.result)
+        setPegasusFocusedEventId(json.result.timeline_events?.[0]?.id || null)
+      }
+    } catch {
+      // Cache hydration is intentionally silent; the Run button still starts analysis on demand.
+    }
+  }, [detectionJobId, pegasusLoading, pegasusResult, videoId])
+
+  useEffect(() => {
+    void loadCachedPegasusAssist()
+  }, [loadCachedPegasusAssist])
 
   const runPegasusAssist = useCallback(async (force = false) => {
     if (!videoId) {
@@ -7306,6 +7342,11 @@ export default function VideoEditorPage() {
                       {pegasusResult && (
                         <span className="rounded-full border border-border bg-card px-1.5 py-0.5 text-[10px] tabular-nums text-text-tertiary">
                           {filteredPegasusEvents.length}
+                        </span>
+                      )}
+                      {pegasusCached && pegasusResult && (
+                        <span className="rounded-full border border-border bg-card px-1.5 py-0.5 text-[10px] text-text-tertiary">
+                          Cached
                         </span>
                       )}
                     </div>
