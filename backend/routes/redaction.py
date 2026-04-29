@@ -9,6 +9,7 @@ import numpy as np
 
 from flask import Blueprint, request, jsonify
 
+from config import DEFAULT_BLUR_STRENGTH, DEFAULT_DETECT_EVERY_N
 from services.detection import ObjectDetectionUnavailable, detect_uploaded_reference_faces
 from services.face_identity import ensure_face_identity
 from services.pipeline import run_redaction, preview_redaction_tracks, get_job, get_enriched_faces
@@ -330,11 +331,6 @@ def build_redaction_request(data):
     object_classes = parse_list_field(data, "object_classes", split_csv=True) or []
     object_classes = [str(item).strip() for item in object_classes if str(item).strip()]
 
-    try:
-        blur_strength = int(data.get("blur_strength", request.form.get("blur_strength", 51)))
-    except (TypeError, ValueError):
-        blur_strength = 51
-
     redaction_style = str(
         data.get("redaction_style", request.form.get("redaction_style", "blur")) or "blur"
     ).strip().lower()
@@ -342,9 +338,16 @@ def build_redaction_request(data):
         redaction_style = "blur"
 
     try:
-        detect_every_n = int(data.get("detect_every_n", request.form.get("detect_every_n", 3)))
+        blur_strength = int(data.get("blur_strength", request.form.get("blur_strength", DEFAULT_BLUR_STRENGTH)))
     except (TypeError, ValueError):
-        detect_every_n = 3
+        blur_strength = DEFAULT_BLUR_STRENGTH
+    if redaction_style == "blur":
+        blur_strength = max(DEFAULT_BLUR_STRENGTH, blur_strength)
+
+    try:
+        detect_every_n = int(data.get("detect_every_n", request.form.get("detect_every_n", DEFAULT_DETECT_EVERY_N)))
+    except (TypeError, ValueError):
+        detect_every_n = DEFAULT_DETECT_EVERY_N
 
     detect_every_seconds = data.get("detect_every_seconds")
     if detect_every_seconds is None:

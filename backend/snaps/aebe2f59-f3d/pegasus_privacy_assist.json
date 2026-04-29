@@ -1,0 +1,270 @@
+{
+  "metadata": {
+    "artifact_id": "pegasus_b07541cc9ccf0896",
+    "job_id": "pegasus_b07541cc9ccf0896",
+    "video_id": "69b67a843571b38304a513f9",
+    "local_job_id": "aebe2f59-f3d",
+    "source_fingerprint": "file:index_sb96j2m4.mp4:329960732:1777228009",
+    "cache_key": "69b67a843571b38304a513f9|file:index_sb96j2m4.mp4:329960732:1777228009|1.2|privacy-assist-v4",
+    "model": "pegasus1.5",
+    "prompt_version": "privacy-assist-v4",
+    "schema_version": "1.2",
+    "duration_sec": 1147.56,
+    "created_at": "2026-04-29T21:40:36.184142Z",
+    "status": "ready",
+    "twelvelabs_task_id": "69f27ad4856c3b9aa4297e9e",
+    "source_type": "asset_id_from_indexed_video_id",
+    "usage": {},
+    "updated_at": "2026-04-29T21:42:27.352653Z"
+  },
+  "summary": {
+    "overall_summary": "Pegasus found 10 privacy review segments for this video.",
+    "privacy_risk_level": "high",
+    "review_priority": "high"
+  },
+  "timeline_events": [
+    {
+      "id": "evt_001",
+      "start_sec": 163.0,
+      "end_sec": 180.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is being escorted up the stairs by police officers with a black garment covering their head.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_002",
+      "start_sec": 190.0,
+      "end_sec": 210.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused continues to be escorted up the stairs with their head covered.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_003",
+      "start_sec": 213.0,
+      "end_sec": 222.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is escorted into the courtroom with their head covered.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_004",
+      "start_sec": 229.0,
+      "end_sec": 255.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is seated at the defendant's table with their head covered by a black garment.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_005",
+      "start_sec": 271.0,
+      "end_sec": 309.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused remains seated with their head covered while the judge looks on.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_006",
+      "start_sec": 317.0,
+      "end_sec": 358.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is seated at the table with their head covered, visible from a wider angle.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_007",
+      "start_sec": 368.0,
+      "end_sec": 391.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is seated with their head covered while the judge is visible in the background.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_008",
+      "start_sec": 406.0,
+      "end_sec": 482.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused is seated with their head covered, visible from behind the victim's family.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_009",
+      "start_sec": 495.0,
+      "end_sec": 520.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused stands up with their head covered as the judges stand.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_010",
+      "start_sec": 534.0,
+      "end_sec": 561.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The accused stands with their head covered while the judge speaks.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "accused",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the trial.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    }
+  ],
+  "recommended_actions": [
+    {
+      "id": "act_001",
+      "type": "select_detected_entity",
+      "label": "Main verdict subject: select detected entity",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the trial.",
+      "confidence": 0.95,
+      "event_ids": [
+        "evt_001",
+        "evt_002",
+        "evt_003",
+        "evt_004",
+        "evt_005",
+        "evt_006",
+        "evt_007",
+        "evt_008",
+        "evt_009",
+        "evt_010"
+      ],
+      "target": {
+        "object_class": "person",
+        "entity_id": "accused",
+        "redaction_target": "main_verdict_subject",
+        "scene_role": "accused",
+        "redaction_decision": "redact",
+        "subject_selection": "main_verdict_subject",
+        "inclusion_reason": "This person is the main verdict subject of the trial.",
+        "start_sec": 163.0,
+        "end_sec": 561.0
+      },
+      "apply_mode": "automatic_if_matched"
+    }
+  ]
+}

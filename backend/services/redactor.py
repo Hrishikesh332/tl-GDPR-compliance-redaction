@@ -30,39 +30,36 @@ from utils.video import small_frame_for_tracking, finalize_mp4_export, export_vi
 
 logger = logging.getLogger("video_redaction.redactor")
 
-# Face detections tend to land tight on the facial features. Padding is
-# kept very small so the blur sits right on the face like the reference,
-# not as a halo around the head. The elliptical alpha mask in
-# ``utils.image.apply_blur`` already feathers the edges, so a hard
-# margin is unnecessary.
-FACE_REDACTION_PAD_X_RATIO = 0.08
-FACE_REDACTION_PAD_TOP_RATIO = 0.18
-FACE_REDACTION_PAD_BOTTOM_RATIO = 0.10
+# Face detections can flicker around the facial features, especially when the
+# subject is far from camera. Export redaction favors coverage over tightness.
+FACE_REDACTION_PAD_X_RATIO = 0.16
+FACE_REDACTION_PAD_TOP_RATIO = 0.28
+FACE_REDACTION_PAD_BOTTOM_RATIO = 0.18
 GLOBAL_MOTION_MAX_CORNERS = 240
 GLOBAL_MOTION_MIN_POINTS = 8
 GLOBAL_MOTION_MIN_CONFIDENCE = 0.14
 FACE_TRACK_MOTION_SEARCH_BONUS_CAP = 0.72
-# Cap how much extra padding motion can add to the blur. Kept tiny so
-# pans/zooms cannot inflate the blur into a halo around the head.
-FACE_TRACK_MOTION_PAD_CAP = 0.08
-FACE_TRACK_BRIDGE_PAD_CAP = 0.08
+# Cap how much extra padding motion can add to the blur. Export keeps a
+# modest margin so missed detector frames do not expose edges.
+FACE_TRACK_MOTION_PAD_CAP = 0.14
+FACE_TRACK_BRIDGE_PAD_CAP = 0.14
 # Lower confidence bar so the blur can ride a camera shift even if the
 # scene is mostly low-texture (background sky, walls, etc.).
 FACE_TRACK_BRIDGE_MIN_GLOBAL_CONFIDENCE = 0.14
 # Allow more consecutive bridged frames so brief detection blanks do not
 # reveal the face on small camera shifts and quick zooms.
-FACE_TRACK_BRIDGE_MAX_FAILS = 5
+FACE_TRACK_BRIDGE_MAX_FAILS = 12
 # Adaptive smoothing thresholds (face-bbox motion relative to face size).
 # Below STILL: snap aggressively to detection so the blur sits "glued" to
 # the face. Above MOVING: smooth heavily to ride out tracker noise.
 FACE_LOCK_STILL_RATE = 0.012
 FACE_LOCK_MOVING_RATE = 0.06
-FACE_LOCK_STILL_ALPHA = 0.85
-FACE_LOCK_MOVING_ALPHA = 0.45
-FACE_LOCK_STILL_SIZE_ALPHA = 0.65
-FACE_LOCK_MOVING_SIZE_ALPHA = 0.32
-FACE_LOCK_PREDICTION_ALPHA = 0.32
-FACE_LOCK_PREDICTION_SIZE_ALPHA = 0.22
+FACE_LOCK_STILL_ALPHA = 0.62
+FACE_LOCK_MOVING_ALPHA = 0.36
+FACE_LOCK_STILL_SIZE_ALPHA = 0.42
+FACE_LOCK_MOVING_SIZE_ALPHA = 0.24
+FACE_LOCK_PREDICTION_ALPHA = 0.42
+FACE_LOCK_PREDICTION_SIZE_ALPHA = 0.28
 FACE_LOCK_MOTION_BRIDGE_ALPHA = 0.92
 FACE_LOCK_MOTION_BRIDGE_SIZE_ALPHA = 0.65
 FACE_TRACK_POINT_MAX_CORNERS = 90
@@ -542,6 +539,9 @@ def detect_best_face_bbox(frame, search_bbox, preferred_bbox=None, allow_supplem
         crop,
         confidence_threshold=MANUAL_FACE_DETECTION_CONFIDENCE,
         include_supplemental=allow_supplemental,
+        min_face_size=12,
+        min_sharpness=3.0,
+        upscale=1.75,
     )
     if not detections:
         return None
@@ -1992,7 +1992,14 @@ def redact_video(
             if auto_face_mode:
                 face_boxes = [
                     expand_face_redaction_bbox(tuple(b["bbox"]), w, h)
-                    for b in detect_face_boxes(frame)
+                    for b in detect_face_boxes(
+                        frame,
+                        confidence_threshold=0.16,
+                        include_supplemental=True,
+                        min_face_size=14,
+                        min_sharpness=3.0,
+                        upscale=1.6,
+                    )
                 ]
             elif face_targets:
                 localized_faces = localize_known_faces_in_frame(

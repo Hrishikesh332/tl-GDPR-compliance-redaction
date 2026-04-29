@@ -70,8 +70,11 @@ _obj_model_load_failed = False
 _obj_model_error = None
 
 MIN_FACE_SIZE = 30
+SMALL_FACE_MIN_SIZE = 14
 MIN_FACE_SHARPNESS = 10.0
+SMALL_FACE_SHARPNESS = 3.0
 RES10_CONFIDENCE = 0.35
+FAR_FACE_UPSCALE = 1.75
 KNOWN_FACE_ANCHOR_WINDOW_SEC = 1.5
 KNOWN_FACE_ANCHOR_SEARCH_EXPAND = 1.85
 KNOWN_FACE_STALE_ANCHOR_MAX_GAP_SEC = 10.0
@@ -256,12 +259,27 @@ def face_sharpness(img_bgr, bbox):
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 
-def detect_faces_res10(img_bgr, confidence_threshold=RES10_CONFIDENCE):
+def detect_faces_res10(
+    img_bgr,
+    confidence_threshold=RES10_CONFIDENCE,
+    min_face_size=MIN_FACE_SIZE,
+    upscale=1.0,
+):
     """Run res10_300x300_ssd face detector. Returns list of (x1,y1,x2,y2,conf)."""
     net = get_face_net()
-    h, w = img_bgr.shape[:2]
+    scale = max(1.0, float(upscale or 1.0))
+    detector_img = img_bgr
+    if scale > 1.01:
+        src_h, src_w = img_bgr.shape[:2]
+        detector_img = cv2.resize(
+            img_bgr,
+            (max(1, int(round(src_w * scale))), max(1, int(round(src_h * scale)))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+
+    h, w = detector_img.shape[:2]
     blob = cv2.dnn.blobFromImage(
-        img_bgr, 1.0, (300, 300), (104.0, 177.0, 123.0), swapRB=False, crop=False
+        detector_img, 1.0, (300, 300), (104.0, 177.0, 123.0), swapRB=False, crop=False
     )
     net.setInput(blob)
     detections = net.forward()
@@ -275,9 +293,17 @@ def detect_faces_res10(img_bgr, confidence_threshold=RES10_CONFIDENCE):
         y1 = int(detections[0, 0, i, 4] * h)
         x2 = int(detections[0, 0, i, 5] * w)
         y2 = int(detections[0, 0, i, 6] * h)
+        if scale > 1.01:
+            x1 = int(round(x1 / scale))
+            y1 = int(round(y1 / scale))
+            x2 = int(round(x2 / scale))
+            y2 = int(round(y2 / scale))
+            out_h, out_w = img_bgr.shape[:2]
+        else:
+            out_h, out_w = h, w
         x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        if x2 - x1 >= MIN_FACE_SIZE and y2 - y1 >= MIN_FACE_SIZE:
+        x2, y2 = min(out_w, x2), min(out_h, y2)
+        if x2 - x1 >= min_face_size and y2 - y1 >= min_face_size:
             boxes.append((x1, y1, x2, y2, conf))
 
     return boxes
@@ -295,12 +321,22 @@ def iou(box_a, box_b):
     return inter / union if union > 0 else 0
 
 
-def get_embeddings_for_boxes(img_bgr, res10_boxes):
+def get_embeddings_for_boxes(
+    img_bgr,
+    res10_boxes,
+    min_face_size=MIN_FACE_SIZE,
+    upscale=1.0,
+):
 
     # Run InsightFace on the frame, then match its detections to res10 boxes by IoU
     # to assign 512-d ArcFace embeddings to each res10 detection.
     # Also returns unmatched InsightFace detections (faces res10 missed).
-    insight_faces = get_insightface_detections(img_bgr, with_encodings=True)
+    insight_faces = get_insightface_detections(
+        img_bgr,
+        with_encodings=True,
+        min_face_size=min_face_size,
+        upscale=upscale,
+    )
     if not insight_faces:
         return [None] * len(res10_boxes), []
 
@@ -329,7 +365,7 @@ def get_embeddings_for_boxes(img_bgr, res10_boxes):
         if iface.get("embedding") is None:
             continue
         x1, y1, x2, y2 = iface["bbox"]
-        if (x2 - x1) < MIN_FACE_SIZE or (y2 - y1) < MIN_FACE_SIZE:
+        if (x2 - x1) < min_face_size or (y2 - y1) < min_face_size:
             continue
         unmatched.append({
             "bbox": [x1, y1, x2, y2],
@@ -340,16 +376,39 @@ def get_embeddings_for_boxes(img_bgr, res10_boxes):
     return embeddings, unmatched
 
 
-def get_insightface_detections(img_bgr, with_encodings=False):
+def get_insightface_detections(
+    img_bgr,
+    with_encodings=False,
+    min_face_size=MIN_FACE_SIZE,
+    upscale=1.0,
+):
     app = get_face_app()
     if app is None:
         return []
 
+    scale = max(1.0, float(upscale or 1.0))
+    detector_img = img_bgr
+    if scale > 1.01:
+        src_h, src_w = img_bgr.shape[:2]
+        detector_img = cv2.resize(
+            img_bgr,
+            (max(1, int(round(src_w * scale))), max(1, int(round(src_h * scale)))),
+            interpolation=cv2.INTER_CUBIC,
+        )
+
     detections = []
-    for iface in app.get(img_bgr):
+    out_h, out_w = img_bgr.shape[:2]
+    for iface in app.get(detector_img):
         bbox = iface.bbox.astype(int).tolist()
         x1, y1, x2, y2 = bbox
-        if (x2 - x1) < MIN_FACE_SIZE or (y2 - y1) < MIN_FACE_SIZE:
+        if scale > 1.01:
+            x1 = int(round(x1 / scale))
+            y1 = int(round(y1 / scale))
+            x2 = int(round(x2 / scale))
+            y2 = int(round(y2 / scale))
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(out_w, x2), min(out_h, y2)
+        if (x2 - x1) < min_face_size or (y2 - y1) < min_face_size:
             continue
 
         det_score = float(iface.det_score) if hasattr(iface, "det_score") else 0.5
@@ -365,15 +424,27 @@ def get_insightface_detections(img_bgr, with_encodings=False):
     return detections
 
 
-def detect_face_boxes(img_bgr, confidence_threshold=RES10_CONFIDENCE, include_supplemental=False):
+def detect_face_boxes(
+    img_bgr,
+    confidence_threshold=RES10_CONFIDENCE,
+    include_supplemental=False,
+    min_face_size=MIN_FACE_SIZE,
+    min_sharpness=MIN_FACE_SHARPNESS,
+    upscale=1.0,
+):
 
-    insight_detections = get_insightface_detections(img_bgr, with_encodings=False)
+    insight_detections = get_insightface_detections(
+        img_bgr,
+        with_encodings=False,
+        min_face_size=min_face_size,
+        upscale=upscale,
+    )
     if insight_detections:
         results = []
         for det in insight_detections:
             x1, y1, x2, y2 = det["bbox"]
             sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
-            if sharpness < MIN_FACE_SHARPNESS:
+            if sharpness < min_sharpness:
                 continue
             results.append({
                 "bbox": [x1, y1, x2, y2],
@@ -384,12 +455,17 @@ def detect_face_boxes(img_bgr, confidence_threshold=RES10_CONFIDENCE, include_su
         if results:
             return results
 
-    res10_boxes = detect_faces_res10(img_bgr, confidence_threshold=confidence_threshold)
+    res10_boxes = detect_faces_res10(
+        img_bgr,
+        confidence_threshold=confidence_threshold,
+        min_face_size=min_face_size,
+        upscale=upscale,
+    )
 
     results = []
     for (x1, y1, x2, y2, conf) in res10_boxes:
         sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
-        if sharpness < MIN_FACE_SHARPNESS:
+        if sharpness < min_sharpness:
             continue
         results.append({
             "bbox": [x1, y1, x2, y2],
@@ -401,11 +477,16 @@ def detect_face_boxes(img_bgr, confidence_threshold=RES10_CONFIDENCE, include_su
     if not include_supplemental:
         return results
 
-    _, unmatched_insight = get_embeddings_for_boxes(img_bgr, res10_boxes)
+    _, unmatched_insight = get_embeddings_for_boxes(
+        img_bgr,
+        res10_boxes,
+        min_face_size=min_face_size,
+        upscale=upscale,
+    )
     for extra in unmatched_insight:
         x1, y1, x2, y2 = extra["bbox"]
         sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
-        if sharpness < MIN_FACE_SHARPNESS:
+        if sharpness < min_sharpness:
             continue
         results.append({
             "bbox": [x1, y1, x2, y2],
@@ -566,7 +647,14 @@ def localize_known_face_in_search_region(
         )
 
     known_vec = prepare_face_encoding_vector(known_face.get("encoding"))
-    detections = detect_faces(crop, with_encodings=known_vec is not None)
+    detections = detect_faces(
+        crop,
+        with_encodings=known_vec is not None,
+        confidence_threshold=0.16,
+        min_face_size=12,
+        min_sharpness=SMALL_FACE_SHARPNESS,
+        upscale=FAR_FACE_UPSCALE,
+    )
 
     identity_best = None
     identity_best_score = -1e9
@@ -771,18 +859,30 @@ def localize_known_faces_in_frame(frame_bgr, known_faces, time_sec=None, toleran
     return results
 
 
-def detect_faces(img_bgr, with_encodings=False):
+def detect_faces(
+    img_bgr,
+    with_encodings=False,
+    confidence_threshold=RES10_CONFIDENCE,
+    min_face_size=MIN_FACE_SIZE,
+    min_sharpness=MIN_FACE_SHARPNESS,
+    upscale=1.0,
+):
     """Detect faces using InsightFace first, with res10 fallback when unavailable.
     InsightFace provides stronger face localization and embeddings, which helps
     live blur alignment and person-specific matching remain stable.
     """
-    insight_detections = get_insightface_detections(img_bgr, with_encodings=with_encodings)
+    insight_detections = get_insightface_detections(
+        img_bgr,
+        with_encodings=with_encodings,
+        min_face_size=min_face_size,
+        upscale=upscale,
+    )
     if insight_detections:
         results = []
         for det in insight_detections:
             x1, y1, x2, y2 = det["bbox"]
             sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
-            if sharpness < MIN_FACE_SHARPNESS:
+            if sharpness < min_sharpness:
                 continue
 
             fw, fh = x2 - x1, y2 - y1
@@ -804,21 +904,36 @@ def detect_faces(img_bgr, with_encodings=False):
         if results:
             return results
 
-    res10_boxes = detect_faces_res10(img_bgr)
+    res10_boxes = detect_faces_res10(
+        img_bgr,
+        confidence_threshold=confidence_threshold,
+        min_face_size=min_face_size,
+        upscale=upscale,
+    )
 
     embeddings = [None] * len(res10_boxes)
     unmatched_insight = []
     if with_encodings:
         if res10_boxes:
-            embeddings, unmatched_insight = get_embeddings_for_boxes(img_bgr, res10_boxes)
+            embeddings, unmatched_insight = get_embeddings_for_boxes(
+                img_bgr,
+                res10_boxes,
+                min_face_size=min_face_size,
+                upscale=upscale,
+            )
         else:
-            _, unmatched_insight = get_embeddings_for_boxes(img_bgr, [])
+            _, unmatched_insight = get_embeddings_for_boxes(
+                img_bgr,
+                [],
+                min_face_size=min_face_size,
+                upscale=upscale,
+            )
 
     results = []
 
     for i, (x1, y1, x2, y2, conf) in enumerate(res10_boxes):
         sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
-        if sharpness < MIN_FACE_SHARPNESS:
+        if sharpness < min_sharpness:
             continue
 
         fw, fh = x2 - x1, y2 - y1
@@ -840,7 +955,7 @@ def detect_faces(img_bgr, with_encodings=False):
     for extra in unmatched_insight:
         x1, y1, x2, y2 = extra["bbox"]
         sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
-        if sharpness < MIN_FACE_SHARPNESS:
+        if sharpness < min_sharpness:
             continue
 
         fw, fh = x2 - x1, y2 - y1
@@ -975,7 +1090,14 @@ def match_faces_in_frame(frame_bgr, target_encodings, tolerance=0.55):
         target_vecs.append(v / norm if norm > 0 else v)
 
     matched = []
-    for det in detect_faces(frame_bgr, with_encodings=True):
+    for det in detect_faces(
+        frame_bgr,
+        with_encodings=True,
+        confidence_threshold=0.2,
+        min_face_size=SMALL_FACE_MIN_SIZE,
+        min_sharpness=SMALL_FACE_SHARPNESS,
+        upscale=1.6,
+    ):
         enc = det.get("encoding")
         if enc is None:
             continue
@@ -1039,7 +1161,14 @@ def identify_faces_in_frame(frame_bgr, known_faces, tolerance=0.55):
     if not prepared_known:
         return []
 
-    detections = detect_faces(frame_bgr, with_encodings=True)
+    detections = detect_faces(
+        frame_bgr,
+        with_encodings=True,
+        confidence_threshold=0.2,
+        min_face_size=SMALL_FACE_MIN_SIZE,
+        min_sharpness=SMALL_FACE_SHARPNESS,
+        upscale=1.6,
+    )
     best_by_person = {}
     for det in detections:
         enc = det.get("encoding")

@@ -1010,6 +1010,20 @@ def _load_cached_artifact(path: str, cache_key: str) -> dict[str, Any] | None:
     return artifact
 
 
+def _load_video_artifact(path: str, video_id: str) -> dict[str, Any] | None:
+    artifact = _read_json(path)
+    if not artifact:
+        return None
+    metadata = artifact.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    if metadata.get("video_id") != video_id:
+        return None
+    if metadata.get("status") not in {None, "ready"}:
+        return None
+    return artifact
+
+
 def _find_cached_artifact(
     video_id: str,
     local_job_id: str | None,
@@ -1018,6 +1032,18 @@ def _find_cached_artifact(
 ) -> tuple[dict[str, Any], str] | tuple[None, None]:
     for path in _candidate_artifact_paths(video_id, local_job_id, cache_digest):
         artifact = _load_cached_artifact(path, cache_key)
+        if artifact:
+            return artifact, path
+    return None, None
+
+
+def _find_video_artifact(
+    video_id: str,
+    local_job_id: str | None,
+    cache_digest: str,
+) -> tuple[dict[str, Any], str] | tuple[None, None]:
+    for path in _candidate_artifact_paths(video_id, local_job_id, cache_digest):
+        artifact = _load_video_artifact(path, video_id)
         if artifact:
             return artifact, path
     return None, None
@@ -1034,6 +1060,10 @@ def get_cached_privacy_assist(video_id: str, *, local_job_id: str | None = None)
     cache_digest = _sha256_text(cache_key)
     assist_job_id = f"pegasus_{cache_digest[:16]}"
     cached_artifact, path = _find_cached_artifact(video_id, resolved_job_id, cache_digest, cache_key)
+    cache_status = "hit"
+    if not cached_artifact or not path:
+        cached_artifact, path = _find_video_artifact(video_id, resolved_job_id, cache_digest)
+        cache_status = "video_id_fallback"
     if not cached_artifact or not path:
         raise FileNotFoundError("Cached Pegasus artifact not found")
 
@@ -1043,6 +1073,7 @@ def get_cached_privacy_assist(video_id: str, *, local_job_id: str | None = None)
         "job_id": assist_job_id,
         "status": status,
         "cached": True,
+        "cache_status": cache_status,
         "result": cached_artifact if status == "ready" else None,
     }
 

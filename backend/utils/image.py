@@ -106,16 +106,32 @@ def apply_blur(frame, bbox, blur_strength=51):
         return frame
 
     strength = max(5, int(blur_strength))
-    downscale_ratio = max(0.03, 0.24 - min(strength, 100) * 0.002)
+    downscale_ratio = max(0.008, 0.24 - min(strength, 260) * 0.002)
+    if strength >= 130:
+        downscale_ratio = min(downscale_ratio, 0.012)
+    elif strength >= 85:
+        downscale_ratio = min(downscale_ratio, 0.035)
     reduced_w = max(1, int(round(roi_w * downscale_ratio)))
     reduced_h = max(1, int(round(roi_h * downscale_ratio)))
-    reduced = cv2.resize(roi, (reduced_w, reduced_h), interpolation=cv2.INTER_LINEAR)
+    reduced = cv2.resize(roi, (reduced_w, reduced_h), interpolation=cv2.INTER_AREA)
     expanded = cv2.resize(reduced, (roi_w, roi_h), interpolation=cv2.INTER_CUBIC)
 
-    kernel = max(9, min(max(roi_w, roi_h) | 1, (strength + 21) | 1))
+    kernel_boost = 85 if strength >= 130 else 45 if strength >= 85 else 21
+    kernel = max(9, min(max(roi_w, roi_h) | 1, (strength + kernel_boost) | 1))
     blurred = cv2.GaussianBlur(expanded, (kernel, kernel), 0)
+    if strength >= 85:
+        second_kernel = max(9, min(max(roi_w, roi_h) | 1, ((strength // 2) + 55) | 1))
+        blurred = cv2.GaussianBlur(blurred, (second_kernel, second_kernel), 0)
+    if strength >= 160:
+        average_color = roi.reshape(-1, roi.shape[-1]).mean(axis=0).reshape(1, 1, roi.shape[-1])
+        flatten = min(0.42, 0.18 + ((strength - 160) / 220.0))
+        blurred = (blurred.astype(np.float32) * (1.0 - flatten) + average_color.astype(np.float32) * flatten)
 
     mask = _build_elliptical_mask(roi_h, roi_w)
+    if strength >= 130:
+        mask = np.ones_like(mask, dtype=np.float32)
+    elif strength >= 85:
+        mask = np.maximum(mask, 0.9)
     mask_3ch = mask[:, :, np.newaxis]
     blended = (blurred.astype(np.float32) * mask_3ch +
                roi.astype(np.float32) * (1.0 - mask_3ch))

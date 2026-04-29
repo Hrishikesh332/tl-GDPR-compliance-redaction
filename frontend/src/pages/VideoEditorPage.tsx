@@ -19,6 +19,8 @@ const ANALYZE_SUGGESTIONS: string[] = [
   'Which faces should be anonymized?',
 ]
 
+const HIGH_PRIVACY_BLUR_INTENSITY = 220
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
@@ -2291,7 +2293,7 @@ export default function VideoEditorPage() {
   const [showFaceLockIntroPopup, setShowFaceLockIntroPopup] = useState(false)
   const [excludedFromRedactionIds, setExcludedFromRedactionIds] = useState<string[]>([])
   const [redactionStyle, setRedactionStyle] = useState<RedactionStyle>('blur')
-  const [blurIntensity, setBlurIntensity] = useState(60)
+  const [blurIntensity, setBlurIntensity] = useState(HIGH_PRIVACY_BLUR_INTENSITY)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [leftSidebarOpen, setLeftSidebarOpen] = useState(true)
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true)
@@ -4140,11 +4142,14 @@ export default function VideoEditorPage() {
     setExportRedactProgress({ percent: 0, message: 'Starting...' })
     try {
       const jobId = await resolveRedactionJobId()
+      const exportBlurStrength = redactionStyle === 'blur'
+        ? Math.max(blurIntensity, HIGH_PRIVACY_BLUR_INTENSITY)
+        : blurIntensity
       const body: Record<string, unknown> = {
         job_id: jobId,
         detect_every_n: 1,
         use_temporal_optimization: false,
-        blur_strength: blurIntensity,
+        blur_strength: exportBlurStrength,
         redaction_style: redactionStyle,
         export_quality: `${exportQuality}p`,
         output_height: exportQuality,
@@ -5779,9 +5784,9 @@ export default function VideoEditorPage() {
                     <span className="font-medium">Intensity</span>
                     <input
                       type="range"
-                      min="15"
-                      max="99"
-                      step="2"
+                      min="80"
+                      max="220"
+                      step="5"
                       value={blurIntensity}
                       onChange={(e) => setBlurIntensity(Number(e.target.value))}
                       disabled={redactionStyle === 'black'}

@@ -12,6 +12,7 @@
     "total_frames": 16833,
     "duration_sec": 673.32
   },
+  "twelvelabs_status": null,
   "local_status": "done",
   "twelvelabs_people": [
     {
@@ -268,6 +269,5 @@
     }
   ],
   "twelvelabs_objects": null,
-  "twelvelabs_scene_summary": null,
-  "twelvelabs_status": null
+  "twelvelabs_scene_summary": null
 }

@@ -53,14 +53,14 @@ from utils.video import small_frame_for_tracking
 
 logger = logging.getLogger("video_redaction.face_lock_track")
 
-LANE_BUILD_VERSION = 2
+LANE_BUILD_VERSION = 3
 FACE_LOCK_TRACKS_DIRNAME = "face_lock_tracks"
-DEFAULT_TRACKER_MAX_DIM = 640
+DEFAULT_TRACKER_MAX_DIM = 960
 
 # Safety margin baked into the persisted lane so the visible blur
 # over-covers the head. Combined with the existing elliptical alpha
 # mask in utils.image.apply_blur this never reads as a halo.
-FACE_LOCK_SAFETY_PAD_RATIO = 0.14
+FACE_LOCK_SAFETY_PAD_RATIO = 0.2
 # Maximum gap (seconds) between InsightFace appearances before the lane
 # splits into separate segments. Anchors are at ~1 Hz in the existing
 # detection metadata, so a 4 s gap reliably catches scene cuts.
@@ -69,7 +69,7 @@ APPEARANCE_SEGMENT_MAX_GAP_SEC = 4.0
 # them with TwelveLabs entity time-ranges to define lane segments. The
 # padding also seeds extra frames before the first and after the last
 # anchor so the lane covers the entire on-screen presence.
-SEGMENT_TIME_PADDING_SEC = 0.6
+SEGMENT_TIME_PADDING_SEC = 0.9
 # Dense identity verification cadence (frames). Every Nth frame during
 # the build the tracker bbox is verified against an InsightFace
 # detection inside a search region around it. When the verification
@@ -82,7 +82,7 @@ IDENTITY_VERIFY_INTERVAL_FRAMES = 4
 # re-localizing the face with InsightFace mid-track. Wide enough to
 # absorb camera shakes/zooms but tight enough to stay inside the
 # correct identity.
-IDENTITY_VERIFY_SEARCH_EXPAND = 1.85
+IDENTITY_VERIFY_SEARCH_EXPAND = 2.25
 # Minimum embedding cosine similarity to accept a verification snap.
 # Below this the tracked bbox is kept as-is so we never let a different
 # face hijack the lane.
@@ -1169,7 +1169,7 @@ def build_segment_lane(
     # InsightFace-verified scale between pins so CSRT growth onto
     # surrounding textures cannot make the bbox swell.
     scale_stable = stabilize_scale_between_pins(fused, frame_w, frame_h)
-    smoothed = bidirectional_smooth(scale_stable, frame_w, frame_h, alpha=0.62)
+    smoothed = bidirectional_smooth(scale_stable, frame_w, frame_h, alpha=0.5)
 
     logger.info(
         "  fused & smoothed: %d frames, total segment time %.2fs",

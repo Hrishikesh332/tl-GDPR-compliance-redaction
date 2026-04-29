@@ -36,16 +36,16 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 FACE_COSINE_SIM_THRESHOLD = 0.42
 OBJECT_CONF_THRESHOLD = 0.25
-DEFAULT_BLUR_STRENGTH = 51
+DEFAULT_BLUR_STRENGTH = 220
 # Frequent re-detection passes keep the blur anchored to the actual face
 # even when the camera is panning, shaking, or zooming. The per-frame face
 # search inside each track's search region also re-locks the blur when the
 # face moves between passes.
-DEFAULT_DETECT_EVERY_N = 3
+DEFAULT_DETECT_EVERY_N = 1
 DEFAULT_DETECT_INTERVAL_SEC = 1.0
 # Higher tracking resolution preserves face-scale precision so the blur
 # follows the head accurately when it grows or shrinks under zoom.
-TRACKER_MAX_DIM = _env_cast("TRACKER_MAX_DIM", 640, int)
+TRACKER_MAX_DIM = _env_cast("TRACKER_MAX_DIM", 960, int)
 MIN_TRACKER_ROI_PIXELS = 20
 TRACKER_REINIT_BBOX_EXPAND_FACTOR = _env_cast("TRACKER_REINIT_BBOX_EXPAND_FACTOR", 1.15, float)
 # Position smoothing weight for the new measurement in EMA: higher = more
@@ -61,7 +61,7 @@ TRACKER_SIZE_SMOOTHING_ALPHA = _env_cast("TRACKER_SIZE_SMOOTHING_ALPHA", 0.4, fl
 TRACKER_VELOCITY_SMOOTHING_ALPHA = _env_cast("TRACKER_VELOCITY_SMOOTHING_ALPHA", 0.45, float)
 # Carry the blur on velocity prediction for up to ~0.4s at 30fps so brief
 # detection blanks during fast camera shifts never reveal the face.
-TRACKER_PREDICTION_MAX_FRAMES = _env_cast("TRACKER_PREDICTION_MAX_FRAMES", 12, int)
+TRACKER_PREDICTION_MAX_FRAMES = _env_cast("TRACKER_PREDICTION_MAX_FRAMES", 30, int)
 # IoU threshold used to associate fresh face detections to an existing
 # track at a detection pass so the tracker, smoothing state, and identity
 # survive across detection refreshes (no jitter every N frames).
@@ -69,8 +69,8 @@ TRACK_ASSOCIATION_IOU = _env_cast("TRACK_ASSOCIATION_IOU", 0.28, float)
 TRACK_ASSOCIATION_CENTER_RATIO = _env_cast("TRACK_ASSOCIATION_CENTER_RATIO", 0.5, float)
 # Keep recently-seen subjects alive for ~0.5s after a missed detection
 # pass so the blur stays on faces during quick pans/zooms.
-TRACK_LOST_GRACE_FRAMES = _env_cast("TRACK_LOST_GRACE_FRAMES", 15, int)
-MANUAL_FACE_SEARCH_EXPAND_FACTOR = _env_cast("MANUAL_FACE_SEARCH_EXPAND_FACTOR", 1.65, float)
-MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR = _env_cast("MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR", 2.25, float)
-MANUAL_FACE_DETECTION_CONFIDENCE = _env_cast("MANUAL_FACE_DETECTION_CONFIDENCE", 0.22, float)
+TRACK_LOST_GRACE_FRAMES = _env_cast("TRACK_LOST_GRACE_FRAMES", 45, int)
+MANUAL_FACE_SEARCH_EXPAND_FACTOR = _env_cast("MANUAL_FACE_SEARCH_EXPAND_FACTOR", 2.0, float)
+MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR = _env_cast("MANUAL_FACE_LOST_SEARCH_EXPAND_FACTOR", 3.0, float)
+MANUAL_FACE_DETECTION_CONFIDENCE = _env_cast("MANUAL_FACE_DETECTION_CONFIDENCE", 0.16, float)
 KEYFRAME_INTERVAL_SEC = 1.0
