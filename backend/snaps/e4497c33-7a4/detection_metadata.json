@@ -14028,7 +14028,7 @@
       "name": "person_16",
       "priority_rank": 15,
       "tags": [],
-      "should_anonymize": false,
+      "should_anonymize": true,
       "is_official": false
     },
     {

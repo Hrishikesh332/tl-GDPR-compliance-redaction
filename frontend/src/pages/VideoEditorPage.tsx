@@ -513,6 +513,56 @@ const TOOLS: { id: ToolId; label: string; iconUrl: string }[] = [
   { id: 'captions', label: 'Analyze/Transcript', iconUrl: analyzeIconUrl },
 ]
 
+type TutorialTargetId = 'player' | ToolId | 'timeline' | 'export'
+type TutorialPlacement = 'top' | 'right' | 'bottom' | 'left'
+
+const EDITOR_TUTORIAL_STEPS: Array<{
+  title: string
+  body: string
+  target: TutorialTargetId
+  placement: TutorialPlacement
+}> = [
+  {
+    title: 'Editor layout',
+    body: 'Use the left toolbar to choose a workflow, the center area to review the video, and the right sidebar to work with the selected tool.',
+    target: 'player',
+    placement: 'bottom',
+  },
+  {
+    title: 'Detect and blur targets',
+    body: 'In Live Blur, run Detect to load saved faces and objects. Use Blur or Unblur beside each item to decide what stays redacted.',
+    target: 'tracker',
+    placement: 'right',
+  },
+  {
+    title: 'Search inside the video',
+    body: 'Search results appear as timeline lanes. Green bars show matches over time, and red bars mark the strongest moments to inspect first.',
+    target: 'search',
+    placement: 'right',
+  },
+  {
+    title: 'Ask for context',
+    body: 'Open Analyze/Transcript to ask questions, summarize the scene, or get topics and categories that help guide review.',
+    target: 'captions',
+    placement: 'right',
+  },
+  {
+    title: 'Review the timeline',
+    body: 'Use the timeline ruler, zoom controls, and result lanes to jump to exact moments. The playhead shows where preview and export decisions apply.',
+    target: 'timeline',
+    placement: 'top',
+  },
+  {
+    title: 'Export safely',
+    body: 'When the preview looks right, open Export, choose the quality, and download the redacted MP4 with the selected faces, objects, and regions applied.',
+    target: 'export',
+    placement: 'bottom',
+  },
+]
+
+const EDITOR_TUTORIAL_POPOVER_WIDTH = 336
+const EDITOR_TUTORIAL_POPOVER_HEIGHT = 214
+
 const LIVE_DETECTION_POLL_MS = 180
 const LIVE_DETECTION_HOLD_MS = 1400
 const LIVE_IDENTIFIED_FACE_HOLD_MS = 1800
@@ -554,9 +604,9 @@ const ENTITY_SEARCH_LANE_BAR_BASE = 'rgba(0, 220, 130, 0.28)'
 const ENTITY_SEARCH_LANE_PEAK_COLOR = '#ef4444'
 const ENTITY_SEARCH_LANE_PEAK_BAR_BASE = 'rgba(239, 68, 68, 0.32)'
 // Bars within this fraction of the lane's max value are treated as peaks and
-// turn red. Tuned so a proper cluster of the strongest matches stands out,
-// not just the single tallest bar.
-const ENTITY_SEARCH_LANE_PEAK_THRESHOLD = 0.65
+// turn red. Keep the cutoff forgiving enough that clear match clusters are easy
+// to spot even when the lane has one dominant spike.
+const ENTITY_SEARCH_LANE_PEAK_THRESHOLD = 0.52
 const ENTITY_SEARCH_LANE_SEGMENT_ACTIVE = 'rgba(0, 220, 130, 0.16)'
 const ENTITY_SEARCH_LANE_SEGMENT_RING = 'rgba(0, 220, 130, 0.28)'
 const ENTITY_SEARCH_LANE_EDGE_LEFT = 'rgba(0, 220, 130, 0.55)'
@@ -1508,6 +1558,15 @@ function IconDownload({ className = 'w-4 h-4' }: { className?: string }) {
 function IconChevronDown({ className = 'w-4 h-4' }: { className?: string }) {
   return (<svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9l6 6 6-6" /></svg>)
 }
+function IconHelp({ className = 'w-4 h-4' }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.1 9a3 3 0 1 1 5.4 1.8c-.8.7-1.5 1.2-1.5 2.7" />
+      <path d="M12 17h.01" />
+    </svg>
+  )
+}
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                            */
@@ -2038,6 +2097,17 @@ export default function VideoEditorPage() {
   const [rightSidebarOpen, setRightSidebarOpen] = useState(true)
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const exportMenuRef = useRef<HTMLDivElement>(null)
+  const [tutorialOpen, setTutorialOpen] = useState(false)
+  const [tutorialStepIndex, setTutorialStepIndex] = useState(0)
+  const [tutorialPosition, setTutorialPosition] = useState<{ left: number; top: number } | null>(null)
+  const [tutorialTargetRect, setTutorialTargetRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null)
+  const tutorialRef = useRef<HTMLDivElement>(null)
+  const tutorialButtonRef = useRef<HTMLButtonElement>(null)
+  const toolButtonRefs = useRef<Record<ToolId, HTMLButtonElement | null>>({
+    tracker: null,
+    search: null,
+    captions: null,
+  })
   const [faceLockListOpen, setFaceLockListOpen] = useState(false)
   const faceLockListRef = useRef<HTMLDivElement>(null)
   const [exportRedactLoading, setExportRedactLoading] = useState(false)
@@ -3951,6 +4021,23 @@ export default function VideoEditorPage() {
   }, [exportMenuOpen])
 
   useEffect(() => {
+    if (!tutorialOpen) return
+    const onPointerDown = (e: PointerEvent) => {
+      if (tutorialRef.current?.contains(e.target as Node)) return
+      setTutorialOpen(false)
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setTutorialOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [tutorialOpen])
+
+  useEffect(() => {
     if (!faceLockListOpen) return
     const onPointerDown = (e: PointerEvent) => {
       if (faceLockListRef.current?.contains(e.target as Node)) return
@@ -4157,7 +4244,8 @@ export default function VideoEditorPage() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'SELECT') return
+      const targetTag = (e.target as HTMLElement).tagName
+      if (targetTag === 'INPUT' || targetTag === 'SELECT' || targetTag === 'TEXTAREA' || targetTag === 'BUTTON') return
       switch (e.key) {
         case ' ': e.preventDefault(); togglePlay(); break
         case 'ArrowLeft': e.preventDefault(); skip(-5); break
@@ -4953,6 +5041,99 @@ export default function VideoEditorPage() {
     }
   }, [searchTimelineLanes.length, videoId])
 
+  const tutorialStep = EDITOR_TUTORIAL_STEPS[tutorialStepIndex] ?? EDITOR_TUTORIAL_STEPS[0]
+  const isFirstTutorialStep = tutorialStepIndex === 0
+  const isLastTutorialStep = tutorialStepIndex === EDITOR_TUTORIAL_STEPS.length - 1
+  const getTutorialTargetElement = useCallback((): HTMLElement | null => {
+    if (tutorialStep.target === 'player') return videoStageRef.current
+    if (tutorialStep.target === 'timeline') return timelineRef.current
+    if (tutorialStep.target === 'export') return exportMenuRef.current
+    return toolButtonRefs.current[tutorialStep.target] || tutorialButtonRef.current
+  }, [tutorialStep.target])
+
+  useEffect(() => {
+    if (!tutorialOpen) return
+    if (tutorialStep.target === 'tracker' || tutorialStep.target === 'search' || tutorialStep.target === 'captions') {
+      setLeftSidebarOpen(true)
+    }
+  }, [tutorialOpen, tutorialStep.target])
+
+  useLayoutEffect(() => {
+    if (!tutorialOpen) {
+      setTutorialPosition(null)
+      setTutorialTargetRect(null)
+      return
+    }
+
+    const updateTutorialPosition = () => {
+      const target = getTutorialTargetElement()
+      if (!target) {
+        setTutorialPosition(null)
+        setTutorialTargetRect(null)
+        return
+      }
+
+      const rect = target.getBoundingClientRect()
+      const margin = 12
+      const gap = 12
+      const popoverWidth = Math.min(EDITOR_TUTORIAL_POPOVER_WIDTH, window.innerWidth - margin * 2)
+      const popoverHeight = Math.min(EDITOR_TUTORIAL_POPOVER_HEIGHT, window.innerHeight - margin * 2)
+      const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value))
+
+      let left = rect.left + rect.width / 2 - popoverWidth / 2
+      let top = rect.bottom + gap
+
+      if (tutorialStep.placement === 'right') {
+        left = rect.right + gap
+        top = rect.top + rect.height / 2 - popoverHeight / 2
+        if (left + popoverWidth > window.innerWidth - margin) left = rect.left - popoverWidth - gap
+      } else if (tutorialStep.placement === 'left') {
+        left = rect.left - popoverWidth - gap
+        top = rect.top + rect.height / 2 - popoverHeight / 2
+        if (left < margin) left = rect.right + gap
+      } else if (tutorialStep.placement === 'top') {
+        left = rect.left + rect.width / 2 - popoverWidth / 2
+        top = rect.top - popoverHeight - gap
+        if (top < margin) top = rect.bottom + gap
+      } else {
+        left = rect.left + rect.width / 2 - popoverWidth / 2
+        top = rect.bottom + gap
+        if (top + popoverHeight > window.innerHeight - margin) top = rect.top - popoverHeight - gap
+      }
+
+      setTutorialPosition({
+        left: clamp(left, margin, window.innerWidth - popoverWidth - margin),
+        top: clamp(top, margin, window.innerHeight - popoverHeight - margin),
+      })
+      setTutorialTargetRect({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      })
+    }
+
+    updateTutorialPosition()
+    const frameId = window.requestAnimationFrame(updateTutorialPosition)
+    const settledTimer = window.setTimeout(updateTutorialPosition, 240)
+    window.addEventListener('resize', updateTutorialPosition)
+    window.addEventListener('scroll', updateTutorialPosition, true)
+    return () => {
+      window.cancelAnimationFrame(frameId)
+      window.clearTimeout(settledTimer)
+      window.removeEventListener('resize', updateTutorialPosition)
+      window.removeEventListener('scroll', updateTutorialPosition, true)
+    }
+  }, [
+    getTutorialTargetElement,
+    leftSidebarOpen,
+    rightSidebarOpen,
+    timelineZoom,
+    tutorialOpen,
+    tutorialStep.placement,
+    tutorialStep.target,
+  ])
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-background text-text-primary overflow-hidden">
       <div className="flex flex-1 min-h-0">
@@ -4973,6 +5154,9 @@ export default function VideoEditorPage() {
                   <button
                     key={t.id}
                     type="button"
+                    ref={(node) => {
+                      toolButtonRefs.current[t.id] = node
+                    }}
                     onClick={() => setActiveTool(t.id)}
                     className={`w-full flex items-center gap-2.5 px-2.5 py-2 text-left text-sm rounded-lg transition-colors ${
                       activeTool === t.id
@@ -5148,6 +5332,112 @@ export default function VideoEditorPage() {
                 </div>
               )
             })()}
+            <div className="relative shrink-0" ref={tutorialRef}>
+              <button
+                type="button"
+                ref={tutorialButtonRef}
+                onClick={() => {
+                  setExportMenuOpen(false)
+                  setFaceLockListOpen(false)
+                  setTutorialStepIndex(0)
+                  setTutorialOpen((open) => !open)
+                }}
+                className={`h-9 px-3 rounded-lg text-sm font-medium border flex items-center gap-2 ${btnBase}`}
+                aria-expanded={tutorialOpen}
+                aria-haspopup="dialog"
+                aria-controls="editor-tutorial-popover"
+              >
+                <IconHelp className="w-4 h-4" />
+                Tutorial
+              </button>
+              {tutorialOpen && tutorialTargetRect && (
+                <div
+                  className="fixed z-[48] pointer-events-none rounded-xl border border-accent/70 shadow-[0_0_0_4px_rgba(0,220,130,0.12),0_10px_30px_rgba(0,0,0,0.18)]"
+                  style={{
+                    left: tutorialTargetRect.left - 4,
+                    top: tutorialTargetRect.top - 4,
+                    width: tutorialTargetRect.width + 8,
+                    height: tutorialTargetRect.height + 8,
+                  }}
+                  aria-hidden
+                />
+              )}
+              {tutorialOpen && tutorialPosition && (
+                <div
+                  id="editor-tutorial-popover"
+                  role="dialog"
+                  aria-modal="false"
+                  aria-labelledby="editor-tutorial-title"
+                  className="fixed z-50 w-[21rem] max-w-[calc(100vw-2rem)] rounded-xl border border-border bg-surface shadow-xl"
+                  style={tutorialPosition}
+                  onKeyDown={(event) => event.stopPropagation()}
+                >
+                  <div className="border-b border-border px-4 py-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-medium uppercase tracking-wider text-text-tertiary">
+                          Step {tutorialStepIndex + 1} of {EDITOR_TUTORIAL_STEPS.length}
+                        </p>
+                        <h2 id="editor-tutorial-title" className="mt-1 text-sm font-semibold text-text-primary">
+                          {tutorialStep.title}
+                        </h2>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setTutorialOpen(false)}
+                        className="-mr-1 -mt-1 rounded-md p-1.5 text-text-tertiary transition-colors hover:bg-card hover:text-text-primary"
+                        aria-label="Close tutorial"
+                      >
+                        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <line x1="18" y1="6" x2="6" y2="18" />
+                          <line x1="6" y1="6" x2="18" y2="18" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="px-4 py-3">
+                    <p className="text-sm leading-relaxed text-text-secondary">
+                      {tutorialStep.body}
+                    </p>
+                    <div className="mt-4 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-1" aria-hidden>
+                        {EDITOR_TUTORIAL_STEPS.map((step, index) => (
+                          <span
+                            key={step.title}
+                            className={`h-1.5 rounded-full transition-all ${
+                              index === tutorialStepIndex ? 'w-5 bg-accent' : 'w-1.5 bg-border'
+                            }`}
+                          />
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setTutorialStepIndex((index) => Math.max(0, index - 1))}
+                          disabled={isFirstTutorialStep}
+                          className="h-8 rounded-md border border-border bg-card px-3 text-xs font-medium text-text-secondary transition-colors hover:bg-background hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-45"
+                        >
+                          Back
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isLastTutorialStep) {
+                              setTutorialOpen(false)
+                              return
+                            }
+                            setTutorialStepIndex((index) => Math.min(EDITOR_TUTORIAL_STEPS.length - 1, index + 1))
+                          }}
+                          className="h-8 rounded-md border border-accent bg-accent px-3 text-xs font-medium text-background transition-colors hover:bg-accent-hover"
+                        >
+                          {isLastTutorialStep ? 'Done' : 'Next'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
             <div className="relative shrink-0" ref={exportMenuRef}>
               <button
                 type="button"
