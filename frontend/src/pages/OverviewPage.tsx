@@ -207,19 +207,19 @@ export default function OverviewPage() {
               followed by local detection, tracking, blur, and MP4 export.
             </p>
           </div>
-          <div className="rounded-2xl border-2 border-dashed border-gray-300 bg-surface flex flex-col items-center justify-center min-h-[320px] sm:min-h-[400px] p-8">
-            <div className="w-14 h-14 rounded-xl bg-card flex items-center justify-center mb-4">
-              <svg className="w-7 h-7 text-text-tertiary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" />
-                <path d="M3 9h18M9 21V9" />
-              </svg>
-            </div>
-            <p className="text-text-secondary font-medium text-sm">Architecture Diagram</p>
-            <p className="text-text-tertiary text-xs mt-1.5 max-w-xs text-center">
-              Drop your architecture diagram image here or replace this placeholder with an
-              &lt;img&gt; tag pointing to your diagram asset.
-            </p>
-          </div>
+          <figure className="rounded-2xl border border-border bg-surface overflow-hidden shadow-sm">
+            <img
+              src="/generated-thumbnails/Redaction_final.png"
+              alt="System architecture: TwelveLabs indexing and analysis, local face detection and Face Lock tracking, and MP4 redaction export"
+              className="w-full h-auto block"
+              loading="lazy"
+              decoding="async"
+            />
+            <figcaption className="sr-only">
+              End-to-end pipeline from upload through Marengo and Pegasus models, privacy metadata,
+              face detection, Face Lock blur, and redacted video export.
+            </figcaption>
+          </figure>
         </div>
       </section>
 
