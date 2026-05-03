@@ -11,7 +11,7 @@ from flask import Blueprint, request, jsonify
 
 from config import DEFAULT_BLUR_STRENGTH, DEFAULT_DETECT_EVERY_N
 from services.detection import ObjectDetectionUnavailable, detect_uploaded_reference_faces
-from services.face_identity import ensure_face_identity
+from services.face_identity import ensure_face_identity, get_face_identity
 from services.pipeline import run_redaction, preview_redaction_tracks, get_job, get_enriched_faces
 from utils.video import EXPORT_HEIGHTS, normalize_export_height
 
@@ -58,6 +58,18 @@ def parse_list_field(data, key, *, split_csv=False):
     if split_csv and isinstance(value, str):
         return [item.strip() for item in value.split(",") if item.strip()]
     return []
+
+
+def normalize_string_list(values):
+    normalized = []
+    seen = set()
+    for item in values or []:
+        value = str(item).strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized
 
 
 def parse_bool_field(data, key, default=False):
@@ -138,7 +150,7 @@ def _decode_face_image_base64(image_b64):
     return img
 
 
-def parse_face_images(data):
+def parse_face_images(data, key="face_images"):
     """Parse and validate the optional ``face_images`` field on a redact request.
 
     Accepts a list of ``{person_id, label, image_base64}`` entries. Each entry's
@@ -158,9 +170,9 @@ def parse_face_images(data):
         face — surfaced back to the client so the editor can show a
         popup explaining what was skipped.
     """
-    raw_value = data.get("face_images")
+    raw_value = data.get(key)
     if raw_value is None:
-        raw_form = request.form.get("face_images", "")
+        raw_form = request.form.get(key, "")
         if raw_form:
             try:
                 raw_value = json.loads(raw_form)
@@ -262,8 +274,71 @@ def build_redaction_request(data):
             {"status": job["status"]},
         )
 
-    person_ids = parse_list_field(data, "person_ids", split_csv=True) or []
-    person_ids = [str(item).strip() for item in person_ids if str(item).strip()]
+    requested_person_ids = normalize_string_list(parse_list_field(data, "person_ids", split_csv=True) or [])
+    person_ids = list(requested_person_ids)
+    redaction_mode = str(
+        data.get("redaction_mode", request.form.get("redaction_mode", "")) or ""
+    ).strip().lower()
+    reverse_face_redaction = parse_bool_field(data, "reverse_face_redaction", default=False)
+    if redaction_mode in {"reverse", "reverse_faces", "reverse_face_redaction"}:
+        reverse_face_redaction = True
+        redaction_mode = "reverse_faces"
+    elif reverse_face_redaction:
+        redaction_mode = "reverse_faces"
+    else:
+        redaction_mode = "standard"
+
+    focus_person_ids = normalize_string_list(
+        parse_list_field(data, "focus_person_ids", split_csv=True)
+        or parse_list_field(data, "preserve_person_ids", split_csv=True)
+        or []
+    )
+    focus_person_id_set = set(focus_person_ids)
+
+    focus_face_targets = []
+    focus_face_failures = []
+    if reverse_face_redaction:
+        enriched = get_enriched_faces(job_id) or {}
+        unique_faces = job.get("unique_faces") or enriched.get("unique_faces", [])
+        for index, face in enumerate(unique_faces):
+            stable_person_id = ensure_face_identity(face, fallback_index=index)
+            if stable_person_id in focus_person_id_set:
+                focus_face_targets.append(face)
+
+        snapped_focus_targets, focus_face_failures = parse_face_images(data, key="focus_face_images")
+        for focus_face in snapped_focus_targets:
+            focus_face_targets.append(focus_face)
+
+        matched_focus_ids = {
+            str(get_face_identity(face) or "").strip()
+            for face in focus_face_targets
+            if str(get_face_identity(face) or "").strip()
+        }
+        unresolved_focus_ids = [
+            pid for pid in focus_person_ids
+            if pid not in matched_focus_ids
+        ]
+        if unresolved_focus_ids and not focus_face_targets:
+            raise RedactionRequestError(
+                "Focused face could not be resolved for Reverse redaction.",
+                400,
+                {
+                    "unresolved_focus_person_ids": unresolved_focus_ids,
+                    "focus_face_failures": focus_face_failures,
+                },
+            )
+
+        # In Reverse mode the blur target is not the saved entity list.
+        # The renderer detects every face live and excludes the focused
+        # identity when one is selected. With no focus selected, every
+        # detected face is blurred, so nothing is revealed by default.
+        person_ids = []
+        logger.info(
+            "Reverse face redaction for job %s: preserving %s with %d focus targets; live all-face detection is enabled",
+            job_id,
+            focus_person_ids or "none",
+            len(focus_face_targets),
+        )
 
     person_label_map_raw = data.get("person_labels")
     if person_label_map_raw is None:
@@ -305,7 +380,7 @@ def build_redaction_request(data):
     # their encodings join the per-frame relock pipeline like any other
     # selected face. Anything that produces no encoding becomes a
     # ``face_blur_failure`` we report back to the client.
-    snapped_face_targets, snapped_face_failures = parse_face_images(data)
+    snapped_face_targets, snapped_face_failures = ([], []) if reverse_face_redaction else parse_face_images(data)
     for snap_face in snapped_face_targets:
         snap_person_id = str(snap_face.get("person_id") or "").strip()
         face_targets.append(snap_face)
@@ -364,6 +439,10 @@ def build_redaction_request(data):
     entity_ids = [str(item).strip() for item in entity_ids if str(item).strip()]
     custom_regions = parse_custom_regions(data)
 
+    if reverse_face_redaction:
+        face_encodings = ["__ALL__"]
+        object_classes = []
+
     has_face_targets = bool(face_targets or face_encodings)
     has_face_custom_regions = any(custom_region_is_face(region) for region in custom_regions)
     if has_face_targets or has_face_custom_regions:
@@ -392,8 +471,10 @@ def build_redaction_request(data):
     return {
         "job_id": job_id,
         "person_ids": person_ids,
+        "requested_person_ids": requested_person_ids,
         "face_encodings": face_encodings,
         "face_targets": face_targets,
+        "focus_face_targets": focus_face_targets,
         "object_classes": object_classes,
         "entity_ids": entity_ids,
         "custom_regions": custom_regions,
@@ -406,6 +487,10 @@ def build_redaction_request(data):
         "person_label_map": person_label_map,
         "unresolved_person_ids": unresolved_person_ids,
         "face_blur_failures": snapped_face_failures,
+        "redaction_mode": redaction_mode,
+        "reverse_face_redaction": reverse_face_redaction,
+        "focus_person_ids": focus_person_ids,
+        "focus_face_failures": focus_face_failures,
     }
 
 
@@ -428,9 +513,14 @@ def serialize_redaction_response(prepared, result):
         "entity_ids_used": result.get("entity_ids_used", []),
         "temporal_ranges_from_entity_search": result.get("temporal_ranges_from_entity_search", 0),
         "person_ids_used": prepared.get("person_ids", []),
+        "requested_person_ids": prepared.get("requested_person_ids", []),
+        "redaction_mode": prepared.get("redaction_mode", "standard"),
+        "reverse_face_redaction": prepared.get("reverse_face_redaction", False),
+        "focus_person_ids": prepared.get("focus_person_ids", []),
+        "focus_face_failures": prepared.get("focus_face_failures", []),
         "unresolved_person_ids": prepared.get("unresolved_person_ids", []),
         "face_blur_failures": prepared.get("face_blur_failures", []),
-        "face_lock_failures": result.get("face_lock_failures", []),
+        "face_lock_failures": [] if prepared.get("reverse_face_redaction", False) else result.get("face_lock_failures", []),
     }
 
 
@@ -460,6 +550,7 @@ def run_redaction_job(redaction_job_id, prepared):
             job_id=prepared["job_id"],
             face_encodings=prepared["face_encodings"],
             face_targets=prepared["face_targets"],
+            focus_face_targets=prepared["focus_face_targets"],
             object_classes=prepared["object_classes"],
             entity_ids=prepared["entity_ids"],
             custom_regions=prepared["custom_regions"],
@@ -469,6 +560,7 @@ def run_redaction_job(redaction_job_id, prepared):
             detect_every_seconds=prepared["detect_every_seconds"],
             use_temporal_optimization=prepared["use_temporal_optimization"],
             output_height=prepared["output_height"],
+            reverse_face_redaction=prepared["reverse_face_redaction"],
             progress_callback=progress_callback,
         )
     except ObjectDetectionUnavailable as error:
@@ -529,6 +621,7 @@ def redact():
             job_id=prepared["job_id"],
             face_encodings=prepared["face_encodings"],
             face_targets=prepared["face_targets"],
+            focus_face_targets=prepared["focus_face_targets"],
             object_classes=prepared["object_classes"],
             entity_ids=prepared["entity_ids"],
             custom_regions=prepared["custom_regions"],
@@ -538,6 +631,7 @@ def redact():
             detect_every_seconds=prepared["detect_every_seconds"],
             use_temporal_optimization=prepared["use_temporal_optimization"],
             output_height=prepared["output_height"],
+            reverse_face_redaction=prepared["reverse_face_redaction"],
         )
     except ObjectDetectionUnavailable as e:
         return jsonify({"error": str(e)}), 503

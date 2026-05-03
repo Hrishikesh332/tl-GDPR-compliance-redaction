@@ -1117,6 +1117,7 @@ def run_redaction(
     job_id,
     face_encodings=None,
     face_targets=None,
+    focus_face_targets=None,
     object_classes=None,
     entity_ids=None,
     custom_regions=None,
@@ -1126,6 +1127,7 @@ def run_redaction(
     detect_every_seconds=None,
     use_temporal_optimization=True,
     output_height=720,
+    reverse_face_redaction=False,
     progress_callback=None,
 ):
     job = get_job(job_id)
@@ -1187,6 +1189,14 @@ def run_redaction(
                     face_encodings = face_encodings or []
                     face_encodings.append(enc)
 
+    focus_face_targets = focus_face_targets or []
+    if reverse_face_redaction:
+        face_encodings = ["__ALL__"]
+        face_targets = []
+        object_classes = []
+        use_temporal_optimization = False
+        detect_every_n = 1
+
     auto_face_mode = (
         isinstance(face_encodings, list)
         and len(face_encodings) == 1
@@ -1210,7 +1220,7 @@ def run_redaction(
     # potentially-drifting per-frame relock.
     face_lock_tracks = {}
     face_lock_failures = []
-    if face_targets:
+    if face_targets and not reverse_face_redaction:
         from services.face_lock_track import build_face_lock_lane
 
         for face in face_targets:
@@ -1263,6 +1273,30 @@ def run_redaction(
                     "fallback": "per_frame",
                 })
 
+    preserve_face_lock_tracks = {}
+    if reverse_face_redaction and focus_face_targets:
+        from services.face_lock_track import build_face_lock_lane
+
+        for face in focus_face_targets:
+            if face.get("is_snapped_entity"):
+                continue
+            person_id = get_face_identity(face)
+            if not person_id:
+                continue
+            try:
+                lane_doc = build_face_lock_lane(job_id, person_id)
+                if lane_doc:
+                    preserve_face_lock_tracks[person_id] = lane_doc
+                    logger.info(
+                        "Reverse focus face-lock lane ready for person %s: %d frames",
+                        person_id, len(lane_doc.get("lane") or []),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Could not build reverse focus face-lock lane for %s; falling back to per-frame focus localization: %s",
+                    person_id, exc,
+                )
+
     result = redact_video(
         input_path=video_path,
         output_path=output_path,
@@ -1278,6 +1312,9 @@ def run_redaction(
         output_height=normalized_output_height,
         progress_callback=progress_callback,
         face_lock_tracks=face_lock_tracks,
+        reverse_face_redaction=reverse_face_redaction,
+        preserve_face_targets=focus_face_targets,
+        preserve_face_lock_tracks=preserve_face_lock_tracks,
     )
 
     download_filename = safe_redacted_mp4_filename(os.path.basename(output_path))

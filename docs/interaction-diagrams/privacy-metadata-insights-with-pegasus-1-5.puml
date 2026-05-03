@@ -1,0 +1,51 @@
+@startuml
+title Privacy Metadata Insights with Pegasus 1.5
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #111111
+  ArrowFontColor #111111
+  LifeLineBorderColor #111111
+  LifeLineBackgroundColor #FFFFFF
+  ParticipantBorderColor #111111
+  ParticipantBackgroundColor #05D887
+  ParticipantFontColor #FFFFFF
+  ParticipantFontStyle bold
+  ActorBorderColor #111111
+  ActorBackgroundColor #05D887
+  ActorFontColor #111111
+}
+skinparam note {
+  BackgroundColor #F4FFF9
+  BorderColor #05D887
+  FontColor #111111
+}
+actor User
+participant "Frontend\nMeta Insights Panel" as FE
+participant "Flask API" as API
+database "Local Cache\nPegasus Assist" as Cache
+participant "TwelveLabs\nVideo Asset / Index" as TLIndex
+participant "TwelveLabs Pegasus 1.5\nPrivacy Assist" as Pegasus
+
+User -> FE: Click "Run Meta Insights"
+FE -> API: POST /api/pegasus/privacy-assist/jobs\nvideo_id, local_job_id, force
+API -> TLIndex: Load TwelveLabs video metadata \nand compute cache identity
+TLIndex --> API: asset id and metadata
+API -> Pegasus: Create analysis task\nmodel_name = pegasus1.5\nanalysis_mode = time_based_metadata
+note right of Pegasus
+Model
+TwelveLabs Pegasus 1.5 reviews the indexed video for
+privacy-risk segments, suggested redaction targets,
+risk level, rationale, and time ranges.
+end note
+Pegasus --> API: task id
+API -> Cache: Save queued job state
+API --> FE: job accepted
+FE -> API: Poll /api/pegasus/privacy-assist/jobs/{job_id}
+API -> Pegasus: Retrieve analysis result
+Pegasus --> API: structured privacy metadata
+API -> API: Normalize, filter, and group privacy events
+API -> Cache: Save privacy artifact
+API --> FE: ready events, recommended actions, summary
+FE --> User: Show privacy hotspots on timeline\nand grouped review actions
+@enduml

@@ -70,15 +70,22 @@ _obj_model_load_failed = False
 _obj_model_error = None
 
 MIN_FACE_SIZE = 30
-SMALL_FACE_MIN_SIZE = 14
+SMALL_FACE_MIN_SIZE = 10
 MIN_FACE_SHARPNESS = 10.0
 SMALL_FACE_SHARPNESS = 3.0
 RES10_CONFIDENCE = 0.35
-FAR_FACE_UPSCALE = 1.75
+# Snap-face frame picker (/api/detect-faces): maximize recall; user picks one crop.
+SNAP_UPLOAD_PICKER_CONFIDENCE = 0.22
+SNAP_UPLOAD_PICKER_MIN_FACE = 22
+SNAP_UPLOAD_PICKER_MIN_SHARPNESS = 3.25
+SNAP_UPLOAD_PICKER_UPSCALE = 1.42
+FAR_FACE_UPSCALE = 2.2
 KNOWN_FACE_ANCHOR_WINDOW_SEC = 1.5
 KNOWN_FACE_ANCHOR_SEARCH_EXPAND = 1.85
 KNOWN_FACE_STALE_ANCHOR_MAX_GAP_SEC = 10.0
 KNOWN_FACE_STALE_ANCHOR_SEARCH_EXPAND = 3.25
+PERSON_HEAD_CONFIDENCE = 0.18
+PERSON_HEAD_MIN_SIDE = 8
 
 FORENSIC_CLASSES = {
     "car", "truck", "bus", "motorcycle", "bicycle",
@@ -539,6 +546,191 @@ def face_bbox_center_distance(box_a, box_b):
     return float(np.hypot(acx - bcx, acy - bcy))
 
 
+def normalize_frame_bbox(bbox, frame_w, frame_h):
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    except (TypeError, ValueError):
+        return None
+    x1 = max(0.0, min(x1, float(frame_w)))
+    y1 = max(0.0, min(y1, float(frame_h)))
+    x2 = max(0.0, min(x2, float(frame_w)))
+    y2 = max(0.0, min(y2, float(frame_h)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))]
+
+
+def infer_head_bbox_from_person_bbox(person_bbox, frame_w, frame_h):
+    """Infer a head region from a YOLO person box.
+
+    This is used only as a fallback when the selected face turns away or
+    becomes too small for a frontal-face detector. It intentionally returns the
+    upper part of the person box, not the whole person, so the blur still feels
+    like a face/head redaction.
+    """
+    person_bbox = normalize_frame_bbox(person_bbox, frame_w, frame_h)
+    if person_bbox is None:
+        return None
+    x1, y1, x2, y2 = [float(v) for v in person_bbox]
+    person_w = max(1.0, x2 - x1)
+    person_h = max(1.0, y2 - y1)
+    if person_w < PERSON_HEAD_MIN_SIDE or person_h < PERSON_HEAD_MIN_SIDE:
+        return None
+
+    # Far-away people need a little more vertical coverage because the
+    # detector's top edge often lands on hair/hood pixels rather than forehead,
+    # but keep this tight: the fallback is for a head/face blur, not a torso.
+    head_h_ratio = 0.30 if person_h < 96 else 0.26 if person_h < 180 else 0.22
+    head_h = max(float(PERSON_HEAD_MIN_SIDE), person_h * head_h_ratio)
+    head_w = max(float(PERSON_HEAD_MIN_SIDE), min(person_w * 0.62, max(person_w * 0.42, head_h * 0.82)))
+    cx = (x1 + x2) / 2.0
+    hy1 = y1 - person_h * 0.01
+    hy2 = y1 + head_h + person_h * 0.02
+    return normalize_frame_bbox(
+        (cx - head_w / 2.0, hy1, cx + head_w / 2.0, hy2),
+        frame_w,
+        frame_h,
+    )
+
+
+def fit_head_bbox_to_preferred(head_bbox, preferred_bbox, frame_w, frame_h):
+    """Keep a person-derived head fallback close to the tracked face size."""
+    head_bbox = normalize_frame_bbox(head_bbox, frame_w, frame_h)
+    preferred_bbox = normalize_face_bbox(preferred_bbox)
+    if head_bbox is None or preferred_bbox is None:
+        return head_bbox
+
+    hx1, hy1, hx2, hy2 = [float(v) for v in head_bbox]
+    px1, py1, px2, py2 = [float(v) for v in preferred_bbox]
+    hw = max(1.0, hx2 - hx1)
+    hh = max(1.0, hy2 - hy1)
+    pw = max(1.0, px2 - px1)
+    ph = max(1.0, py2 - py1)
+    pcx = (px1 + px2) / 2.0
+    pcy = (py1 + py2) / 2.0
+    hcx = (hx1 + hx2) / 2.0
+    hcy = (hy1 + hy2) / 2.0
+    pref_diag = max(1.0, float(np.hypot(pw, ph)))
+    center_shift = float(np.hypot(hcx - pcx, hcy - pcy)) / pref_diag
+
+    # If the person-box head is close to the tracker, mostly trust the
+    # tracker center; otherwise allow a stronger recenter but keep the size
+    # bounded by the tracked face/head dimensions.
+    preferred_bias = 0.72 if center_shift <= 0.8 else 0.56
+    cx = pcx * preferred_bias + hcx * (1.0 - preferred_bias)
+    cy = pcy * preferred_bias + hcy * (1.0 - preferred_bias)
+    target_w = min(max(pw * 1.10, float(PERSON_HEAD_MIN_SIDE)), max(pw * 1.42, float(PERSON_HEAD_MIN_SIDE)), hw)
+    target_h = min(max(ph * 1.16, float(PERSON_HEAD_MIN_SIDE)), max(ph * 1.52, float(PERSON_HEAD_MIN_SIDE)), hh)
+    return normalize_frame_bbox(
+        (cx - target_w / 2.0, cy - target_h / 2.0, cx + target_w / 2.0, cy + target_h / 2.0),
+        frame_w,
+        frame_h,
+    )
+
+
+def localize_head_in_search_region(
+    frame_bgr,
+    search_bbox,
+    preferred_bbox=None,
+    conf_threshold=PERSON_HEAD_CONFIDENCE,
+    strict=True,
+):
+    """Find a likely head near ``preferred_bbox`` using YOLO person boxes.
+
+    Face detectors cannot see the back of a head. This helper keeps the
+    redaction attached to the selected face's expected location by searching
+    for nearby person boxes and converting the best person's upper region into
+    a head bbox. It returns ``None`` when geometry is ambiguous.
+    """
+    if frame_bgr is None or search_bbox is None:
+        return None
+
+    frame_h, frame_w = frame_bgr.shape[:2]
+    search = normalize_frame_bbox(search_bbox, frame_w, frame_h)
+    if search is None:
+        return None
+    preferred = normalize_frame_bbox(preferred_bbox, frame_w, frame_h) or search
+    preferred_area = max(1.0, face_bbox_area(preferred))
+    preferred_diag = max(
+        1.0,
+        float(np.hypot(preferred[2] - preferred[0], preferred[3] - preferred[1])),
+    )
+    search_diag = max(
+        1.0,
+        float(np.hypot(search[2] - search[0], search[3] - search[1])),
+    )
+
+    try:
+        model = get_obj_model()
+    except ObjectDetectionUnavailable:
+        return None
+
+    try:
+        results = model.predict(frame_bgr, conf=conf_threshold, verbose=False, imgsz=768)
+    except Exception:
+        return None
+
+    candidates = []
+    for result in results:
+        if result.boxes is None:
+            continue
+        for box in result.boxes:
+            cls_id = int(box.cls[0])
+            if model.names[cls_id] != "person":
+                continue
+            person_bbox = normalize_frame_bbox(box.xyxy[0].tolist(), frame_w, frame_h)
+            head_bbox = infer_head_bbox_from_person_bbox(person_bbox, frame_w, frame_h)
+            if preferred_bbox is not None:
+                head_bbox = fit_head_bbox_to_preferred(head_bbox, preferred, frame_w, frame_h)
+            if head_bbox is None:
+                continue
+
+            head_search_iou = iou(head_bbox, search)
+            person_search_iou = iou(person_bbox, search) if person_bbox is not None else 0.0
+            search_center_ratio = face_bbox_center_distance(head_bbox, search) / search_diag
+            preferred_iou = iou(head_bbox, preferred)
+            preferred_center_ratio = face_bbox_center_distance(head_bbox, preferred) / preferred_diag
+            area_penalty = abs(math.log(max(1.0, face_bbox_area(head_bbox)) / preferred_area))
+
+            max_search_center = 0.78 if strict else 1.05
+            max_preferred_center = 0.72 if strict else 1.0
+            if head_search_iou < 0.02 and person_search_iou < 0.02 and search_center_ratio > max_search_center:
+                continue
+            if preferred_iou < 0.03 and preferred_center_ratio > max_preferred_center:
+                continue
+            if strict and area_penalty > 1.25 and preferred_iou < 0.08:
+                continue
+
+            det_score = float(box.conf[0]) if box.conf is not None else conf_threshold
+            geometry_score = (
+                det_score * 1.4
+                + preferred_iou * 4.2
+                + head_search_iou * 2.0
+                + person_search_iou * 0.6
+                - preferred_center_ratio * 1.55
+                - search_center_ratio * 0.55
+                - area_penalty * 0.28
+            )
+            candidates.append({
+                "bbox": head_bbox,
+                "person_bbox": person_bbox,
+                "det_score": round(det_score, 4),
+                "geometry_score": geometry_score,
+                "source": "person_head",
+            })
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item["geometry_score"], reverse=True)
+    best = candidates[0]
+    if strict and len(candidates) > 1 and (best["geometry_score"] - candidates[1]["geometry_score"]) < 0.45:
+        return None
+    return best
+
+
 def find_known_face_anchor_bbox(known_face, time_sec, max_gap_sec=KNOWN_FACE_ANCHOR_WINDOW_SEC):
     if time_sec is None:
         return None, None
@@ -651,8 +843,8 @@ def localize_known_face_in_search_region(
         crop,
         with_encodings=known_vec is not None,
         confidence_threshold=0.16,
-        min_face_size=12,
-        min_sharpness=SMALL_FACE_SHARPNESS,
+        min_face_size=SMALL_FACE_MIN_SIZE,
+        min_sharpness=2.0,
         upscale=FAR_FACE_UPSCALE,
     )
 
@@ -980,10 +1172,22 @@ def detect_faces(
     return results
 
 
-def detect_uploaded_reference_faces(img_bgr, with_encodings=False, confidence_threshold=RES10_CONFIDENCE):
+def detect_uploaded_reference_faces(
+    img_bgr,
+    with_encodings=False,
+    confidence_threshold=RES10_CONFIDENCE,
+    min_face_size=MIN_FACE_SIZE,
+    min_sharpness=MIN_FACE_SHARPNESS,
+    detect_upscale=1.0,
+):
 
     try:
-        res10_boxes = detect_faces_res10(img_bgr, confidence_threshold=confidence_threshold)
+        res10_boxes = detect_faces_res10(
+            img_bgr,
+            confidence_threshold=confidence_threshold,
+            min_face_size=min_face_size,
+            upscale=detect_upscale,
+        )
     except Exception as error:
         logger.warning("Uploaded-face ResNet-10 detection failed; falling back to general detector: %s", error)
         fallback_results = detect_faces(img_bgr, with_encodings=with_encodings)
@@ -991,18 +1195,31 @@ def detect_uploaded_reference_faces(img_bgr, with_encodings=False, confidence_th
             result.setdefault("source", "fallback")
         return fallback_results
 
+    # Always correlate with InsightFace so we merge ResNet misses (even when embeddings
+    # are not needed for the caller).
     embeddings = [None] * len(res10_boxes)
     unmatched_insight = []
-    if with_encodings:
-        if res10_boxes:
-            embeddings, unmatched_insight = get_embeddings_for_boxes(img_bgr, res10_boxes)
-        else:
-            _, unmatched_insight = get_embeddings_for_boxes(img_bgr, [])
+    if res10_boxes:
+        embeddings, unmatched_insight = get_embeddings_for_boxes(
+            img_bgr,
+            res10_boxes,
+            min_face_size=min_face_size,
+            upscale=detect_upscale,
+        )
+    else:
+        _, unmatched_insight = get_embeddings_for_boxes(
+            img_bgr,
+            [],
+            min_face_size=min_face_size,
+            upscale=detect_upscale,
+        )
+    if not with_encodings:
+        embeddings = [None] * len(res10_boxes)
 
     results = []
     for index, (x1, y1, x2, y2, confidence) in enumerate(res10_boxes):
         sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
-        if sharpness < MIN_FACE_SHARPNESS:
+        if sharpness < min_sharpness:
             continue
 
         entry = {
@@ -1018,7 +1235,7 @@ def detect_uploaded_reference_faces(img_bgr, with_encodings=False, confidence_th
     for extra in unmatched_insight:
         x1, y1, x2, y2 = extra["bbox"]
         sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
-        if sharpness < MIN_FACE_SHARPNESS:
+        if sharpness < min_sharpness:
             continue
 
         entry = {

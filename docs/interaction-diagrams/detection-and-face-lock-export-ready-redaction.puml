@@ -1,0 +1,98 @@
+@startuml
+title Detection and Face Lock for Export Ready Redaction
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #111111
+  ArrowFontColor #111111
+  LifeLineBorderColor #111111
+  LifeLineBackgroundColor #FFFFFF
+  ParticipantBorderColor #111111
+  ParticipantBackgroundColor #05D887
+  ParticipantFontColor #FFFFFF
+  ParticipantFontStyle bold
+  ActorBorderColor #111111
+  ActorBackgroundColor #05D887
+  ActorFontColor #111111
+}
+skinparam note {
+  BackgroundColor #F4FFF9
+  BorderColor #05D887
+  FontColor #111111
+}
+actor User
+participant "Frontend\nVideo Editor" as FE
+participant "Flask API\nPipeline" as API
+database "Local Storage\noutput and snaps" as Store
+participant "TwelveLabs\nIndexed Video" as TLIndex
+participant "TwelveLabs\nAnalysis and Entity Search" as TLAnalysis
+participant "OpenCV\nVideo and Tracking" as OpenCV
+participant "OpenCV ResNet10\nFace Detector" as ResNet
+participant "InsightFace\nIdentity Matching" as InsightFace
+participant "Ultralytics YOLO\nObject Detection" as YOLO
+participant "FFmpeg\nMP4 Encoding" as FFmpeg
+User -> FE: Open indexed video in editor
+FE -> API: GET /api/jobs/by-video/{video_id}?ensure=true
+API -> Store: Look for existing local processing job
+Store --> API: existing job or no match
+API -> OpenCV: Read video metadata
+OpenCV --> API: duration, fps, width, height
+API -> TLAnalysis: Describe people, objects, and scenes\nwhen video id is available
+note right of TLAnalysis
+Model
+TwelveLabs analyze provides people, object,
+and scene context. The pipeline uses these
+timestamps to choose better keyframes when available.
+end note
+TLAnalysis --> API: people, object, and scene context
+API -> OpenCV: Extract keyframes from analysis timestamps\nor fallback time interval
+OpenCV --> API: keyframes
+API -> ResNet: Detect generic face boxes on keyframes
+API -> InsightFace: Create face embeddings and identity evidence
+API -> YOLO: Detect supported object classes
+note right of YOLO
+Model
+ResNet10 finds face boxes.
+InsightFace supports identity matching.
+YOLO finds object boxes for object redaction.
+end note
+ResNet --> API: face boxes
+InsightFace --> API: face embeddings and appearances
+YOLO --> API: object boxes
+API -> API: Cluster detections into unique people and objects
+API -> Store: Save detection metadata and face/object snapshots
+Store --> API: local job ready
+API --> FE: job id, ready status, video metadata
+FE -> API: GET /api/faces/{job_id}\nGET /api/objects/{job_id}
+API -> Store: Load saved detections and snapshots
+Store --> API: unique faces, objects, timestamps
+API --> FE: faces, objects, scene summary
+FE --> User: Show detections and timeline context
+User -> FE: Select person for export-ready redaction
+FE -> API: GET /api/face-lock-track/{job_id}/{person_id}?include_lane=true
+API -> Store: Check saved face-lock lane
+Store --> API: lane missing or stale
+API --> FE: status missing
+FE -> API: POST /api/face-lock-track/build\njob_id, person_id
+API -> Store: Load source video and selected person's saved appearances
+API -> TLAnalysis: Optional entity time-range search\nfor this selected person
+TLAnalysis --> API: target appearance ranges
+API -> OpenCV: Build frame-by-frame face-lock lane\nusing trackers and motion cues
+API -> InsightFace: Verify or relock selected identity\ninside search region
+note right of InsightFace
+Face-lock starts only after detection metadata exists.
+It uses the selected person's saved appearances as anchors,
+then OpenCV tracking fills the frames between anchors.
+[OpenCV CSRT tracking + Lucas-Kanade optical flow + 
+global motion compensation + bbox smoothing + velocity prediction 
+and search-region expansion across gaps ]
+end note
+OpenCV --> API: tracked boxes by frame
+InsightFace --> API: identity-confirmed relock boxes
+API -> Store: Save face-lock lane
+Store --> API: lane ready
+FE -> API: Poll /api/face-lock-track/{job_id}/{person_id}
+API --> FE: ready lane
+FE --> User: Show locked status and preview overlay
+
+@enduml

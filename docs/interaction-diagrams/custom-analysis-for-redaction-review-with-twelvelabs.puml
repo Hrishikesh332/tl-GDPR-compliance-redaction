@@ -1,0 +1,42 @@
+@startuml
+title Custom Analysis for Redaction Review with TwelveLabs
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #111111
+  ArrowFontColor #111111
+  LifeLineBorderColor #111111
+  LifeLineBackgroundColor #FFFFFF
+  ParticipantBorderColor #111111
+  ParticipantBackgroundColor #05D887
+  ParticipantFontColor #FFFFFF
+  ParticipantFontStyle bold
+  ActorBorderColor #111111
+  ActorBackgroundColor #05D887
+  ActorFontColor #111111
+}
+skinparam note {
+  BackgroundColor #F4FFF9
+  BorderColor #05D887
+  FontColor #111111
+}
+actor User
+participant "Frontend\nAnalyze Panel" as FE
+participant "Flask API\nAnalysis Route" as API
+participant "TwelveLabs Analyze API\nVideo Understanding" as Analyze
+User -> FE: Open video in editor
+FE --> User: Show timeline, search lanes,\nand detected targets
+User -> FE: Enter custom redaction question\nor select a suggested review prompt
+FE -> API: POST /api/analyze-custom\nvideo_id, prompt
+API -> API: Validate request and add\nstructured response instruction
+API -> Analyze: client.analyze(video_id, enhanced_prompt,\ntemperature=0.2)
+note left of Analyze
+Model
+TwelveLabs Analyze answers the user's
+custom redaction review query, such as
+sensitive scenes, courtroom discussion and any open ended question
+end note
+Analyze --> API: analysis result
+API --> FE: custom analysis answer
+FE --> User: Display redaction relevant response
+@enduml

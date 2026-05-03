@@ -1,0 +1,65 @@
+@startuml
+title Entity Management in TwelveLabs
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequence {
+  ArrowColor #111111
+  ArrowFontColor #111111
+  LifeLineBorderColor #111111
+  LifeLineBackgroundColor #FFFFFF
+  ParticipantBorderColor #111111
+  ParticipantBackgroundColor #05D887
+  ParticipantFontColor #FFFFFF
+  ParticipantFontStyle bold
+  ActorBorderColor #111111
+  ActorBackgroundColor #05D887
+  ActorFontColor #111111
+}
+skinparam note {
+  BackgroundColor #F4FFF9
+  BorderColor #05D887
+  FontColor #111111
+}
+actor User
+participant "Frontend" as FE
+participant "Flask API" as API
+participant "OpenCV / InsightFace\nFace Detection" as FaceCV
+participant "TwelveLabs\nAssets API" as Assets
+participant "TwelveLabs\nEntity API" as EntityAPI
+database "Entity Collection" as EntityStore
+User -> FE: Click "Add Entity"
+FE -> API: GET /api/entities
+API -> EntityAPI: List entities in collection
+EntityAPI --> API: existing entities
+API --> FE: entities list
+FE --> User: Show AddEntityModal
+User -> FE: Upload reference photo
+FE -> API: POST /api/detect-faces\nimage file
+API -> FaceCV: Detect faces and prepare preview crops
+note right of FaceCV
+ModeL
+OpenCV ResNet10 SSD detects face boxes.
+end note
+FaceCV --> API: face boxes and preview crops
+API --> FE: detected faces
+FE --> User: Show detected faces for selection
+User -> FE: Select face crop and enter name
+User -> FE: Click "Register"
+FE -> API: POST /api/entities/upload-face\nimage, name, description, preview
+API -> Assets: Upload selected face image
+Assets --> API: asset id
+API -> EntityAPI: Ensure entity collection exists
+EntityAPI --> API: collection id
+API -> EntityAPI: Create entity with uploaded face asset
+note right of EntityAPI
+Model
+TwelveLabs stores the reference face as an entity.
+That entity can later be used in entity search
+on the indexed videos.
+end note
+EntityAPI -> EntityStore: Store entity, asset link, and metadata
+EntityStore --> EntityAPI: entity available
+EntityAPI --> API: entity id, name, status
+API --> FE: created entity
+FE --> User: Entity appears in entity list
+@enduml

@@ -640,7 +640,7 @@ const EDITOR_TUTORIAL_STEPS: Array<{
   },
   {
     title: 'Detect and blur targets',
-    body: 'In Live Blur, run Detect to load saved faces and objects. This is where anonymize mode is managed, use Blur or Unblur beside each item to decide what stays redacted.',
+    body: 'In Live Blur, run Detect to load saved faces. This is where anonymize mode is managed, use Blur or Unblur beside each person to decide what stays redacted.',
     target: 'tracker',
     placement: 'right',
   },
@@ -670,7 +670,7 @@ const EDITOR_TUTORIAL_STEPS: Array<{
   },
   {
     title: 'Export safely',
-    body: 'When the preview looks right, open Export, choose the quality, and download the redacted MP4 with the selected faces, objects, and regions applied.',
+    body: 'When the preview looks right, open Export, choose the quality, and download the redacted MP4 with the selected faces and regions applied.',
     target: 'export',
     placement: 'bottom',
   },
@@ -682,7 +682,7 @@ const EDITOR_TUTORIAL_POPOVER_HEIGHT = 214
 const LIVE_DETECTION_POLL_MS = 180
 const LIVE_DETECTION_HOLD_MS = 1400
 const LIVE_IDENTIFIED_FACE_HOLD_MS = 1800
-const LIVE_FACE_PADDING = 0.06
+const LIVE_FACE_PADDING = 0.01
 const LIVE_OBJECT_PADDING = 0.08
 const LIVE_DETECTION_SMOOTHING = 0.34
 const LIVE_DETECTION_VELOCITY_BLEND = 0.58
@@ -792,14 +792,6 @@ type FaceDetectionApiRecord = {
   is_official?: boolean
   priority_rank?: number
   appearance_count?: number
-}
-
-type ObjectDetectionApiRecord = {
-  object_id?: string
-  identification?: string
-  snap_base64?: string
-  appearance_count?: number
-  appearances?: DetectionAppearance[]
 }
 
 type FaceTimelineSegment = {
@@ -990,9 +982,9 @@ function getLiveRedactionRenderBox(detection: LiveRedactionDetection) {
   if (detection.kind === 'face') {
     // The backend already pads face boxes for redaction coverage, so keep the
     // preview expansion subtle here to avoid making motion feel offset.
-    const expandX = detection.width * 0.012
-    const expandTop = detection.height * 0.03
-    const expandBottom = detection.height * 0.02
+    const expandX = detection.width * 0.003
+    const expandTop = detection.height * 0.008
+    const expandBottom = detection.height * 0.006
     renderX = Math.max(0, detection.x - expandX)
     renderY = Math.max(0, detection.y - expandTop)
     renderWidth = Math.min(1 - renderX, detection.width + expandX * 2)
@@ -1245,11 +1237,9 @@ function isAnonymizeTarget(item: DetectionItem): boolean {
 
 function buildDetectionItemsFromApi(
   uniqueFaces: FaceDetectionApiRecord[],
-  uniqueObjects: ObjectDetectionApiRecord[],
 ): DetectionItem[] {
   const items: DetectionItem[] = []
   const faceColor = '#F59E0B'
-  const objectColors = ['#3B82F6', '#EF4444', '#10B981', '#8B5CF6']
 
   uniqueFaces.forEach((face, index) => {
     const personId = (face.person_id || `person_${index}`).toString().trim()
@@ -1271,25 +1261,6 @@ function buildDetectionItemsFromApi(
       shouldAnonymize,
       isOfficial,
       priorityRank: typeof face.priority_rank === 'number' ? face.priority_rank : undefined,
-    })
-  })
-
-  const seenClasses = new Set<string>()
-  uniqueObjects.forEach((objectItem, index) => {
-    const rawObjectClass = (objectItem.identification || objectItem.object_id || `Object ${index + 1}`).toString().trim()
-    const objectClass = normalizeObjectClass(rawObjectClass)
-    if (!objectClass || seenClasses.has(objectClass)) return
-    seenClasses.add(objectClass)
-    items.push({
-      id: `object-${objectClass}`,
-      kind: 'object',
-      label: rawObjectClass.slice(0, 60),
-      tags: [],
-      color: objectColors[index % objectColors.length],
-      snapBase64: objectItem.snap_base64,
-      objectClass,
-      appearances: Array.isArray(objectItem.appearances) ? objectItem.appearances : [],
-      appearanceCount: typeof objectItem.appearance_count === 'number' ? objectItem.appearance_count : 0,
     })
   })
 
@@ -1643,8 +1614,6 @@ function filterLiveDetectionsToSelections(
 }
 
 const DUMMY_DETECTIONS: DetectionItem[] = [
-  { id: 'object-screen', kind: 'object', label: 'Screen', tags: ['screen', 'display'], color: '#3B82F6', objectClass: 'screen' },
-  { id: 'object-plate', kind: 'object', label: 'License Plate', tags: ['license plate', 'object'], color: '#EF4444', objectClass: 'license plate' },
   { id: 'face-person-1', kind: 'face', label: 'Person 1', tags: ['person', 'face'], color: '#F59E0B', personId: 'person_1' },
   { id: 'face-person-2', kind: 'face', label: 'Person 2', tags: ['person', 'face'], color: '#F59E0B', personId: 'person_2' },
 ]
@@ -2272,6 +2241,8 @@ export default function VideoEditorPage() {
   const [hasRunDetection, setHasRunDetection] = useState(false)
   const [detectionFilter, setDetectionFilter] = useState('')
   const [showAnonymizeOnly, setShowAnonymizeOnly] = useState(false)
+  const [reverseFaceRedactionEnabled, setReverseFaceRedactionEnabled] = useState(false)
+  const [reverseFocusPersonId, setReverseFocusPersonId] = useState<string | null>(null)
   const [apiDetections, setApiDetections] = useState<DetectionItem[]>([])
   const [personLaneIds, setPersonLaneIds] = useState<string[]>([])
   const [faceLaneEntityRangesByPersonId, setFaceLaneEntityRangesByPersonId] = useState<Record<string, DetectionTimeRange[]>>({})
@@ -2391,6 +2362,7 @@ export default function VideoEditorPage() {
   const [previewVideoReady, setPreviewVideoReady] = useState(false)
   const [demoBannerDismissed, setDemoBannerDismissed] = useState(false)
   const isDemoMode = videoId === DEMO_EDITOR_VIDEO_ID && !demoBannerDismissed
+  const [reverseRedactionBannerDismissed, setReverseRedactionBannerDismissed] = useState(false)
   const [videoViewport, setVideoViewport] = useState<VideoViewport>({ left: 0, top: 0, width: 0, height: 0 })
   const [playerAspectRatio, setPlayerAspectRatio] = useState<number>(16 / 9)
   const [videoStageSize, setVideoStageSize] = useState({ width: 0, height: 0 })
@@ -2461,17 +2433,33 @@ export default function VideoEditorPage() {
   const effectiveStreamUrl = streamUrl && isHlsUrl(streamUrl) ? toHlsProxyUrl(streamUrl) : streamUrl
   const useHls = effectiveStreamUrl && isHlsUrl(effectiveStreamUrl) && Hls.isSupported()
   const selectedDetectionCount = useMemo(
-    () => apiDetections.filter((item) => !excludedFromRedactionIds.includes(item.id)).length,
-    [apiDetections, excludedFromRedactionIds]
+    () => {
+      if (reverseFaceRedactionEnabled) {
+        return apiDetections.filter((item) => (
+          item.kind === 'face' &&
+          item.personId &&
+          (!reverseFocusPersonId || item.personId !== reverseFocusPersonId)
+        )).length
+      }
+      return apiDetections.filter((item) => !excludedFromRedactionIds.includes(item.id)).length
+    },
+    [apiDetections, excludedFromRedactionIds, reverseFaceRedactionEnabled, reverseFocusPersonId]
   )
   const liveRedactionActive = liveRedactionEnabled && !!streamUrl
   const selectionPreviewActive = !liveRedactionEnabled && !!effectiveStreamUrl && hasRunDetection && selectedDetectionCount > 0
-  const liveRedactionPreviewActive = liveRedactionActive || selectionPreviewActive
+  const liveRedactionPreviewActive =
+    !reverseFaceRedactionEnabled && (liveRedactionActive || selectionPreviewActive)
   const liveRedactionOverlayVisible = liveRedactionPreviewActive
   const markLiveRedactionSeekPending = useCallback(() => {
     if (!liveRedactionPreviewActive) return
     setLiveRedactionSeekPending(true)
   }, [liveRedactionPreviewActive])
+
+  useEffect(() => {
+    if (!reverseFaceRedactionEnabled) {
+      setReverseRedactionBannerDismissed(false)
+    }
+  }, [reverseFaceRedactionEnabled])
 
   useEffect(() => {
     detectionLoadRequestIdRef.current += 1
@@ -2480,6 +2468,8 @@ export default function VideoEditorPage() {
     setDetectionJobId(null)
     setHasRunDetection(false)
     setApiDetections([])
+    setReverseFaceRedactionEnabled(false)
+    setReverseFocusPersonId(null)
     setPersonLaneIds([])
     setFaceLaneEntityRangesByPersonId({})
     setExcludedFromRedactionIds([])
@@ -3196,24 +3186,16 @@ export default function VideoEditorPage() {
     const waitForReadyMs = interactive ? 30000 : 0
 
     while (true) {
-      const [facesRes, objectsRes] = await Promise.all([
-        fetch(`${API_BASE}/api/faces/${encodeURIComponent(jobId)}`),
-        fetch(`${API_BASE}/api/objects/${encodeURIComponent(jobId)}`),
-      ])
+      const facesRes = await fetch(`${API_BASE}/api/faces/${encodeURIComponent(jobId)}`)
       const facesJson = await facesRes.json().catch(() => ({})) as {
         unique_faces?: FaceDetectionApiRecord[]
-        error?: string
-        message?: string
-      }
-      const objectsJson = await objectsRes.json().catch(() => ({})) as {
-        unique_objects?: ObjectDetectionApiRecord[]
         error?: string
         message?: string
       }
 
       if (detectionLoadRequestIdRef.current !== requestId) return false
 
-      if (facesRes.status === 202 || objectsRes.status === 202) {
+      if (facesRes.status === 202) {
         const shouldKeepPolling = waitForReadyMs > 0 && Date.now() - startedAt < waitForReadyMs
         if (shouldKeepPolling) {
           await delay(1200)
@@ -3224,24 +3206,22 @@ export default function VideoEditorPage() {
         }
         return false
       }
-      if (facesRes.status === 404 || objectsRes.status === 404) {
+      if (facesRes.status === 404) {
         if (interactive) {
           clearDetectionResults('Detection data is not ready for this video yet. Run processing for this video and try again.', requestId)
         }
         return false
       }
-      if (!facesRes.ok || !objectsRes.ok) {
+      if (!facesRes.ok) {
         if (interactive) {
           const faceError = facesJson.error || facesJson.message
-          const objectError = objectsJson.error || objectsJson.message
-          clearDetectionResults(faceError || objectError || 'Detection request failed.', requestId)
+          clearDetectionResults(faceError || 'Detection request failed.', requestId)
         }
         return false
       }
 
       const items = buildDetectionItemsFromApi(
         Array.isArray(facesJson.unique_faces) ? facesJson.unique_faces : [],
-        Array.isArray(objectsJson.unique_objects) ? objectsJson.unique_objects : [],
       )
       if (detectionLoadRequestIdRef.current !== requestId) return false
 
@@ -3251,7 +3231,7 @@ export default function VideoEditorPage() {
       setExcludedFromRedactionIds(items.map((item) => item.id))
       setHasRunDetection(true)
       if (interactive && items.length === 0) {
-        setDetectionError('No faces or objects found for this video.')
+        setDetectionError('No faces found for this video.')
       } else {
         setDetectionError(null)
       }
@@ -3500,12 +3480,27 @@ export default function VideoEditorPage() {
     }
   }, [detectionJobId, pegasusJobId, pegasusResult, pegasusStatus])
 
+  const reverseBlurTargetPersonIds = useMemo(
+    () =>
+      apiDetections
+        .filter((item) => {
+          if (item.kind !== 'face' || !item.personId) return false
+          if (!reverseFaceRedactionEnabled) return false
+          return !reverseFocusPersonId || item.personId !== reverseFocusPersonId
+        })
+        .map((item) => item.personId as string),
+    [apiDetections, reverseFaceRedactionEnabled, reverseFocusPersonId]
+  )
   const selectedFacePersonIds = useMemo(
     () =>
       apiDetections
-        .filter((item) => item.kind === 'face' && item.personId && !excludedFromRedactionIds.includes(item.id))
+        .filter((item) => {
+          if (item.kind !== 'face' || !item.personId) return false
+          if (reverseFaceRedactionEnabled) return false
+          return !excludedFromRedactionIds.includes(item.id)
+        })
         .map((item) => item.personId as string),
-    [apiDetections, excludedFromRedactionIds]
+    [apiDetections, excludedFromRedactionIds, reverseFaceRedactionEnabled, reverseFocusPersonId]
   )
   const selectedObjectClasses = useMemo(
     () =>
@@ -3524,11 +3519,21 @@ export default function VideoEditorPage() {
     return map
   }, [apiDetections])
 
+  useEffect(() => {
+    if (!reverseFaceRedactionEnabled) return
+    faceLockBuildAttemptsRef.current = {}
+    announcedFaceLockFailuresRef.current = {}
+    setFaceLockLanesByPersonId({})
+    setFaceLockBuildByPersonId({})
+    setFaceLockBuildAlert(null)
+  }, [reverseFaceRedactionEnabled])
+
   // Surface the first face-lock build failure as a one-shot toast so
   // the user knows the live preview / export will fall back to
   // per-frame relock for that face. We deduplicate per personId so a
   // single failure doesn't keep re-announcing as React re-renders.
   useEffect(() => {
+    if (reverseFaceRedactionEnabled) return
     for (const [personId, state] of Object.entries(faceLockBuildByPersonId)) {
       if (!state || state.status !== 'failed') continue
       if (announcedFaceLockFailuresRef.current[personId]) continue
@@ -3542,7 +3547,7 @@ export default function VideoEditorPage() {
       })
       break
     }
-  }, [faceDetectionItemsByPersonId, faceLockBuildByPersonId])
+  }, [faceDetectionItemsByPersonId, faceLockBuildByPersonId, reverseFaceRedactionEnabled])
 
   // Locked persons are those whose precomputed face-lock lane is fully
   // loaded. The blur for these persons is drawn from the lane (which was
@@ -3551,8 +3556,11 @@ export default function VideoEditorPage() {
   // InsightFace re-localization. This guarantees the blur stays glued
   // to the face across camera shakes, pans, zooms, and brief misses.
   const lockedFacePersonIds = useMemo(
-    () => selectedFacePersonIds.filter((pid) => !!faceLockLanesByPersonId[pid]),
-    [faceLockLanesByPersonId, selectedFacePersonIds],
+    () => {
+      if (reverseFaceRedactionEnabled) return []
+      return selectedFacePersonIds.filter((pid) => !!faceLockLanesByPersonId[pid])
+    },
+    [faceLockLanesByPersonId, reverseFaceRedactionEnabled, selectedFacePersonIds],
   )
   const lockedFacePersonIdsSet = useMemo(() => new Set(lockedFacePersonIds), [lockedFacePersonIds])
 
@@ -3627,6 +3635,7 @@ export default function VideoEditorPage() {
   // lane-derived bbox at the current playback time and skips the
   // network roundtrip per frame.
   useEffect(() => {
+    if (reverseFaceRedactionEnabled) return
     if (!detectionJobId || selectedFacePersonIds.length === 0) return
     let cancelled = false
 
@@ -3747,7 +3756,7 @@ export default function VideoEditorPage() {
     return () => {
       cancelled = true
     }
-  }, [detectionJobId, selectedFacePersonIds])
+  }, [detectionJobId, reverseFaceRedactionEnabled, selectedFacePersonIds])
 
   // Drop cached lanes / build state for persons that are no longer
   // selected so the next selection of the same person retries the build.
@@ -4016,17 +4025,24 @@ export default function VideoEditorPage() {
     const requestId = ++liveRedactionRequestIdRef.current
 
     try {
+      const liveRequestPersonIds = hasRunDetection && !reverseFaceRedactionEnabled
+        ? selectedFacePersonIds.filter((pid) => !lockedFacePersonIdsSet.has(pid))
+        : undefined
+      const liveIncludeFaces = reverseFaceRedactionEnabled
+        ? true
+        : !hasRunDetection || (liveRequestPersonIds?.length ?? 0) > 0
+      const liveIncludeObjects = reverseFaceRedactionEnabled
+        ? false
+        : !hasRunDetection || selectedObjectClasses.length > 0
+      if (!liveIncludeFaces && !liveIncludeObjects) {
+        setLiveRedactionDetections([])
+        setLiveRedactionSeekPending(false)
+        setLiveRedactionError(null)
+        liveRedactionLastResolvedTimeRef.current = requestedTime
+        return
+      }
+
       const jobId = await resolveRedactionJobId()
-      // [FACE-LOCK LANE BLUR — DISABLED]
-      // When re-enabled, exclude lane-locked persons from this request
-      // so the backend only spends time on objects and not-yet-locked
-      // faces. For now, route every selected person through the
-      // /api/live-redaction/detect path:
-      // const liveRequestPersonIds = hasRunDetection
-      //   ? selectedFacePersonIds.filter((pid) => !lockedFacePersonIdsSet.has(pid))
-      //   : undefined
-      const liveRequestPersonIds = hasRunDetection ? selectedFacePersonIds : undefined
-      const liveIncludeFaces = !hasRunDetection || (liveRequestPersonIds?.length ?? 0) > 0
       const res = await fetch(`${API_BASE}/api/live-redaction/detect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4035,9 +4051,11 @@ export default function VideoEditorPage() {
           time_sec: requestedTime,
           reset_tracking: !!options?.resetTracking,
           include_faces: liveIncludeFaces,
-          include_objects: !hasRunDetection || selectedObjectClasses.length > 0,
+          include_objects: liveIncludeObjects,
           person_ids: liveRequestPersonIds,
-          object_classes: hasRunDetection ? selectedObjectClasses : undefined,
+          reverse_face_redaction: reverseFaceRedactionEnabled,
+          focus_person_ids: reverseFaceRedactionEnabled && reverseFocusPersonId ? [reverseFocusPersonId] : undefined,
+          object_classes: hasRunDetection && !reverseFaceRedactionEnabled ? selectedObjectClasses : undefined,
           forensic_only: true,
           object_confidence: 0.25,
         }),
@@ -4058,14 +4076,16 @@ export default function VideoEditorPage() {
       }
 
       const resolvedTime = typeof data.time_sec === 'number' ? data.time_sec : requestedTime
-      const filteredDetections = filterLiveDetectionsToSelections(
-        rawDetections,
-        {
-          hasRunDetection,
-          selectedFacePersonIds,
-          selectedObjectClasses,
-        },
-      )
+      const filteredDetections = reverseFaceRedactionEnabled
+        ? rawDetections.filter((detection) => detection.kind === 'face')
+        : filterLiveDetectionsToSelections(
+            rawDetections,
+            {
+              hasRunDetection,
+              selectedFacePersonIds,
+              selectedObjectClasses,
+            },
+          )
       setLiveRedactionDetections((previous) => {
         return stabilizeLiveDetections(previous, filteredDetections, resolvedTime)
       })
@@ -4091,7 +4111,7 @@ export default function VideoEditorPage() {
         }, 0)
       }
     }
-  }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionPreviewActive, lockedFacePersonIdsSet, resolveRedactionJobId, selectedFacePersonIds, selectedObjectClasses])
+  }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionPreviewActive, lockedFacePersonIdsSet, resolveRedactionJobId, reverseFaceRedactionEnabled, reverseFocusPersonId, selectedFacePersonIds, selectedObjectClasses])
 
   const requestLiveRedactionRef = useRef(requestLiveRedaction)
   requestLiveRedactionRef.current = requestLiveRedaction
@@ -4154,6 +4174,21 @@ export default function VideoEditorPage() {
         export_quality: `${exportQuality}p`,
         output_height: exportQuality,
       }
+      if (reverseFaceRedactionEnabled) {
+        body.redaction_mode = 'reverse_faces'
+        body.reverse_face_redaction = true
+        body.focus_person_ids = reverseFocusPersonId ? [reverseFocusPersonId] : []
+        const focusFaceItem = reverseFocusPersonId
+          ? apiDetections.find((item) => item.kind === 'face' && item.personId === reverseFocusPersonId)
+          : null
+        if (focusFaceItem?.personId?.startsWith('snap_') && focusFaceItem.snapBase64) {
+          body.focus_face_images = [{
+            person_id: focusFaceItem.personId,
+            label: focusFaceItem.label,
+            image_base64: focusFaceItem.snapBase64,
+          }]
+        }
+      }
       const customRegions = buildCustomRegionPayload(trackingRegions)
       if (customRegions.length > 0) {
         body.custom_regions = customRegions
@@ -4167,10 +4202,11 @@ export default function VideoEditorPage() {
       const snapFaceImages: Array<{ person_id: string; label: string; image_base64: string }> = []
       const detectedFacePersonIds: string[] = []
       const personLabelMap: Record<string, string> = {}
-      if (hasRunDetection) {
+      const selectedFacePersonIdSet = new Set(selectedFacePersonIds)
+      if (hasRunDetection && !reverseFaceRedactionEnabled) {
         for (const item of apiDetections) {
           if (item.kind !== 'face' || !item.personId) continue
-          if (excludedFromRedactionIds.includes(item.id)) continue
+          if (!selectedFacePersonIdSet.has(item.personId)) continue
           personLabelMap[item.personId] = item.label
           if (item.personId.startsWith('snap_')) {
             if (item.snapBase64) {
@@ -4198,10 +4234,10 @@ export default function VideoEditorPage() {
         if (Object.keys(personLabelMap).length > 0) {
           body.person_labels = personLabelMap
         }
-        if (selectedObjectClasses.length > 0) {
+        if (!reverseFaceRedactionEnabled && selectedObjectClasses.length > 0) {
           body.object_classes = selectedObjectClasses
         }
-      } else if (customRegions.length === 0) {
+      } else if (!reverseFaceRedactionEnabled && customRegions.length === 0) {
         body.face_encodings = ['__ALL__']
         body.object_classes = LIVE_REDACTION_OBJECT_CLASSES
       }
@@ -4262,7 +4298,7 @@ export default function VideoEditorPage() {
 
           const unresolved = Array.isArray(result.unresolved_person_ids) ? result.unresolved_person_ids : []
           const blurFailures = Array.isArray(result.face_blur_failures) ? result.face_blur_failures : []
-          const lockFailures = Array.isArray(result.face_lock_failures) ? result.face_lock_failures : []
+          const lockFailures = reverseFaceRedactionEnabled ? [] : Array.isArray(result.face_lock_failures) ? result.face_lock_failures : []
           if (unresolved.length > 0 || blurFailures.length > 0 || lockFailures.length > 0) {
             setRedactionWarnings({
               unresolved,
@@ -4284,7 +4320,7 @@ export default function VideoEditorPage() {
       setExportRedactLoading(false)
       setTimeout(() => setExportRedactProgress(null), 3000)
     }
-  }, [apiDetections, blurIntensity, buildCustomRegionPayload, excludedFromRedactionIds, exportQuality, hasRunDetection, redactionStyle, resolveRedactionJobId, selectedObjectClasses, trackingRegions])
+  }, [apiDetections, blurIntensity, buildCustomRegionPayload, exportQuality, hasRunDetection, redactionStyle, resolveRedactionJobId, reverseFaceRedactionEnabled, reverseFocusPersonId, selectedFacePersonIds, selectedObjectClasses, trackingRegions])
 
   useEffect(() => {
     if (!liveRedactionPreviewActive || !effectiveStreamUrl) {
@@ -4942,45 +4978,33 @@ export default function VideoEditorPage() {
     setActiveSearchSessionId(null)
     persistEditorSearchSessions([])
   }, [])
-  // [FACE-LOCK LANE BLUR — TEMPORARILY DISABLED]
-  // The face-lock lane is still built and cached on the backend, but
-  // the live preview does NOT draw blur from it for now. We fall back
-  // to the existing per-frame /api/live-redaction/detect path for all
-  // selected persons. Re-enable by uncommenting the blocks below.
-  //
-  // const faceLockOverlayDetections = useMemo<LiveRedactionDetection[]>(() => {
-  //   const lockedIds = lockedFacePersonIds
-  //   if (lockedIds.length === 0) return []
-  //   const playbackTime = videoRef.current?.currentTime ?? currentTime
-  //   const out: LiveRedactionDetection[] = []
-  //   for (const personId of lockedIds) {
-  //     const lane = faceLockLanesByPersonId[personId]
-  //     if (!lane) continue
-  //     const bbox = interpolateFaceLockLane(lane, playbackTime)
-  //     if (!bbox) continue
-  //     const item = faceDetectionItemsByPersonId[personId]
-  //     const label = item?.label || personId
-  //     out.push(laneBboxToLiveDetection(lane, bbox, personId, label))
-  //   }
-  //   return out
-  // }, [currentTime, faceDetectionItemsByPersonId, faceLockLanesByPersonId, lockedFacePersonIds])
+  const faceLockOverlayDetections = useMemo<LiveRedactionDetection[]>(() => {
+    const lockedIds = lockedFacePersonIds
+    if (lockedIds.length === 0) return []
+    const playbackTime = videoRef.current?.currentTime ?? currentTime
+    const out: LiveRedactionDetection[] = []
+    for (const personId of lockedIds) {
+      const lane = faceLockLanesByPersonId[personId]
+      if (!lane) continue
+      const bbox = interpolateFaceLockLane(lane, playbackTime)
+      if (!bbox) continue
+      const item = faceDetectionItemsByPersonId[personId]
+      const label = item?.label || personId
+      out.push(laneBboxToLiveDetection(lane, bbox, personId, label))
+    }
+    return out
+  }, [currentTime, faceDetectionItemsByPersonId, faceLockLanesByPersonId, lockedFacePersonIds])
 
   const visibleLiveRedactionDetections = useMemo(() => {
     const now = Date.now()
     const livePart = liveRedactionDetections.filter((detection) => {
       if (detection.width <= 0 || detection.height <= 0) return false
       if (detection.lastSeenAtMs && now - detection.lastSeenAtMs > getLiveDetectionHoldMs(detection)) return false
-      // [FACE-LOCK LANE BLUR — DISABLED] when re-enabled, also drop live
-      // face detections for lane-locked persons so the lane bbox is the
-      // only source of truth for them:
-      // if (detection.kind === 'face' && detection.personId && lockedFacePersonIdsSet.has(detection.personId)) return false
+      if (detection.kind === 'face' && detection.personId && lockedFacePersonIdsSet.has(detection.personId)) return false
       return true
     })
-    // [FACE-LOCK LANE BLUR — DISABLED] when re-enabled, append the
-    // lane-derived detections here:
-    //   return [...livePart, ...faceLockOverlayDetections]
-    return livePart
-  }, [liveRedactionDetections])
+    return [...livePart, ...faceLockOverlayDetections]
+  }, [faceLockOverlayDetections, liveRedactionDetections, lockedFacePersonIdsSet])
   const renderedLiveRedactionDetections = useMemo(() => {
     const playbackTime = videoRef.current?.currentTime ?? currentTime
     return visibleLiveRedactionDetections.map((entry) => (
@@ -5192,26 +5216,21 @@ export default function VideoEditorPage() {
     if (!ctx) return
 
     let cancelled = false
-    // [FACE-LOCK LANE BLUR — TEMPORARILY DISABLED]
-    // When re-enabled, this re-computes lane-derived bboxes every
-    // animation frame from the precomputed lane + video.currentTime,
-    // and draws them on top of the live-detection blurs.
-    //
-    // const computeLiveLaneDetections = (playbackTime: number): LiveRedactionDetection[] => {
-    //   const ids = lockedFacePersonIdsRef.current
-    //   if (!ids || ids.length === 0) return []
-    //   const lanes = faceLockLanesByPersonIdRef.current
-    //   const labels = faceLockLabelByPersonIdRef.current
-    //   const out: LiveRedactionDetection[] = []
-    //   for (const personId of ids) {
-    //     const lane = lanes[personId]
-    //     if (!lane) continue
-    //     const bbox = interpolateFaceLockLane(lane, playbackTime)
-    //     if (!bbox) continue
-    //     out.push(laneBboxToLiveDetection(lane, bbox, personId, labels[personId] || personId))
-    //   }
-    //   return out
-    // }
+    const computeLiveLaneDetections = (playbackTime: number): LiveRedactionDetection[] => {
+      const ids = lockedFacePersonIdsRef.current
+      if (!ids || ids.length === 0) return []
+      const lanes = faceLockLanesByPersonIdRef.current
+      const labels = faceLockLabelByPersonIdRef.current
+      const out: LiveRedactionDetection[] = []
+      for (const personId of ids) {
+        const lane = lanes[personId]
+        if (!lane) continue
+        const bbox = interpolateFaceLockLane(lane, playbackTime)
+        if (!bbox) continue
+        out.push(laneBboxToLiveDetection(lane, bbox, personId, labels[personId] || personId))
+      }
+      return out
+    }
     const drawFrame = (playbackTime: number) => {
       if (cancelled) return
       const width = Math.max(0, overlayViewport.width)
@@ -5224,16 +5243,14 @@ export default function VideoEditorPage() {
         height > 0 &&
         video.readyState >= 2
       ) {
-        // [FACE-LOCK LANE BLUR — DISABLED] only the existing per-frame
-        // live-redaction blurs are drawn. To re-enable, restore:
-        //   const laneDetections = computeLiveLaneDetections(playbackTime)
-        //   ...and draw them after the liveDetections loop below.
         const liveDetections = visibleLiveRedactionDetectionsRef.current
           .filter((entry) => !entry.id.startsWith('face-lock-'))
           .map((entry) => predictLiveDetection(entry, playbackTime))
-        if (liveDetections.length === 0) return
+        const laneDetections = computeLiveLaneDetections(playbackTime)
+        const detectionsToDraw = [...liveDetections, ...laneDetections]
+        if (detectionsToDraw.length === 0) return
         try {
-          for (const detection of liveDetections) {
+          for (const detection of detectionsToDraw) {
             drawCanvasBlurRegion(ctx, video, detection, width, height, redactionStyle, blurIntensity)
           }
         } catch {
@@ -5274,9 +5291,14 @@ export default function VideoEditorPage() {
   useEffect(() => {
     if (!liveRedactionPreviewActive || !hasRunDetection) return
 
+    const activeFacePersonIds = reverseFaceRedactionEnabled ? reverseBlurTargetPersonIds : selectedFacePersonIds
+    const activeFaceSelectionIds = new Set(activeFacePersonIds.map((personId) => `face-${personId}`))
     setLiveRedactionDetections((previous) =>
       previous.filter((detection) => {
         const selectionId = getSelectionIdForLiveDetection(detection)
+        if (reverseFaceRedactionEnabled) {
+          return selectionId ? activeFaceSelectionIds.has(selectionId) : true
+        }
         return selectionId ? !excludedFromRedactionIds.includes(selectionId) : true
       })
     )
@@ -5286,7 +5308,7 @@ export default function VideoEditorPage() {
     }, 0)
 
     return () => window.clearTimeout(timer)
-  }, [excludedFromRedactionIds, hasRunDetection, liveRedactionPreviewActive])
+  }, [excludedFromRedactionIds, hasRunDetection, liveRedactionPreviewActive, reverseBlurTargetPersonIds, reverseFaceRedactionEnabled, selectedFacePersonIds])
 
   const toggleDetectionSelectionById = useCallback((selectionId: string, personId?: string | null) => {
     const isExcluded = excludedFromRedactionIds.includes(selectionId)
@@ -5310,14 +5332,41 @@ export default function VideoEditorPage() {
     ))
   }, [ensureFaceTimelineLane, excludedFromRedactionIds])
 
-  const handleDetectionListToggle = useCallback((item: DetectionItem) => {
-    const isExcluded = excludedFromRedactionIds.includes(item.id)
-    const isActivatingBlur = isExcluded
-    const wasPlaying = !!videoRef.current && !videoRef.current.paused
-    if (!isActivatingBlur && item.kind === 'face' && item.personId) {
-      removeFaceTimelineLane(item.personId)
+  const toggleReverseFaceRedaction = useCallback(() => {
+    const nextEnabled = !reverseFaceRedactionEnabled
+    setReverseFaceRedactionEnabled(nextEnabled)
+    setLiveRedactionDetections([])
+    setLiveRedactionSeekPending(false)
+    setFaceLockLanesByPersonId({})
+    setFaceLockBuildByPersonId({})
+    faceLockBuildAttemptsRef.current = {}
+    announcedFaceLockFailuresRef.current = {}
+    setFaceLockBuildAlert(null)
+
+    if (!nextEnabled) {
+      setReverseFocusPersonId(null)
+      return
     }
-    toggleDetectionSelectionById(item.id, item.kind === 'face' ? item.personId : null)
+
+    setShowAnonymizeOnly(false)
+    setReverseFocusPersonId(null)
+  }, [reverseFaceRedactionEnabled])
+
+  const handleDetectionListToggle = useCallback((item: DetectionItem) => {
+    const isReverseFocusSelection = reverseFaceRedactionEnabled && item.kind === 'face' && !!item.personId
+    const isExcluded = excludedFromRedactionIds.includes(item.id)
+    const isActivatingBlur = isReverseFocusSelection || isExcluded
+    const wasPlaying = !!videoRef.current && !videoRef.current.paused
+    if (isReverseFocusSelection && item.personId) {
+      setReverseFocusPersonId(item.personId)
+      removeFaceTimelineLane(item.personId)
+      setLiveRedactionDetections([])
+    } else {
+      if (!isActivatingBlur && item.kind === 'face' && item.personId) {
+        removeFaceTimelineLane(item.personId)
+      }
+      toggleDetectionSelectionById(item.id, item.kind === 'face' ? item.personId : null)
+    }
 
     if (isActivatingBlur && videoId) {
       const showScopedSearchResult = (scopedSearchResult: SearchSessionResult) => {
@@ -5430,7 +5479,9 @@ export default function VideoEditorPage() {
 
     if (!isActivatingBlur || !effectiveStreamUrl) return
 
-    setLiveRedactionSeekPending(true)
+    if (!reverseFaceRedactionEnabled) {
+      setLiveRedactionSeekPending(true)
+    }
 
     if (isDetectionItemLikelyVisibleAtTime(item, currentTime)) return
 
@@ -5441,7 +5492,7 @@ export default function VideoEditorPage() {
     window.setTimeout(() => {
       seekToTime(seekTime, { play: wasPlaying || liveRedactionEnabled })
     }, 0)
-  }, [currentTime, effectiveStreamUrl, excludedFromRedactionIds, liveRedactionEnabled, removeFaceTimelineLane, seekToTime, toggleDetectionSelectionById, videoId])
+  }, [currentTime, effectiveStreamUrl, excludedFromRedactionIds, liveRedactionEnabled, removeFaceTimelineLane, reverseFaceRedactionEnabled, seekToTime, toggleDetectionSelectionById, videoId])
 
   const previewResolvedRegions = useMemo(() => {
     return trackingRegions.flatMap((region) => {
@@ -5822,15 +5873,38 @@ export default function VideoEditorPage() {
                 Demo Mode
               </span>
               <p className="text-xs text-text-secondary leading-snug min-w-0">
-                You are viewing a pre-loaded demo video. Head to the{' '}
+                You are viewing a preloaded demo video. Head to the{' '}
                 <Link to="/dashboard" className="font-semibold text-accent hover:underline">Dashboard</Link>{' '}
-                to explore your uploaded videos — clicking any video will open it here in the editor for redaction.
+                to explore your uploaded videos. Clicking any video will open it here in the editor for redaction.
               </p>
               <button
                 type="button"
                 onClick={() => setDemoBannerDismissed(true)}
                 className="ml-auto shrink-0 h-6 w-6 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-card transition-colors"
                 aria-label="Dismiss demo mode notice"
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+              </button>
+            </div>
+          )}
+
+          {reverseFaceRedactionEnabled && hasRunDetection && !reverseRedactionBannerDismissed && (
+            <div className="shrink-0 px-5 py-2.5 bg-gradient-to-r from-accent/10 via-accent/5 to-transparent border-b border-accent/20 flex items-center gap-3">
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-accent/15 text-accent border border-accent/25 shrink-0">
+                Reverse redaction
+              </span>
+              <p className="text-xs text-text-secondary leading-snug min-w-0">
+                The player does not show reverse redaction. Use{' '}
+                <span className="font-semibold text-text-primary">Export</span>{' '}
+                to download the video with proper redaction. To keep a face visible, click{' '}
+                <span className="font-semibold text-text-primary">Focus</span>{' '}
+                on that person in the detections list.
+              </p>
+              <button
+                type="button"
+                onClick={() => setReverseRedactionBannerDismissed(true)}
+                className="ml-auto shrink-0 h-6 w-6 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-primary hover:bg-card transition-colors"
+                aria-label="Dismiss reverse redaction notice"
               >
                 <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
               </button>
@@ -6354,8 +6428,8 @@ export default function VideoEditorPage() {
               onClick={handleSnapFaceFromVideo}
               disabled={!effectiveStreamUrl || snapFaceCapturing}
               className="inline-flex items-center gap-1.5 h-9 px-3 rounded-md border border-accent/30 bg-accent/10 text-accent text-xs font-medium hover:bg-accent/15 hover:border-accent/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              aria-label="Snap face from video and add to anonymize list"
-              title="Pause and snap a face from this frame to anonymize"
+              aria-label="Snap face: detect all faces in this frame and pick one to add to anonymize list"
+              title="Capture this frame and pick one of all detected faces. Use Snap face again for another person."
             >
               {snapFaceCapturing ? (
                 <span className="w-3.5 h-3.5 border-2 border-accent/30 border-t-accent rounded-full animate-spin" aria-hidden />
@@ -7545,27 +7619,82 @@ export default function VideoEditorPage() {
               </div>
               {hasRunDetection ? (
                 <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
-                  <div className="p-2 border-b border-border shrink-0">
+                  <div className="p-2 border-b border-border shrink-0 space-y-2">
+                    <div
+                      className={`rounded-lg border p-2.5 transition-colors ${
+                        reverseFaceRedactionEnabled
+                          ? 'border-accent/30 bg-accent/[0.06] shadow-[inset_0_1px_0_rgba(0,220,130,0.06)]'
+                          : 'border-border bg-card/80'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2.5">
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[11px] font-semibold text-text-primary">Reverse redaction</p>
+                          <p className="mt-0.5 text-[10px] leading-snug text-text-tertiary">
+                            {reverseFaceRedactionEnabled
+                              ? 'Export shows the final redaction; the player does not. Pick who stays visible with Focus in the list.'
+                              : 'When off, only the faces you include in the list below are redacted.'}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={reverseFaceRedactionEnabled}
+                          aria-label={reverseFaceRedactionEnabled ? 'Disable reverse face redaction' : 'Enable reverse face redaction'}
+                          title={reverseFaceRedactionEnabled ? 'Disable reverse mode' : 'Blur every detected face except one focused face'}
+                          onClick={toggleReverseFaceRedaction}
+                          className={`mt-0.5 inline-flex h-7 shrink-0 items-center gap-1.5 overflow-hidden rounded-md border px-1.5 pr-2 text-[10px] font-medium transition-colors ${
+                            reverseFaceRedactionEnabled
+                              ? 'border-accent/35 bg-accent/10 text-accent shadow-[0_0_0_1px_rgba(0,220,130,0.08)]'
+                              : 'border-border bg-surface text-text-tertiary hover:border-accent/30 hover:bg-background hover:text-text-secondary'
+                          }`}
+                        >
+                          <span
+                            aria-hidden
+                            className={`relative h-3.5 w-6 shrink-0 rounded-full border transition-colors ${
+                              reverseFaceRedactionEnabled ? 'border-accent/35 bg-accent/20' : 'border-border bg-card'
+                            }`}
+                          >
+                            <span
+                              className={`absolute left-0.5 top-1/2 h-2.5 w-2.5 -translate-y-1/2 rounded-full bg-current shadow-sm transition-transform ${
+                                reverseFaceRedactionEnabled ? 'translate-x-2.5' : 'translate-x-0'
+                              }`}
+                            />
+                          </span>
+                          <span className="min-w-0 truncate">Reverse</span>
+                        </button>
+                      </div>
+                    </div>
                     <input
                       type="search"
-                      placeholder="Filter detections..."
+                      placeholder="Filter faces..."
                       value={detectionFilter}
                       onChange={(e) => setDetectionFilter(e.target.value)}
                       className="w-full h-8 rounded-md bg-surface border border-border px-3 text-xs text-text-primary placeholder:text-text-tertiary"
                     />
-                    <p className="mt-2 text-[10px] leading-relaxed text-text-tertiary">
-                      Use Blur or Unblur to decide exactly which saved faces and objects should stay redacted for this video. The preview follows the selected saved targets, and if a saved target is not on the current frame the editor can jump to a nearby occurrence so you can verify the blur.
+                    <p className="text-[10px] leading-relaxed text-text-tertiary">
+                      {reverseFaceRedactionEnabled
+                        ? 'Reverse mode redacts every detected face except one you mark with Focus; the search timeline follows that person only. You will not see redaction in the player. Use Export to download the video with proper redaction.'
+                        : 'Use Blur or Unblur to decide exactly which saved faces should stay redacted for this video. The preview follows the selected people, and if a face is not on the current frame the editor can jump to a nearby occurrence so you can verify the blur.'}
                     </p>
                   </div>
                   <div className="flex-1 min-h-0 overflow-y-auto">
                     {filteredDetections.length > 0 ? filteredDetections.map((d) => {
-                      const excluded = excludedFromRedactionIds.includes(d.id)
+                      const reverseFocused = reverseFaceRedactionEnabled && d.kind === 'face' && d.personId === reverseFocusPersonId
+                      const excluded = reverseFaceRedactionEnabled ? reverseFocused : excludedFromRedactionIds.includes(d.id)
+                      const reverseBlurred = reverseFaceRedactionEnabled && d.kind === 'face' && !reverseFocused
                       const visibleNow = isDetectionItemLikelyVisibleAtTime(d, currentTime)
                       const nearestSeekTime = visibleNow ? null : getDetectionItemSeekTime(d, currentTime)
                       return (
                         <div
                           key={d.id}
-                          className={`flex items-center gap-2.5 px-3 py-2 hover:bg-card border-b border-border-light transition-colors ${excluded ? 'opacity-60' : ''}`}
+                          className={`flex items-center gap-2.5 px-3 py-2 hover:bg-card border-b border-border-light transition-colors ${
+                            reverseFocused
+                              ? 'bg-accent/5'
+                              : !reverseFaceRedactionEnabled && excluded
+                                ? 'opacity-60'
+                                : ''
+                          }`}
                         >
                           <div
                             className="w-8 h-8 rounded-md shrink-0 flex items-center justify-center overflow-hidden text-[9px] font-medium text-white bg-card border border-border"
@@ -7610,6 +7739,16 @@ export default function VideoEditorPage() {
                             })()}
                             {(visibleNow || nearestSeekTime !== null) && (
                               <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                {reverseFocused && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-accent/10 border border-accent/20 text-accent">
+                                    Focus clear
+                                  </span>
+                                )}
+                                {reverseBlurred && (
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-surface border border-border-light text-text-tertiary">
+                                    Reverse blur
+                                  </span>
+                                )}
                                 {visibleNow && (
                                   <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-accent/10 border border-accent/20 text-accent">
                                     On screen now
@@ -7642,15 +7781,29 @@ export default function VideoEditorPage() {
                               handleDetectionListToggle(d)
                             }}
                             className={`shrink-0 inline-flex items-center gap-1.5 h-8 px-2.5 rounded-md border text-xs font-medium transition-colors ${
-                              excluded
+                              reverseFaceRedactionEnabled
+                                ? reverseFocused
+                                  ? 'border-accent/35 bg-accent-light text-accent'
+                                  : 'border-border bg-background text-text-secondary hover:border-accent/40 hover:text-accent'
+                                : excluded
                                 ? 'border-border bg-background text-text-secondary hover:border-accent/40 hover:text-accent'
                                 : 'border-accent/25 bg-accent-light text-accent hover:border-accent/40'
                             }`}
-                            title={excluded ? 'Blur this item over the video again' : 'Stop blurring this item over the video'}
-                            aria-label={excluded ? 'Blur this item over the video again' : 'Stop blurring this item over the video'}
+                            title={reverseFaceRedactionEnabled
+                              ? 'Keep this face clear and blur every other detected face'
+                              : excluded
+                                ? 'Blur this face over the video again'
+                                : 'Stop blurring this face over the video'}
+                            aria-label={reverseFaceRedactionEnabled
+                              ? 'Focus this face and blur every other detected face'
+                              : excluded
+                                ? 'Blur this face over the video again'
+                                : 'Stop blurring this face over the video'}
                           >
-                            {excluded ? <IconEyeOff className="w-3.5 h-3.5" /> : <IconEye className="w-3.5 h-3.5" />}
-                            <span>{excluded ? 'Blur' : 'Unblur'}</span>
+                            {reverseFaceRedactionEnabled
+                              ? <IconEye className="w-3.5 h-3.5" />
+                              : excluded ? <IconEyeOff className="w-3.5 h-3.5" /> : <IconEye className="w-3.5 h-3.5" />}
+                            <span>{reverseFaceRedactionEnabled ? (reverseFocused ? 'Focused' : 'Focus') : (excluded ? 'Blur' : 'Unblur')}</span>
                           </button>
                         </div>
                       )
@@ -7658,8 +7811,8 @@ export default function VideoEditorPage() {
                       <div className="flex h-full min-h-[8rem] items-center justify-center px-4 py-8">
                         <p className="max-w-[220px] text-center text-xs leading-relaxed text-text-tertiary">
                           {showAnonymizeOnly
-                            ? 'No anonymize-tagged detections match this view.'
-                            : 'No detections match this filter.'}
+                            ? 'No anonymize-tagged faces match this view.'
+                            : 'No faces match this filter.'}
                         </p>
                       </div>
                     )}
@@ -7680,7 +7833,7 @@ export default function VideoEditorPage() {
                     {detectionLoading ? 'Loading…' : 'Detect'}
                   </button>
                   <p className="text-[10px] text-text-tertiary text-center max-w-[180px]">
-                    Loads the saved faces and objects for this video. Selection preview can still run from saved detection data.
+                    Loads the saved faces for this video. Selection preview can still run from saved detection data.
                   </p>
                 </div>
                 </div>

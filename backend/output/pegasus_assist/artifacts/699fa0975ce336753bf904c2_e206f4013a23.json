@@ -1,0 +1,246 @@
+{
+  "metadata": {
+    "artifact_id": "pegasus_e206f4013a238834",
+    "job_id": "pegasus_e206f4013a238834",
+    "video_id": "699fa0975ce336753bf904c2",
+    "local_job_id": "e4497c33-7a4",
+    "source_fingerprint": "file:upload_mykn1ood.mp4:194618389:1777228009",
+    "cache_key": "699fa0975ce336753bf904c2|file:upload_mykn1ood.mp4:194618389:1777228009|1.2|privacy-assist-v4",
+    "model": "pegasus1.5",
+    "prompt_version": "privacy-assist-v4",
+    "schema_version": "1.2",
+    "duration_sec": 415.32,
+    "created_at": "2026-04-30T15:18:00.764363Z",
+    "status": "ready",
+    "twelvelabs_task_id": "69f372a8184bd89e3e9eec85",
+    "source_type": "asset_id_from_indexed_video_id",
+    "usage": {},
+    "updated_at": "2026-04-30T15:19:16.748306Z"
+  },
+  "summary": {
+    "overall_summary": "Pegasus found 7 privacy review segments for this video.",
+    "privacy_risk_level": "high",
+    "review_priority": "high"
+  },
+  "timeline_events": [
+    {
+      "id": "evt_001",
+      "start_sec": 0.0,
+      "end_sec": 152.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The main verdict subject is being escorted by police officers through a hallway. The individual is wearing a green hooded jacket and has their face covered with a black cloth.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the courtroom.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the legal proceedings.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_002",
+      "start_sec": 152.0,
+      "end_sec": 164.0,
+      "severity": "medium",
+      "category": "screen",
+      "label": "Sensitive screen",
+      "description": "A laptop screen is visible on the judge's desk, potentially displaying sensitive case information.",
+      "reason": "Screens in courtrooms may display sensitive or confidential information that should be redacted.",
+      "redaction_target": "sensitive_screen",
+      "scene_role": "sensitive_item",
+      "redaction_decision": "handle_with_care",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "This screen may contain sensitive information related to the case.",
+      "handling_note": "review timestamp",
+      "confidence": 0.8,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_002"
+      ]
+    },
+    {
+      "id": "evt_003",
+      "start_sec": 164.0,
+      "end_sec": 212.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The main verdict subject is seated in the courtroom, still wearing the green hooded jacket with their face covered.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the courtroom.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the legal proceedings.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_004",
+      "start_sec": 212.0,
+      "end_sec": 223.0,
+      "severity": "medium",
+      "category": "document",
+      "label": "Sensitive document",
+      "description": "A document with the title 'Raub mit Geiselnahme' is visible on the table, potentially containing sensitive case details.",
+      "reason": "Documents in courtrooms may contain sensitive or confidential information that should be redacted.",
+      "redaction_target": "sensitive_document",
+      "scene_role": "sensitive_item",
+      "redaction_decision": "handle_with_care",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "This document may contain sensitive information related to the case.",
+      "handling_note": "review timestamp",
+      "confidence": 0.85,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_003"
+      ]
+    },
+    {
+      "id": "evt_005",
+      "start_sec": 223.0,
+      "end_sec": 261.0,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The main verdict subject is seated in the courtroom, still wearing the green hooded jacket with their face covered.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the courtroom.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the legal proceedings.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    },
+    {
+      "id": "evt_006",
+      "start_sec": 261.0,
+      "end_sec": 270.0,
+      "severity": "medium",
+      "category": "document",
+      "label": "Sensitive document",
+      "description": "A document with the title 'Raub mit Geiselnahme' is visible on the table, potentially containing sensitive case details.",
+      "reason": "Documents in courtrooms may contain sensitive or confidential information that should be redacted.",
+      "redaction_target": "sensitive_document",
+      "scene_role": "sensitive_item",
+      "redaction_decision": "handle_with_care",
+      "subject_selection": "sensitive_visual_detail",
+      "inclusion_reason": "This document may contain sensitive information related to the case.",
+      "handling_note": "review timestamp",
+      "confidence": 0.85,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_003"
+      ]
+    },
+    {
+      "id": "evt_007",
+      "start_sec": 270.0,
+      "end_sec": 415.316,
+      "severity": "high",
+      "category": "person",
+      "label": "Main verdict subject",
+      "description": "The main verdict subject is seated in the courtroom, still wearing the green hooded jacket with their face covered.",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the courtroom.",
+      "redaction_target": "main_verdict_subject",
+      "scene_role": "verdict_subject",
+      "redaction_decision": "redact",
+      "subject_selection": "main_verdict_subject",
+      "inclusion_reason": "This person is the main verdict subject of the legal proceedings.",
+      "handling_note": "blur face and body",
+      "confidence": 0.95,
+      "review_required": true,
+      "recommended_action_ids": [
+        "act_001"
+      ]
+    }
+  ],
+  "recommended_actions": [
+    {
+      "id": "act_001",
+      "type": "select_detected_entity",
+      "label": "Main verdict subject: select detected entity",
+      "reason": "This is the main verdict subject whose legal outcome is being discussed in the courtroom.",
+      "confidence": 0.95,
+      "event_ids": [
+        "evt_001",
+        "evt_003",
+        "evt_005",
+        "evt_007"
+      ],
+      "target": {
+        "object_class": "person",
+        "entity_id": "Main verdict subject",
+        "redaction_target": "main_verdict_subject",
+        "scene_role": "verdict_subject",
+        "redaction_decision": "redact",
+        "subject_selection": "main_verdict_subject",
+        "inclusion_reason": "This person is the main verdict subject of the legal proceedings.",
+        "start_sec": 0.0,
+        "end_sec": 415.316
+      },
+      "apply_mode": "automatic_if_matched"
+    },
+    {
+      "id": "act_002",
+      "type": "draw_custom_region_prompt",
+      "label": "Sensitive screen: draw custom region prompt",
+      "reason": "Screens in courtrooms may display sensitive or confidential information that should be redacted.",
+      "confidence": 0.8,
+      "event_ids": [
+        "evt_002"
+      ],
+      "target": {
+        "object_class": "screen",
+        "entity_id": "Laptop screen",
+        "redaction_target": "sensitive_screen",
+        "scene_role": "sensitive_item",
+        "redaction_decision": "handle_with_care",
+        "subject_selection": "sensitive_visual_detail",
+        "inclusion_reason": "This screen may contain sensitive information related to the case.",
+        "start_sec": 152.0,
+        "end_sec": 164.0
+      },
+      "apply_mode": "review_only"
+    },
+    {
+      "id": "act_003",
+      "type": "draw_custom_region_prompt",
+      "label": "Sensitive document: draw custom region prompt",
+      "reason": "Documents in courtrooms may contain sensitive or confidential information that should be redacted.",
+      "confidence": 0.85,
+      "event_ids": [
+        "evt_004",
+        "evt_006"
+      ],
+      "target": {
+        "object_class": "document",
+        "entity_id": "Case document",
+        "redaction_target": "sensitive_document",
+        "scene_role": "sensitive_item",
+        "redaction_decision": "handle_with_care",
+        "subject_selection": "sensitive_visual_detail",
+        "inclusion_reason": "This document may contain sensitive information related to the case.",
+        "start_sec": 212.0,
+        "end_sec": 270.0
+      },
+      "apply_mode": "review_only"
+    }
+  ]
+}

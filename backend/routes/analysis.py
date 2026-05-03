@@ -55,6 +55,7 @@ LIVE_TRACK_FACE_IDENTIFIED_RELOCK_MAX_AREA_RATIO = 2.2
 LIVE_TRACK_FACE_RELOCK_MIN_IOU = 0.08
 LIVE_TRACK_FACE_RELOCK_MAX_CENTER_SHIFT = 0.9
 LIVE_TRACK_FACE_IDENTIFIED_RELOCK_MAX_CENTER_SHIFT = 0.72
+REVERSE_FOCUS_PRESERVE_EXPAND = 2.25
 
 
 def _is_twelvelabs_timeout(exc):
@@ -120,6 +121,107 @@ def detection_center_distance(box_a, box_b):
     bx = box_b["x"] + box_b["width"] / 2.0
     by = box_b["y"] + box_b["height"] / 2.0
     return float(np.hypot(ax - bx, ay - by))
+
+
+def detection_area(box):
+    if not box:
+        return 0.0
+    return max(0.0, float(box.get("width", 0.0))) * max(0.0, float(box.get("height", 0.0)))
+
+
+def detection_intersection_area(box_a, box_b):
+    if not box_a or not box_b:
+        return 0.0
+    ax2 = box_a["x"] + box_a["width"]
+    ay2 = box_a["y"] + box_a["height"]
+    bx2 = box_b["x"] + box_b["width"]
+    by2 = box_b["y"] + box_b["height"]
+    ix1 = max(box_a["x"], box_b["x"])
+    iy1 = max(box_a["y"], box_b["y"])
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    return max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+
+
+def detection_is_preserved_face(detection, preserve_boxes):
+    if not preserve_boxes or str(detection.get("kind") or "").lower() != "face":
+        return False
+    try:
+        candidate = {
+            "x": float(detection.get("x", 0.0)),
+            "y": float(detection.get("y", 0.0)),
+            "width": float(detection.get("width", 0.0)),
+            "height": float(detection.get("height", 0.0)),
+        }
+    except (TypeError, ValueError):
+        return False
+    candidate_area = max(1e-6, detection_area(candidate))
+    candidate_diag = max(1e-6, float(np.hypot(candidate["width"], candidate["height"])))
+    for preserve in preserve_boxes:
+        overlap = detection_intersection_area(candidate, preserve)
+        if overlap <= 0:
+            continue
+        if detection_iou(candidate, preserve) >= 0.10:
+            return True
+        if overlap / candidate_area >= 0.42:
+            return True
+        preserve_diag = max(1e-6, float(np.hypot(preserve["width"], preserve["height"])))
+        if detection_center_distance(candidate, preserve) <= max(candidate_diag * 0.52, preserve_diag * 0.42):
+            return True
+    return False
+
+
+def filter_reverse_focus_detections(detections, preserve_boxes):
+    if not detections or not preserve_boxes:
+        return detections
+
+    remove_indices = set()
+    for preserve in preserve_boxes:
+        best_idx = None
+        best_score = -1e9
+        preserve_area = max(1e-6, detection_area(preserve))
+        preserve_diag = max(1e-6, float(np.hypot(preserve["width"], preserve["height"])))
+        for idx, detection in enumerate(detections):
+            if idx in remove_indices or str(detection.get("kind") or "").lower() != "face":
+                continue
+            try:
+                candidate = {
+                    "x": float(detection.get("x", 0.0)),
+                    "y": float(detection.get("y", 0.0)),
+                    "width": float(detection.get("width", 0.0)),
+                    "height": float(detection.get("height", 0.0)),
+                }
+            except (TypeError, ValueError):
+                continue
+            candidate_area = max(1e-6, detection_area(candidate))
+            candidate_diag = max(1e-6, float(np.hypot(candidate["width"], candidate["height"])))
+            overlap = detection_intersection_area(candidate, preserve)
+            overlap_ratio = overlap / candidate_area
+            preserve_overlap_ratio = overlap / preserve_area
+            iou = detection_iou(candidate, preserve)
+            center_distance = detection_center_distance(candidate, preserve)
+            center_ratio = center_distance / max(candidate_diag, preserve_diag)
+            is_candidate = (
+                iou >= 0.05
+                or overlap_ratio >= 0.18
+                or preserve_overlap_ratio >= 0.18
+                or center_distance <= max(candidate_diag * 0.65, preserve_diag * 0.55)
+            )
+            if not is_candidate:
+                continue
+            score = iou * 5.0 + overlap_ratio * 2.0 + preserve_overlap_ratio - center_ratio
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        if best_idx is not None:
+            remove_indices.add(best_idx)
+
+    if not remove_indices:
+        return detections
+    return [
+        detection for idx, detection in enumerate(detections)
+        if idx not in remove_indices
+    ]
 
 
 def raw_bbox_area(bbox):
@@ -446,11 +548,26 @@ def build_tracked_live_detections(
                         strict=True,
                     ):
                         updated_bbox = expand_tracked_face_bbox(relocked_bbox, frame_w, frame_h, motion_strength)
-                    elif global_bbox is not None and global_motion_confidence >= LIVE_TRACK_GLOBAL_BRIDGE_MIN_CONFIDENCE:
-                        updated_bbox = motion_bridge_bbox(global_bbox, frame_w, frame_h, motion_strength)
-                        tracking_mode = "global"
                     else:
-                        continue
+                        try:
+                            from services.detection import localize_head_in_search_region
+
+                            head_match = localize_head_in_search_region(
+                                frame,
+                                search_bbox=search_bbox,
+                                preferred_bbox=updated_bbox or global_bbox or previous_frame_bbox,
+                                strict=True,
+                            )
+                        except Exception:
+                            head_match = None
+
+                        if head_match is not None:
+                            updated_bbox = expand_tracked_face_bbox(tuple(head_match["bbox"]), frame_w, frame_h, motion_strength)
+                        elif global_bbox is not None and global_motion_confidence >= LIVE_TRACK_GLOBAL_BRIDGE_MIN_CONFIDENCE:
+                            updated_bbox = motion_bridge_bbox(global_bbox, frame_w, frame_h, motion_strength)
+                            tracking_mode = "global"
+                        else:
+                            continue
                     updated_small_bbox = frame_bbox_to_small_bbox(
                         updated_bbox,
                         scale_back,
@@ -605,7 +722,7 @@ def merge_live_tracked_detections(
     return merged
 
 
-def merge_temporal_detections(detections, requested_time):
+def merge_temporal_detections(detections, requested_time, preserve_distinct_faces=False):
     grouped = []
     ordered = sorted(
         detections,
@@ -632,6 +749,11 @@ def merge_temporal_detections(detections, requested_time):
                     continue
             iou = detection_iou(group, det)
             center_distance = detection_center_distance(group, det)
+            if preserve_distinct_faces and det["kind"] == "face":
+                group_diag = max(1e-6, float(np.hypot(group["width"], group["height"])))
+                det_diag = max(1e-6, float(np.hypot(det["width"], det["height"])))
+                if iou < 0.35 and center_distance > max(0.025, min(group_diag, det_diag) * 0.45):
+                    continue
             max_distance = 0.18 if det["kind"] == "face" else 0.24
             if iou < 0.05 and center_distance > max_distance:
                 continue
@@ -883,6 +1005,12 @@ def live_redaction_detect():
     include_faces = str(data.get("include_faces", request.form.get("include_faces", "true"))).lower() not in ("false", "0", "no")
     include_objects = str(data.get("include_objects", request.form.get("include_objects", "true"))).lower() not in ("false", "0", "no")
     forensic_only = str(data.get("forensic_only", request.form.get("forensic_only", "true"))).lower() not in ("false", "0", "no")
+    redaction_mode = str(
+        data.get("redaction_mode", request.form.get("redaction_mode", "")) or ""
+    ).strip().lower()
+    reverse_face_redaction = str(
+        data.get("reverse_face_redaction", request.form.get("reverse_face_redaction", "false"))
+    ).strip().lower() in ("true", "1", "yes", "on") or redaction_mode in {"reverse", "reverse_faces", "reverse_face_redaction"}
 
     person_ids = data.get("person_ids")
     if person_ids is None:
@@ -895,6 +1023,20 @@ def live_redaction_detect():
     if not isinstance(person_ids, list):
         person_ids = []
     person_ids = [str(item).strip() for item in person_ids if str(item).strip()]
+    focus_person_ids = data.get("focus_person_ids")
+    if focus_person_ids is None:
+        raw_focus_person_ids = request.form.get("focus_person_ids", "")
+        if raw_focus_person_ids:
+            try:
+                focus_person_ids = json.loads(raw_focus_person_ids)
+            except json.JSONDecodeError:
+                focus_person_ids = [item.strip() for item in raw_focus_person_ids.split(",") if item.strip()]
+    if not isinstance(focus_person_ids, list):
+        focus_person_ids = []
+    focus_person_ids = [str(item).strip() for item in focus_person_ids if str(item).strip()]
+    if reverse_face_redaction:
+        person_ids = []
+        include_objects = False
     if person_ids and job.get("status") not in ("ready",):
         return jsonify({
             "error": "saved face identities are still being prepared for this video",
@@ -916,6 +1058,8 @@ def live_redaction_detect():
         for item in object_classes
         if normalize_object_class_name(item)
     }
+    if reverse_face_redaction:
+        object_class_set = set()
 
     try:
         object_confidence = float(data.get("object_confidence", request.form.get("object_confidence", 0.25)) or 0.25)
@@ -926,6 +1070,8 @@ def live_redaction_detect():
         face_confidence = float(data.get("face_confidence", request.form.get("face_confidence", 0.28)) or 0.28)
     except (TypeError, ValueError):
         face_confidence = 0.28
+    if reverse_face_redaction:
+        face_confidence = min(face_confidence, 0.16)
 
     # Dense temporal sampling is useful for open-ended "detect everything"
     # preview requests, but it makes selected saved-face playback too slow
@@ -934,7 +1080,7 @@ def live_redaction_detect():
     # frame and let the saved appearance anchors plus live tracking provide
     # continuity instead.
     sample_offsets = (-0.12, -0.06, 0.0, 0.06, 0.12)
-    if person_ids:
+    if reverse_face_redaction or person_ids:
         sample_offsets = (0.0,)
     elif object_class_set:
         sample_offsets = (-0.08, 0.0, 0.08)
@@ -961,11 +1107,13 @@ def live_redaction_detect():
     detections = []
     selected_faces = []
     selected_faces_by_person_id = {}
+    focus_faces = []
 
     if person_ids:
         enriched = get_enriched_faces(job_id) or {}
+        unique_faces = job.get("unique_faces") or enriched.get("unique_faces") or []
         selected_faces = [
-            face for face in (job.get("unique_faces") or enriched.get("unique_faces") or [])
+            face for face in unique_faces
             if get_face_identity(face) in person_ids
         ]
         selected_faces_by_person_id = {
@@ -974,6 +1122,29 @@ def live_redaction_detect():
             for person_id in [get_face_identity(face)]
             if person_id
         }
+    if reverse_face_redaction and focus_person_ids and job.get("status") in ("ready",):
+        enriched = get_enriched_faces(job_id) or {}
+        unique_faces = job.get("unique_faces") or enriched.get("unique_faces") or []
+        focus_set = set(focus_person_ids)
+        focus_faces = [
+            face for face in unique_faces
+            if get_face_identity(face) in focus_set
+        ]
+
+    focus_preserve_boxes = []
+    if reverse_face_redaction and focus_faces:
+        from services.detection import localize_known_faces_in_frame
+
+        for face in localize_known_faces_in_frame(
+            frame,
+            focus_faces,
+            time_sec=time_sec,
+            tolerance=0.55,
+        ):
+            expanded_bbox = expand_face_redaction_bbox(face.get("bbox"), frame_w, frame_h)
+            normalized = normalize_bbox(expanded_bbox, frame_w, frame_h)
+            if normalized is not None:
+                focus_preserve_boxes.append(normalized)
 
     if include_faces:
         if person_ids:
@@ -1005,6 +1176,9 @@ def live_redaction_detect():
                     sample_frame,
                     confidence_threshold=face_confidence,
                     include_supplemental=True,
+                    min_face_size=10,
+                    min_sharpness=2.0,
+                    upscale=2.2,
                 ):
                     expanded_bbox = expand_face_redaction_bbox(face.get("bbox"), frame_w, frame_h)
                     normalized = normalize_bbox(expanded_bbox, frame_w, frame_h)
@@ -1048,7 +1222,11 @@ def live_redaction_detect():
                 })
         object_detection_error = get_object_detection_error()
 
-    detections = merge_temporal_detections(detections, time_sec)
+    detections = merge_temporal_detections(
+        detections,
+        time_sec,
+        preserve_distinct_faces=reverse_face_redaction,
+    )
     tracked_detections, gray_small, scale_back, _ = build_tracked_live_detections(
         job_id,
         time_sec,
@@ -1074,6 +1252,8 @@ def live_redaction_detect():
         person_ids=person_ids,
         object_class_set=object_class_set,
     )
+    if reverse_face_redaction and focus_preserve_boxes:
+        detections = filter_reverse_focus_detections(detections, focus_preserve_boxes)
 
     return jsonify({
         "status": "ready",
@@ -1108,9 +1288,22 @@ def detect_faces_endpoint():
         if img is None:
             return jsonify({"error": "could not read image"}), 400
 
-        from services.detection import detect_uploaded_reference_faces
+        from services.detection import (
+            SNAP_UPLOAD_PICKER_CONFIDENCE,
+            SNAP_UPLOAD_PICKER_MIN_FACE,
+            SNAP_UPLOAD_PICKER_MIN_SHARPNESS,
+            SNAP_UPLOAD_PICKER_UPSCALE,
+            detect_uploaded_reference_faces,
+        )
 
-        raw_faces = detect_uploaded_reference_faces(img, with_encodings=False)
+        raw_faces = detect_uploaded_reference_faces(
+            img,
+            with_encodings=False,
+            confidence_threshold=SNAP_UPLOAD_PICKER_CONFIDENCE,
+            min_face_size=SNAP_UPLOAD_PICKER_MIN_FACE,
+            min_sharpness=SNAP_UPLOAD_PICKER_MIN_SHARPNESS,
+            detect_upscale=SNAP_UPLOAD_PICKER_UPSCALE,
+        )
 
         faces = []
         h_img, w_img = img.shape[:2]

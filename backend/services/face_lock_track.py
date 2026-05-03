@@ -15,6 +15,8 @@ from services.face_identity import get_face_identity
 from services.redactor import (
     adaptive_lock_alpha,
     apply_motion_to_bbox,
+    bbox_center_distance,
+    bbox_iou,
     bbox_to_state,
     create_initialized_tracker,
     estimate_global_frame_motion,
@@ -26,6 +28,7 @@ from services.redactor import (
     seed_track_points_for_kind,
     small_bbox_to_frame_bbox,
     smooth_bbox,
+    template_match_bbox_update,
     update_velocity,
     weighted_fuse_bboxes,
 )
@@ -33,14 +36,16 @@ from utils.video import small_frame_for_tracking
 
 logger = logging.getLogger("video_redaction.face_lock_track")
 
-LANE_BUILD_VERSION = 3
+LANE_BUILD_VERSION = 6
 FACE_LOCK_TRACKS_DIRNAME = "face_lock_tracks"
 DEFAULT_TRACKER_MAX_DIM = 960
 
 # Safety margin baked into the persisted lane so the visible blur
 # over-covers the head. Combined with the existing elliptical alpha
 # mask in utils.image.apply_blur this never reads as a halo.
-FACE_LOCK_SAFETY_PAD_RATIO = 0.2
+FACE_LOCK_SAFETY_PAD_RATIO = 0.035
+FACE_LOCK_FAR_HEAD_PAD_RATIO = 0.065
+FACE_LOCK_HEAD_FALLBACK_PAD_RATIO = 0.025
 # Maximum gap (seconds) between InsightFace appearances before the lane
 # splits into separate segments. Anchors are at ~1 Hz in the existing
 # detection metadata, so a 4 s gap reliably catches scene cuts.
@@ -52,12 +57,11 @@ APPEARANCE_SEGMENT_MAX_GAP_SEC = 4.0
 SEGMENT_TIME_PADDING_SEC = 0.9
 # Dense identity verification cadence (frames). Every Nth frame during
 # the build the tracker bbox is verified against an InsightFace
-# detection inside a search region around it. When the verification
-# finds the right face, the lane snaps to the InsightFace bbox and the
-# CSRT/LK trackers are reset. At 25 fps this gives ~6 verifications per
-# second, so the bbox can never drift more than a handful of frames
-# away from a real InsightFace detection.
-IDENTITY_VERIFY_INTERVAL_FRAMES = 4
+# detection inside a search region around it. Verification confirms the
+# selected identity, but motion tracking keeps primary control unless
+# the visual track is weak or lost.
+IDENTITY_VERIFY_INTERVAL_FRAMES = 2
+HEAD_FALLBACK_INTERVAL_FRAMES = 8
 # Search-region expansion factor (in face-bbox units) used when
 # re-localizing the face with InsightFace mid-track. Wide enough to
 # absorb camera shakes/zooms but tight enough to stay inside the
@@ -80,6 +84,11 @@ IDENTITY_VERIFY_MAX_SNAP_RATIO = 1.5
 # size by more than this ratio, prefer the smaller (LK) box because
 # CSRT tends to grow when adjacent textures match.
 TRACKER_SCALE_DISAGREEMENT_RATIO = 0.25
+MOTION_VERIFY_AGREE_IOU = 0.28
+MOTION_VERIFY_AGREE_CENTER_RATIO = 0.52
+MOTION_VERIFY_SOFT_BLEND = 0.28
+MOTION_VERIFY_RECOVERY_BLEND = 0.78
+MOTION_SCALE_STEP_CAP = 0.075
 
 lane_build_states = {}
 lane_build_lock = threading.Lock()
@@ -525,6 +534,133 @@ def scale_disagreement_penalty(tracker_bbox, optical_bbox):
     return max(0.4, 1.0 - min(1.0, (ratio - TRACKER_SCALE_DISAGREEMENT_RATIO) / 0.75) * 0.6)
 
 
+def clamp_bbox_scale_step(candidate_bbox, reference_bbox, frame_w, frame_h, *, max_step=MOTION_SCALE_STEP_CAP):
+    """Limit single-frame bbox scale jumps while preserving motion center.
+
+    Detector bboxes and CSRT can pulse in size on profile turns or far
+    heads. This keeps scale changes physically plausible frame-to-frame
+    while still allowing smooth zoom through accumulated motion.
+    """
+    if candidate_bbox is None or reference_bbox is None:
+        return candidate_bbox
+    cc = bbox_center(candidate_bbox)
+    if cc is None:
+        return candidate_bbox
+    cw, ch = bbox_size(candidate_bbox)
+    rw, rh = bbox_size(reference_bbox)
+    if cw <= 0 or ch <= 0 or rw <= 0 or rh <= 0:
+        return candidate_bbox
+
+    growth = 1.0 + max(0.0, float(max_step or 0.0))
+    shrink = 1.0 / growth
+    clamped_w = min(max(cw, rw * shrink), rw * growth)
+    clamped_h = min(max(ch, rh * shrink), rh * growth)
+    if abs(clamped_w - cw) < 0.001 and abs(clamped_h - ch) < 0.001:
+        return candidate_bbox
+
+    cx, cy = cc
+    x1 = max(0.0, cx - clamped_w / 2.0)
+    y1 = max(0.0, cy - clamped_h / 2.0)
+    x2 = min(float(frame_w), cx + clamped_w / 2.0)
+    y2 = min(float(frame_h), cy + clamped_h / 2.0)
+    if x2 <= x1 or y2 <= y1:
+        return candidate_bbox
+    return (x1, y1, x2, y2)
+
+
+def verification_agrees_with_motion(verified_bbox, motion_bbox):
+    if verified_bbox is None or motion_bbox is None:
+        return False, 1.0, 0.0
+    diag = max(1.0, bbox_diagonal(motion_bbox))
+    center_ratio = bbox_center_distance(verified_bbox, motion_bbox) / diag
+    iou = bbox_iou(verified_bbox, motion_bbox)
+    agrees = iou >= MOTION_VERIFY_AGREE_IOU or center_ratio <= MOTION_VERIFY_AGREE_CENTER_RATIO
+    return agrees, center_ratio, iou
+
+
+def choose_anchor_candidate(candidates, reference_bbox=None):
+    """Choose one anchor bbox from same-frame candidates.
+
+    Identity clustering can occasionally produce multiple bboxes for the
+    same selected person at the same timestamp. During tracking, prefer
+    the candidate that best continues the current motion path.
+    """
+    if not candidates:
+        return None
+    if len(candidates) == 1 or reference_bbox is None:
+        return candidates[0]
+
+    ref_diag = max(1.0, bbox_diagonal(reference_bbox))
+    ref_area = max(1.0, bbox_size(reference_bbox)[0] * bbox_size(reference_bbox)[1])
+    best = None
+    best_score = -1e9
+    for candidate in candidates:
+        bbox = candidate.get("bbox")
+        if bbox is None:
+            continue
+        cand_area = max(1.0, bbox_size(bbox)[0] * bbox_size(bbox)[1])
+        center_ratio = bbox_center_distance(bbox, reference_bbox) / ref_diag
+        area_penalty = abs(math.log(cand_area / ref_area))
+        score = bbox_iou(bbox, reference_bbox) * 3.2 - center_ratio * 1.8 - area_penalty * 0.35
+        if score > best_score:
+            best = candidate
+            best_score = score
+    return best or candidates[0]
+
+
+def choose_seed_anchor(anchors_by_frame, seed_frame, direction, reference_bbox=None):
+    candidates = anchors_by_frame.get(seed_frame) or []
+    if len(candidates) <= 1:
+        return candidates[0] if candidates else None
+
+    neighbor_frames = sorted(
+        f for f in anchors_by_frame.keys()
+        if (f > seed_frame if direction > 0 else f < seed_frame)
+    )
+    if direction < 0:
+        neighbor_frames.reverse()
+
+    best = None
+    best_score = -1e9
+    for candidate in candidates:
+        bbox = candidate.get("bbox")
+        if bbox is None:
+            continue
+        score = 0.0
+        comparisons = 0
+        if reference_bbox is not None:
+            ref_diag = max(1.0, bbox_diagonal(reference_bbox))
+            ref_area = max(1.0, bbox_size(reference_bbox)[0] * bbox_size(reference_bbox)[1])
+            cand_area = max(1.0, bbox_size(bbox)[0] * bbox_size(bbox)[1])
+            ref_center_ratio = bbox_center_distance(bbox, reference_bbox) / ref_diag
+            ref_area_penalty = abs(math.log(cand_area / ref_area))
+            score += (
+                bbox_iou(bbox, reference_bbox) * 4.0
+                - ref_center_ratio * 1.55
+                - ref_area_penalty * 0.3
+            )
+            comparisons += 1
+        for neighbor_frame in neighbor_frames[:3]:
+            neighbor = choose_anchor_candidate(anchors_by_frame.get(neighbor_frame) or [], bbox)
+            if neighbor is None:
+                continue
+            neighbor_bbox = neighbor.get("bbox")
+            if neighbor_bbox is None:
+                continue
+            diag = max(1.0, bbox_diagonal(bbox))
+            score += bbox_iou(bbox, neighbor_bbox) * 2.6
+            score -= bbox_center_distance(bbox, neighbor_bbox) / diag
+            comparisons += 1
+        if comparisons == 0:
+            score = -candidates.index(candidate) * 0.001
+        else:
+            score /= comparisons
+        if score > best_score:
+            best = candidate
+            best_score = score
+    return best or candidates[0]
+
+
 def track_segment_one_direction(
     cap,
     direction,
@@ -546,10 +682,9 @@ def track_segment_one_direction(
 
     Every ``verify_interval_frames`` frames the tracked bbox is
     additionally checked against an InsightFace detection inside a
-    search region around it. When the verification finds the right
-    face, the lane snaps to the InsightFace bbox and the trackers are
-    reset — this is what stops drift from accumulating beyond a
-    handful of frames anywhere in the lane.
+    search region around it. Verification confirms identity and nudges
+    agreeing motion tracks; it only hard-recovers the bbox when the
+    visual track is weak or lost.
 
     Returns a dict {frame_idx: {"bbox": (x1,y1,x2,y2), "src": str, "conf": float}}.
     """
@@ -646,8 +781,27 @@ def track_segment_one_direction(
             frame = None
         gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
 
-        anchor_app = anchors_by_frame.get(next_idx)
-        if anchor_app is not None:
+        anchor_candidates = anchors_by_frame.get(next_idx)
+        if isinstance(anchor_candidates, dict):
+            anchor_candidates = [anchor_candidates]
+        if anchor_candidates:
+            anchor_reference = last_bbox or smoothed_bbox
+            ref_state = bbox_to_state(anchor_reference)
+            if ref_state is not None:
+                vx, vy, vw, vh = velocity
+                cx, cy, bw, bh = ref_state
+                predicted_anchor = (
+                    max(0.0, cx + vx - max(8.0, bw + vw) / 2.0),
+                    max(0.0, cy + vy - max(8.0, bh + vh) / 2.0),
+                    min(float(frame_w), cx + vx + max(8.0, bw + vw) / 2.0),
+                    min(float(frame_h), cy + vy + max(8.0, bh + vh) / 2.0),
+                )
+                if predicted_anchor[2] > predicted_anchor[0] and predicted_anchor[3] > predicted_anchor[1]:
+                    anchor_reference = predicted_anchor
+            anchor_app = choose_anchor_candidate(anchor_candidates, anchor_reference)
+            if anchor_app is None:
+                next_idx += step
+                continue
             anchor_bbox = anchor_app["bbox"]
             smoothed_bbox = anchor_bbox
             last_bbox = anchor_bbox
@@ -708,6 +862,24 @@ def track_segment_one_direction(
                 )
                 optical_ok = optical_bbox is not None
 
+        template_bbox = None
+        template_score = 0.0
+        template_ok = False
+        if prev_small_bbox is not None and prev_gray_small is not None:
+            template_small_bbox, template_score = template_match_bbox_update(
+                prev_gray_small,
+                gray_small,
+                prev_small_bbox,
+                small_frame.shape[1],
+                small_frame.shape[0],
+                search_expand=2.0,
+            )
+            if template_small_bbox is not None:
+                template_bbox = small_bbox_to_frame_bbox(
+                    template_small_bbox, scale_back, frame_w, frame_h,
+                )
+                template_ok = template_bbox is not None
+
         global_motion = (
             estimate_global_frame_motion(prev_gray_small, gray_small)
             if prev_gray_small is not None else None
@@ -741,13 +913,14 @@ def track_segment_one_direction(
         # LK keeps tighter scale on faces because it is purely
         # point-based on the face's interior corners.
         tracker_scale_weight = (
-            scale_disagreement_penalty(tracker_bbox, optical_bbox)
-            if tracker_ok and optical_ok else 1.0
+            scale_disagreement_penalty(tracker_bbox, optical_bbox or template_bbox)
+            if tracker_ok and (optical_ok or template_ok) else 1.0
         )
 
         fused = weighted_fuse_bboxes(
             [
                 (optical_bbox, 3.4 if optical_ok else 0.0, "optical"),
+                (template_bbox, 2.15 * max(0.5, template_score) if template_ok else 0.0, "template"),
                 (tracker_bbox, 2.2 * tracker_scale_weight if tracker_ok else 0.0, "tracker"),
                 (
                     global_bbox,
@@ -764,6 +937,9 @@ def track_segment_one_direction(
 
         if fused is None:
             break
+
+        if last_bbox is not None:
+            fused = clamp_bbox_scale_step(fused, last_bbox, frame_w, frame_h)
 
         face_motion = face_motion_rate(velocity, last_state) if last_state is not None else 0.0
         scale_strength = scale_change_strength(velocity, last_state) if last_state is not None else 0.0
@@ -789,6 +965,12 @@ def track_segment_one_direction(
         elif optical_ok:
             confidence = 0.85
             src = "optical"
+        elif template_ok and tracker_ok:
+            confidence = 0.83
+            src = "tracker+template"
+        elif template_ok:
+            confidence = 0.76
+            src = "template"
         elif tracker_ok:
             confidence = 0.78
             src = "tracker"
@@ -799,13 +981,12 @@ def track_segment_one_direction(
             confidence = 0.4
             src = "predicted"
 
-        # Dense identity verification: every Nth frame, ask InsightFace
-        # if the right face is at the tracked bbox. When yes, snap the
-        # lane bbox to the InsightFace detection and reset the CSRT
-        # tracker so the next frame starts from a known-good location.
-        # This is the "the lane never drifts beyond a handful of frames"
-        # guarantee.
+        # Dense identity verification: embeddings confirm the selected
+        # person, but visual motion remains the primary position signal.
+        # A detector bbox only softly corrects an agreeing motion track;
+        # it hard-recovers the lane only when motion is weak or lost.
         verified = False
+        head_fallback = False
         if (
             known_face is not None
             and verify_interval_frames > 0
@@ -816,38 +997,140 @@ def track_segment_one_direction(
             )
             if verification is not None:
                 verified_bbox, similarity = verification
-                # Hard-lock the bbox onto the InsightFace detection when
-                # similarity is high; partially blend below that.
-                if similarity >= IDENTITY_VERIFY_HARD_LOCK_SIMILARITY:
-                    smoothed_bbox = verified_bbox
-                    last_bbox = verified_bbox
-                    velocity = (0.0, 0.0, 0.0, 0.0)
-                else:
-                    # Low-confidence match: still pull towards InsightFace
-                    # but keep the smoother's momentum so single-frame
-                    # detector noise can't yank the lane.
-                    blend = 0.65
-                    smoothed_bbox = (
-                        verified_bbox[0] * blend + smoothed_bbox[0] * (1 - blend),
-                        verified_bbox[1] * blend + smoothed_bbox[1] * (1 - blend),
-                        verified_bbox[2] * blend + smoothed_bbox[2] * (1 - blend),
-                        verified_bbox[3] * blend + smoothed_bbox[3] * (1 - blend),
+                motion_bbox = smoothed_bbox
+                motion_agrees, _center_ratio, _iou = verification_agrees_with_motion(
+                    verified_bbox,
+                    motion_bbox,
+                )
+                motion_has_signal = optical_ok or template_ok or tracker_ok or global_bbox is not None
+                motion_is_weak = (not motion_has_signal) or confidence < 0.62 or src in ("predicted", "global")
+                should_reset_tracker = False
+
+                if motion_agrees:
+                    blend = (
+                        0.36
+                        if similarity >= IDENTITY_VERIFY_HARD_LOCK_SIMILARITY
+                        else MOTION_VERIFY_SOFT_BLEND
+                    )
+                    corrected = smooth_bbox(
+                        verified_bbox,
+                        motion_bbox,
+                        blend,
+                        frame_w,
+                        frame_h,
+                        size_alpha=min(0.32, blend * 0.75),
+                    ) or motion_bbox
+                    smoothed_bbox = clamp_bbox_scale_step(
+                        corrected,
+                        motion_bbox,
+                        frame_w,
+                        frame_h,
+                        max_step=0.045,
                     )
                     last_bbox = smoothed_bbox
-
-                # Reset the CSRT tracker on the freshly-anchored bbox so
-                # the next frame starts from the verified location.
-                try:
-                    refreshed = create_initialized_tracker(
-                        small_frame, smoothed_bbox, scale_back, scale_adaptive=True,
+                    velocity = update_velocity(
+                        velocity,
+                        last_state,
+                        bbox_to_state(smoothed_bbox),
+                        alpha=0.28,
                     )
-                    if refreshed is not None:
-                        tracker = refreshed
-                except Exception:
-                    pass
-                verified = True
-                confidence = max(confidence, 0.95 if similarity >= IDENTITY_VERIFY_HARD_LOCK_SIMILARITY else 0.88)
-                src = "verified"
+                    verified = True
+                    should_reset_tracker = True
+                    confidence = max(
+                        confidence,
+                        0.93 if similarity >= IDENTITY_VERIFY_HARD_LOCK_SIMILARITY else 0.89,
+                    )
+                    src = "motion_verified"
+                elif motion_is_weak:
+                    blend = (
+                        MOTION_VERIFY_RECOVERY_BLEND
+                        if similarity >= IDENTITY_VERIFY_HARD_LOCK_SIMILARITY
+                        else 0.58
+                    )
+                    smoothed_bbox = smooth_bbox(
+                        verified_bbox,
+                        motion_bbox,
+                        blend,
+                        frame_w,
+                        frame_h,
+                        size_alpha=0.52,
+                    ) or verified_bbox
+                    last_bbox = smoothed_bbox
+                    velocity = update_velocity(
+                        velocity,
+                        last_state,
+                        bbox_to_state(smoothed_bbox),
+                        alpha=0.58,
+                    )
+                    verified = True
+                    should_reset_tracker = True
+                    confidence = max(confidence, 0.91)
+                    src = "verified" if similarity >= IDENTITY_VERIFY_HARD_LOCK_SIMILARITY else "motion_verified"
+                else:
+                    # Identity is present, but the detector box disagrees
+                    # with a stable visual track. Keep the motion track to
+                    # avoid detector jitter/teleports.
+                    confidence = max(confidence, 0.86)
+                    src = f"{src}+identity_guard"
+
+                if should_reset_tracker:
+                    try:
+                        refreshed = create_initialized_tracker(
+                            small_frame, smoothed_bbox, scale_back, scale_adaptive=True,
+                        )
+                        if refreshed is not None:
+                            tracker = refreshed
+                    except Exception:
+                        pass
+            else:
+                head_match = None
+                if abs(next_idx - cur) % HEAD_FALLBACK_INTERVAL_FRAMES == 0:
+                    try:
+                        from services.detection import localize_head_in_search_region
+
+                        head_search_bbox = expand_search_bbox(
+                            smoothed_bbox,
+                            IDENTITY_VERIFY_SEARCH_EXPAND * 1.18,
+                            frame_w,
+                            frame_h,
+                        )
+                        head_match = localize_head_in_search_region(
+                            frame,
+                            search_bbox=head_search_bbox,
+                            preferred_bbox=smoothed_bbox,
+                            strict=True,
+                        ) if head_search_bbox is not None else None
+                    except Exception:
+                        head_match = None
+
+                if head_match is not None:
+                    head_bbox = tuple(float(v) for v in head_match["bbox"])
+                    smoothed_bbox = smooth_bbox(
+                        head_bbox,
+                        smoothed_bbox,
+                        0.64,
+                        frame_w,
+                        frame_h,
+                        size_alpha=0.54,
+                    ) or head_bbox
+                    last_bbox = smoothed_bbox
+                    velocity = update_velocity(
+                        velocity,
+                        last_state,
+                        bbox_to_state(smoothed_bbox),
+                        alpha=0.65,
+                    )
+                    try:
+                        refreshed = create_initialized_tracker(
+                            small_frame, smoothed_bbox, scale_back, scale_adaptive=True,
+                        )
+                        if refreshed is not None:
+                            tracker = refreshed
+                    except Exception:
+                        pass
+                    head_fallback = True
+                    confidence = max(confidence, 0.74)
+                    src = "head_fallback"
 
         results[next_idx] = {"bbox": smoothed_bbox, "src": src, "conf": confidence}
 
@@ -855,10 +1138,10 @@ def track_segment_one_direction(
             smoothed_bbox, scale_back, small_frame.shape[1], small_frame.shape[0],
         )
         prev_small_bbox = small_bbox
-        # Reseed LK points whenever a verification snap moved the bbox,
-        # so optical flow tracks the freshly-anchored face and not the
-        # old (possibly drifted) corner cloud.
-        if verified:
+        # Reseed LK points whenever verification/head fallback corrected
+        # the bbox, so optical flow tracks the current head patch and not
+        # an old corner cloud.
+        if verified or head_fallback:
             prev_points = (
                 seed_track_points_for_kind("face", gray_small, small_bbox)
                 if small_bbox is not None else None
@@ -894,6 +1177,11 @@ def is_pinned_src(src):
     bbox we have for that frame.
     """
     return src in ("anchor", "verified")
+
+
+def is_scale_reference_src(src):
+    """Sources trusted enough to stabilize bbox size between detections."""
+    return is_pinned_src(src) or src == "head_fallback"
 
 
 def fuse_directions(forward, backward, frame_w, frame_h):
@@ -961,8 +1249,8 @@ def stabilize_scale_between_pins(lane_by_frame, frame_w, frame_h):
         return lane_by_frame
 
     indices = sorted(lane_by_frame.keys())
-    pinned_indices = [i for i in indices if is_pinned_src(lane_by_frame[i].get("src"))]
-    if len(pinned_indices) < 2:
+    scale_indices = [i for i in indices if is_scale_reference_src(lane_by_frame[i].get("src"))]
+    if len(scale_indices) < 2:
         return lane_by_frame
 
     out = {i: dict(entry) for i, entry in lane_by_frame.items()}
@@ -972,16 +1260,16 @@ def stabilize_scale_between_pins(lane_by_frame, frame_w, frame_h):
         if is_pinned_src(entry.get("src")):
             continue
         # Find the surrounding pinned frames.
-        while pin_pos + 1 < len(pinned_indices) and pinned_indices[pin_pos + 1] <= i:
+        while pin_pos + 1 < len(scale_indices) and scale_indices[pin_pos + 1] <= i:
             pin_pos += 1
-        left_i = pinned_indices[pin_pos]
-        right_i = pinned_indices[min(pin_pos + 1, len(pinned_indices) - 1)]
+        left_i = scale_indices[pin_pos]
+        right_i = scale_indices[min(pin_pos + 1, len(scale_indices) - 1)]
         if left_i > i:
             # i is before the first pinned frame: use the first pin's size.
-            target_w, target_h = bbox_size(lane_by_frame[pinned_indices[0]]["bbox"])
+            target_w, target_h = bbox_size(lane_by_frame[scale_indices[0]]["bbox"])
         elif right_i <= i:
             # i is after the last pinned frame: use the last pin's size.
-            target_w, target_h = bbox_size(lane_by_frame[pinned_indices[-1]]["bbox"])
+            target_w, target_h = bbox_size(lane_by_frame[scale_indices[-1]]["bbox"])
         else:
             lw, lh = bbox_size(lane_by_frame[left_i]["bbox"])
             rw, rh = bbox_size(lane_by_frame[right_i]["bbox"])
@@ -1040,10 +1328,25 @@ def bidirectional_smooth(lane_by_frame, frame_w, frame_h, alpha=0.6):
     return backward
 
 
-def apply_safety_pad(bbox, frame_w, frame_h, pad_ratio=FACE_LOCK_SAFETY_PAD_RATIO):
+def safety_pad_ratio_for_bbox(bbox, src=None):
+    w, h = bbox_size(bbox)
+    max_side = max(w, h)
+    pad = FACE_LOCK_SAFETY_PAD_RATIO
+    if max_side < 64:
+        pad += FACE_LOCK_FAR_HEAD_PAD_RATIO
+    elif max_side < 112:
+        pad += FACE_LOCK_FAR_HEAD_PAD_RATIO * 0.55
+    if src == "head_fallback":
+        pad += FACE_LOCK_HEAD_FALLBACK_PAD_RATIO
+    return min(0.14, max(0.0, pad))
+
+
+def apply_safety_pad(bbox, frame_w, frame_h, pad_ratio=None, src=None):
     expanded = expand_face_redaction_bbox(bbox, frame_w, frame_h)
     if not expanded:
         return None
+    if pad_ratio is None:
+        pad_ratio = safety_pad_ratio_for_bbox(bbox, src=src)
     x1, y1, x2, y2 = expanded
     bw = max(1.0, x2 - x1)
     bh = max(1.0, y2 - y1)
@@ -1082,21 +1385,42 @@ def build_segment_lane(
     anchors_by_frame = {}
     for app in anchors:
         f_idx = appearance_frame_index(app, fps)
-        anchors_by_frame[f_idx] = {
+        anchors_by_frame.setdefault(f_idx, []).append({
             "bbox": app["bbox"],
             "timestamp": app["timestamp"],
-        }
+        })
 
     # Forward pass: walk from the first anchor to end_frame, restarting
     # the tracker at every later anchor.
     first_anchor_frame = min(anchors_by_frame.keys())
     last_anchor_frame = max(anchors_by_frame.keys())
-    seg_start = max(segment["start_frame"], first_anchor_frame - int(round(SEGMENT_TIME_PADDING_SEC * fps * 2)))
-    seg_end = max(segment["start_frame"], min(segment["end_frame"], last_anchor_frame + int(round(SEGMENT_TIME_PADDING_SEC * fps * 2))))
+    # Use the full segment window, including the TwelveLabs entity range
+    # expansion from build_face_lock_segments. This matters when the selected
+    # person turns around or moves far from camera: face anchors become sparse,
+    # but the tracker should keep the blur on the same head through the whole
+    # on-screen presence instead of stopping a short padding window after the
+    # last frontal-face detection.
+    seg_start = max(0, int(segment["start_frame"]))
+    seg_end = max(seg_start, int(segment["end_frame"]))
     seg_start = max(0, seg_start)
 
-    first_bbox = anchors_by_frame[first_anchor_frame]["bbox"]
-    last_bbox = anchors_by_frame[last_anchor_frame]["bbox"]
+    seed_reference_bbox = normalize_appearance_bbox((known_face or {}).get("bbox"))
+    first_seed = choose_seed_anchor(
+        anchors_by_frame,
+        first_anchor_frame,
+        direction=1,
+        reference_bbox=seed_reference_bbox,
+    )
+    last_seed = choose_seed_anchor(
+        anchors_by_frame,
+        last_anchor_frame,
+        direction=-1,
+        reference_bbox=seed_reference_bbox,
+    )
+    if first_seed is None or last_seed is None:
+        return {}
+    first_bbox = first_seed["bbox"]
+    last_bbox = last_seed["bbox"]
 
     seg_t0 = time.monotonic()
     logger.info(
@@ -1171,7 +1495,7 @@ def serialize_lane(lane_by_frame, fps, frame_w, frame_h):
         bbox = entry.get("bbox")
         if not bbox:
             continue
-        padded = apply_safety_pad(bbox, frame_w, frame_h)
+        padded = apply_safety_pad(bbox, frame_w, frame_h, src=entry.get("src"))
         if padded is None:
             continue
         x1, y1, x2, y2 = padded
@@ -1269,7 +1593,6 @@ def build_face_lock_lane(
         # as a denominator overcounts by exactly that gap and pins the
         # progress bar somewhere below 100%; computing the real expected
         # emits lets the bar climb predictably for any segment shape.
-        seg_pad_frames = int(round(SEGMENT_TIME_PADDING_SEC * fps * 2))
         expected_emits = 0
         for seg in segments:
             seg_anchors = seg.get("anchors") or []
@@ -1280,8 +1603,8 @@ def build_face_lock_lane(
                 continue
             first_anc = min(anchor_frames)
             last_anc = max(anchor_frames)
-            seg_start_local = max(0, max(seg["start_frame"], first_anc - seg_pad_frames))
-            seg_end_local = max(seg["start_frame"], min(seg["end_frame"], last_anc + seg_pad_frames))
+            seg_start_local = max(0, int(seg["start_frame"]))
+            seg_end_local = max(seg_start_local, int(seg["end_frame"]))
             forward_count = max(0, seg_end_local - first_anc + 1)
             backward_count = max(0, last_anc - seg_start_local + 1)
             expected_emits += forward_count + backward_count

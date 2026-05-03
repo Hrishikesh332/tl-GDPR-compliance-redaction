@@ -509,7 +509,8 @@ export default function SnapFaceFromVideoModal({
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-gray-900">Captured frame</p>
                 <p className="text-xs text-gray-500">
-                  Paused at {fmtTimeShort(capturedAtSec)}. Pick the face you want to anonymize.
+                  Paused at {fmtTimeShort(capturedAtSec)}. We detect every face we can in this frame—tap one to add that
+                  person (use Snap again from this or another moment for more people).
                 </p>
               </div>
             </div>
@@ -559,9 +560,9 @@ export default function SnapFaceFromVideoModal({
                   <div>
                     <p className="text-sm text-gray-600 mb-3">
                       {detectedFaces.length === 1
-                        ? '1 face detected'
-                        : `${detectedFaces.length} faces detected`}{' '}
-                      - select the one to anonymize:
+                        ? '1 face detected in this frame.'
+                        : `${detectedFaces.length} faces detected in this frame.`}{' '}
+                      Tap one to anonymize—run Snap face again if you need another person.
                     </p>
                     <div className="flex flex-wrap gap-3">
                       {detectedFaces.map((face, idx) => (
