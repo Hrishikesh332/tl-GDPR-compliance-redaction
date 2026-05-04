@@ -14,21 +14,21 @@ def cosine_sim(a, b):
     return float(np.dot(a, b))
 
 
-def _normalize(vec):
+def normalize_vector(vec):
     norm = np.linalg.norm(vec)
     return vec / norm if norm > 0 else vec
 
 
-def _update_centroid(cluster):
+def update_centroid(cluster):
     centroid = np.mean(cluster["all_encodings"], axis=0)
-    cluster["centroid"] = _normalize(centroid)
+    cluster["centroid"] = normalize_vector(centroid)
 
 
-def _max_pairwise_sim(cluster_a, cluster_b, sample_limit=30):
-    """Best-link similarity: max cosine sim between any member of A and any member of B.
+def max_pairwise_similarity(cluster_a, cluster_b, sample_limit=30):
+    """Compare clusters by their strongest member-to-member match.
 
-    For very large clusters, sub-sample to keep runtime bounded while still
-    catching the strongest cross-cluster link.
+    Centroids can drift when one person appears across very different poses,
+    so this best-link check catches matches that a centroid-only pass misses.
     """
     encs_a = cluster_a["all_encodings"]
     encs_b = cluster_b["all_encodings"]
@@ -45,8 +45,8 @@ def _max_pairwise_sim(cluster_a, cluster_b, sample_limit=30):
     return float(sims.max())
 
 
-def _representative_encoding(cluster):
-    """Return the single highest-quality encoding in the cluster."""
+def representative_encoding(cluster):
+    """Use the sharpest, highest-confidence face as the cluster's anchor."""
     best_enc = cluster["all_encodings"][0]
     best_score = -1.0
     for enc, app in zip(cluster["all_encodings"], cluster["appearances"]):
@@ -57,10 +57,10 @@ def _representative_encoding(cluster):
     return best_enc
 
 
-def _absorb_cluster(target, source):
+def absorb_cluster(target, source):
     target["appearances"].extend(source["appearances"])
     target["all_encodings"].extend(source["all_encodings"])
-    _update_centroid(target)
+    update_centroid(target)
     if source.get("best_score", 0) > target.get("best_score", 0):
         target["best_snap"] = source["best_snap"]
         target["best_area"] = source["best_area"]
@@ -68,14 +68,7 @@ def _absorb_cluster(target, source):
 
 
 def cluster_faces(all_faces, similarity_threshold=None):
-    """Cluster face detections into unique identities using cosine similarity
-    on InsightFace 512-d ArcFace embeddings.
-
-    Uses three merging strategies for robustness:
-      1. Initial greedy assignment (new face vs best cluster member + centroid)
-      2. Centroid merge pass (merge clusters whose centroids are close)
-      3. Best-link merge pass (merge clusters that share ANY close member pair)
-    """
+    """Cluster InsightFace embeddings into stable people for the editor."""
     if similarity_threshold is None:
         similarity_threshold = COSINE_SIM_THRESHOLD
 
@@ -87,14 +80,11 @@ def cluster_faces(all_faces, similarity_threshold=None):
 
     clusters = []
 
-    # ── Pass 1: greedy assignment ────────────────────────────────────
-    # Each face is compared against BOTH the centroid and the best
-    # individual member of every cluster.  This avoids the problem where
-    # a centroid drifts due to averaging across poses/angles while
-    # individual members would clearly match.
+    # First assign each detection greedily using both the centroid and direct
+    # member matches. This keeps profile/frontal views from splitting too early.
     for face in faces_with_enc:
         enc = np.array(face["encoding"], dtype=np.float32)
-        enc = _normalize(enc)
+        enc = normalize_vector(enc)
 
         best_cluster = None
         best_sim = -1.0
@@ -114,7 +104,7 @@ def cluster_faces(all_faces, similarity_threshold=None):
         if best_cluster is not None:
             best_cluster["appearances"].append(face)
             best_cluster["all_encodings"].append(enc)
-            _update_centroid(best_cluster)
+            update_centroid(best_cluster)
             score = float(face.get("det_score", 0) or 0) + float(face.get("sharpness", 0) or 0) * 0.01
             if score > best_cluster.get("best_score", 0):
                 best_cluster["best_snap"] = face
@@ -130,8 +120,8 @@ def cluster_faces(all_faces, similarity_threshold=None):
                 "appearances": [face],
             })
 
-    # ── Pass 2: centroid merge ───────────────────────────────────────
-    for _pass in range(MAX_MERGE_PASSES):
+    # Merge clusters whose averaged embeddings are close.
+    for merge_pass in range(MAX_MERGE_PASSES):
         merged = False
         new_clusters = []
         used = set()
@@ -144,7 +134,7 @@ def cluster_faces(all_faces, similarity_threshold=None):
                     continue
                 sim = cosine_sim(current["centroid"], clusters[j]["centroid"])
                 if sim > CENTROID_MERGE_THRESHOLD:
-                    _absorb_cluster(current, clusters[j])
+                    absorb_cluster(current, clusters[j])
                     used.add(j)
                     merged = True
             new_clusters.append(current)
@@ -152,11 +142,8 @@ def cluster_faces(all_faces, similarity_threshold=None):
         if not merged:
             break
 
-    # ── Pass 3: best-link merge ──────────────────────────────────────
-    # Even when centroids diverge (e.g. frontal vs profile clusters),
-    # individual members may still clearly match.  Merge any pair of
-    # clusters whose best cross-pair similarity exceeds the threshold.
-    for _pass in range(MAX_MERGE_PASSES):
+    # Then merge by best direct member match so pose-heavy clusters can reunite.
+    for merge_pass in range(MAX_MERGE_PASSES):
         merged = False
         new_clusters = []
         used = set()
@@ -167,9 +154,9 @@ def cluster_faces(all_faces, similarity_threshold=None):
             for j in range(i + 1, len(clusters)):
                 if j in used:
                     continue
-                best_link = _max_pairwise_sim(current, clusters[j])
+                best_link = max_pairwise_similarity(current, clusters[j])
                 if best_link > MERGE_BEST_LINK_THRESHOLD:
-                    _absorb_cluster(current, clusters[j])
+                    absorb_cluster(current, clusters[j])
                     used.add(j)
                     merged = True
             new_clusters.append(current)
@@ -177,14 +164,12 @@ def cluster_faces(all_faces, similarity_threshold=None):
         if not merged:
             break
 
-    # ── Pass 4: representative encoding merge ────────────────────────
-    # Compare the single highest-quality face from each cluster as a
-    # final safety net to catch clusters that slipped through.
-    for _pass in range(MAX_MERGE_PASSES):
+    # Finally compare each cluster's best face crop as a last conservative pass.
+    for merge_pass in range(MAX_MERGE_PASSES):
         merged = False
         new_clusters = []
         used = set()
-        reps = [_representative_encoding(c) for c in clusters]
+        reps = [representative_encoding(c) for c in clusters]
         for i in range(len(clusters)):
             if i in used:
                 continue
@@ -194,10 +179,10 @@ def cluster_faces(all_faces, similarity_threshold=None):
                     continue
                 sim = cosine_sim(reps[i], reps[j])
                 if sim > similarity_threshold:
-                    _absorb_cluster(current, clusters[j])
+                    absorb_cluster(current, clusters[j])
                     used.add(j)
                     merged = True
-                    reps[i] = _representative_encoding(current)
+                    reps[i] = representative_encoding(current)
             new_clusters.append(current)
         clusters = new_clusters
         if not merged:

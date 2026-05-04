@@ -99,6 +99,43 @@ OVERVIEW_ABOUT_KEY = "overview_about"
 OVERVIEW_TOPICS_KEY = "overview_topics"
 OVERVIEW_CATEGORIES_KEY = "overview_categories"
 
+PIPELINE_METADATA_RESPONSE_FORMAT = {
+    "type": "segment_definitions",
+    "segment_definitions": [
+        {
+            "id": "face_redaction_target",
+            "description": (
+                "Return people segments for face redaction decisions. Create one segment per "
+                "distinct face/person for each continuous time range where their face is visible "
+                "enough to matter for redaction. Mark should_anonymize=true only when the face "
+                "clearly needs privacy redaction. If the identity/category is ambiguous, the face "
+                "is too small/blurred, or the person may be official/public-facing, set "
+                "should_anonymize=false and review_required=true. Include official/public-facing "
+                "people as non-redaction matches. Focus on faces and people, not objects, "
+                "clothing-only shots, backs of heads, or crowd blobs where no face is visible."
+            ),
+            "fields": [
+                {"name": "name", "type": "string", "description": "Visible name if known, otherwise blank."},
+                {"name": "description", "type": "string", "description": "Face-focused visual match text: face visibility, hair/headwear, clothing, role, and distinguishing features."},
+                {"name": "should_anonymize", "type": "boolean", "description": "True only when this visible face clearly should be redacted for privacy. Use false for official/public-facing people, ambiguous cases, low-confidence matches, unclear faces, or faces that need human review."},
+                {"name": "is_official", "type": "boolean", "description": "True only for clearly official/public-facing people such as on-duty police, judges, anchors, presenters, or public officials; otherwise false."},
+                {"name": "review_required", "type": "boolean", "description": "True when a human should verify whether this face should be redacted before applying blur."},
+                {"name": "redaction_reason", "type": "string", "description": "Short reason for the recommendation, especially why auto-redaction is clear or why review is required."},
+                {"name": "tags", "type": "string", "description": "Comma-separated tags. Include Anonymized only when should_anonymize is true. Include Official when is_official is true. Include Review when review_required is true."},
+                {"name": "confidence", "type": "number", "description": "Confidence from 0 to 1."},
+            ],
+        },
+        {
+            "id": "scene_segment",
+            "description": "Return concise scene-by-scene timeline context only. Do not list objects or create redaction targets here.",
+            "fields": [
+                {"name": "description", "type": "string", "description": "Scene summary, camera framing, setting, and notable transition."},
+                {"name": "confidence", "type": "number", "description": "Confidence from 0 to 1."},
+            ],
+        },
+    ],
+}
+
 
 def get_client():
     global twelvelabs_client
@@ -239,6 +276,312 @@ def get_scene_summary(video_id):
         warning_message=None,
         log_message="Getting scene summary for video %s",
     )
+
+
+def string_value(value):
+    return value.strip() if isinstance(value, str) else ""
+
+
+def as_float(value, default=None):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if value == value else default
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def as_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def extract_pegasus_task_id(payload):
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("id", "_id", "task_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def extract_pegasus_status(payload):
+    if not isinstance(payload, dict):
+        return "processing"
+    raw = string_value(get_value(payload, "status", "state")).lower()
+    if raw in {"ready", "completed", "complete", "succeeded", "success"}:
+        return "ready"
+    if raw in {"failed", "error"}:
+        return "failed"
+    if raw in {"queued", "pending"}:
+        return "queued"
+    return "processing"
+
+
+def parse_json_text(value):
+    if not isinstance(value, str):
+        return None
+    return parse_json_markdown_response(value)
+
+
+def find_task_result(payload):
+    if not isinstance(payload, dict):
+        return payload
+    for key in ("result", "results", "data", "output", "response"):
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return payload
+
+
+def extract_segment_fields(segment):
+    if not isinstance(segment, dict):
+        return {}
+    fields = {}
+    for container_key in ("fields", "metadata", "attributes", "values", "response"):
+        value = segment.get(container_key)
+        if isinstance(value, dict):
+            fields.update(value)
+    fields.update(segment)
+    return fields
+
+
+def extract_segment_time(fields, *, start):
+    keys = (
+        ("start_sec", "start_time", "start", "begin", "from")
+        if start
+        else ("end_sec", "end_time", "end", "finish", "to")
+    )
+    value = as_float(get_value(fields, *keys), None)
+    if value is not None:
+        return max(0.0, value)
+    nested = fields.get("time_range") or fields.get("timestamp") or fields.get("time")
+    if isinstance(nested, dict):
+        nested_value = as_float(get_value(nested, *keys), None)
+        if nested_value is not None:
+            return max(0.0, nested_value)
+    return 0.0
+
+
+def segments_from_payload(payload):
+    if isinstance(payload, str):
+        parsed = parse_json_text(payload)
+        return segments_from_payload(parsed) if parsed is not None else []
+    if isinstance(payload, list):
+        return [(None, item) for item in payload]
+    if not isinstance(payload, dict):
+        return []
+
+    segments = []
+    definition_ids = {
+        item.get("id")
+        for item in PIPELINE_METADATA_RESPONSE_FORMAT.get("segment_definitions", [])
+        if isinstance(item, dict)
+    }
+    for definition_id in definition_ids:
+        value = payload.get(definition_id)
+        if isinstance(value, list):
+            segments.extend((definition_id, item) for item in value)
+        elif isinstance(value, str):
+            parsed = parse_json_text(value)
+            if isinstance(parsed, list):
+                segments.extend((definition_id, item) for item in parsed)
+
+    if segments:
+        return segments
+
+    for key in ("segments", "items", "chapters", "highlights", "data"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return [(None, item) for item in value]
+        if isinstance(value, str):
+            parsed = parse_json_text(value)
+            nested = segments_from_payload(parsed) if parsed is not None else []
+            if nested:
+                return nested
+
+    result = payload.get("result")
+    if result is not None and result is not payload:
+        nested = segments_from_payload(result)
+        if nested:
+            return nested
+
+    return []
+
+
+def classify_pipeline_segment(definition_id, fields):
+    raw = string_value(
+        definition_id
+        or get_value(fields, "segment_definition_id", "definition_id", "segment_id", "category", "type")
+    ).lower()
+    if "scene" in raw:
+        return "scene"
+    return "person"
+
+
+def parse_tags(value):
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return []
+
+
+def parse_pegasus_pipeline_metadata(task_payload):
+    result = find_task_result(task_payload)
+    segments = segments_from_payload(result)
+    people_by_key = {}
+    scenes = []
+
+    for definition_id, segment in segments:
+        fields = extract_segment_fields(segment)
+        if not fields:
+            continue
+        start_sec = extract_segment_time(fields, start=True)
+        end_sec = extract_segment_time(fields, start=False)
+        if end_sec < start_sec:
+            start_sec, end_sec = end_sec, start_sec
+        if end_sec == start_sec:
+            end_sec = start_sec + 1.0
+
+        kind = classify_pipeline_segment(definition_id, fields)
+        if kind == "scene":
+            description = string_value(get_value(fields, "description", "summary", "scene_description"))
+            if description:
+                scenes.append({
+                    "start_sec": round(start_sec, 3),
+                    "end_sec": round(end_sec, 3),
+                    "description": description,
+                })
+            continue
+
+        name = string_value(get_value(fields, "name", "label", "person_name"))
+        description = string_value(get_value(fields, "description", "summary", "visual_description"))
+        if not name and not description:
+            continue
+        confidence = as_float(get_value(fields, "confidence", "score"), None)
+        review_required = as_bool(get_value(fields, "review_required", "needs_review", "human_review"), False)
+        redaction_reason = string_value(get_value(fields, "redaction_reason", "reason", "rationale"))
+        key = (name.lower(), description.lower()[:120])
+        entry = people_by_key.setdefault(key, {
+            "name": name,
+            "description": description,
+            "time_ranges": [],
+            "should_anonymize": as_bool(get_value(fields, "should_anonymize", "redact", "needs_redaction"), False),
+            "is_official": as_bool(get_value(fields, "is_official", "official"), False),
+            "review_required": review_required,
+            "redaction_reason": redaction_reason,
+            "tags": parse_tags(get_value(fields, "tags")),
+        })
+        if confidence is not None:
+            entry["confidence"] = max(float(entry.get("confidence", 0.0) or 0.0), confidence)
+        if not entry.get("name") and name:
+            entry["name"] = name
+        if len(description) > len(entry.get("description") or ""):
+            entry["description"] = description
+        entry["should_anonymize"] = bool(entry.get("should_anonymize")) or as_bool(
+            get_value(fields, "should_anonymize", "redact", "needs_redaction"),
+            False,
+        )
+        entry["is_official"] = bool(entry.get("is_official")) or as_bool(
+            get_value(fields, "is_official", "official"),
+            False,
+        )
+        entry["review_required"] = bool(entry.get("review_required")) or review_required
+        if redaction_reason and len(redaction_reason) > len(entry.get("redaction_reason") or ""):
+            entry["redaction_reason"] = redaction_reason
+        tags = entry.setdefault("tags", [])
+        for tag in parse_tags(get_value(fields, "tags")):
+            if tag not in tags:
+                tags.append(tag)
+        entry["time_ranges"].append({
+            "start_sec": round(start_sec, 3),
+            "end_sec": round(end_sec, 3),
+        })
+
+    people = list(people_by_key.values())
+    people.sort(key=lambda item: (
+        not bool(item.get("should_anonymize")),
+        item.get("time_ranges", [{}])[0].get("start_sec", 0.0),
+        item.get("name") or item.get("description") or "",
+    ))
+    scenes.sort(key=lambda item: (item["start_sec"], item["end_sec"]))
+    return {
+        "people": people,
+        "objects": [],
+        "scene_summary": {"scenes": scenes},
+    }
+
+
+def create_pegasus_pipeline_metadata_task(asset_id):
+    body = {
+        "video": {
+            "type": "asset_id",
+            "asset_id": asset_id,
+        },
+        "model_name": "pegasus1.5",
+        "analysis_mode": "time_based_metadata",
+        "response_format": PIPELINE_METADATA_RESPONSE_FORMAT,
+        "temperature": 0.1,
+    }
+    logger.info("Creating Pegasus 1.5 pipeline metadata task from asset id %s", asset_id)
+    return twelvelabs_api_request(
+        "POST",
+        "analyze/tasks",
+        json_body=body,
+        expected_status=(200, 201, 202),
+        timeout=TWELVELABS_REST_TIMEOUT_SEC,
+    )
+
+
+def retrieve_pegasus_pipeline_metadata_task(task_id):
+    logger.info("Retrieving Pegasus pipeline metadata task %s", task_id)
+    return twelvelabs_api_request(
+        "GET",
+        f"analyze/tasks/{task_id}",
+        expected_status=(200,),
+        timeout=TWELVELABS_REST_TIMEOUT_SEC,
+    )
+
+
+def wait_for_pegasus_pipeline_metadata(task_id, *, timeout_sec=None, poll_interval_sec=5.0):
+    deadline = time.time() + float(timeout_sec or TWELVELABS_ANALYZE_TIMEOUT_SEC)
+    while time.time() < deadline:
+        payload = retrieve_pegasus_pipeline_metadata_task(task_id)
+        status = extract_pegasus_status(payload if isinstance(payload, dict) else {})
+        if status == "ready":
+            return payload
+        if status == "failed":
+            raise RuntimeError("Pegasus 1.5 pipeline metadata task failed.")
+        time.sleep(max(1.0, float(poll_interval_sec)))
+    raise TimeoutError(
+        f"Pegasus 1.5 pipeline metadata task did not finish within {int(timeout_sec or TWELVELABS_ANALYZE_TIMEOUT_SEC)} seconds."
+    )
+
+
+def describe_video_with_pegasus(video_id):
+    task = create_pegasus_pipeline_metadata_task(video_id)
+    task_id = extract_pegasus_task_id(task if isinstance(task, dict) else {})
+    if not task_id:
+        raise RuntimeError("TwelveLabs did not return a Pegasus 1.5 pipeline metadata task id.")
+
+    status = extract_pegasus_status(task if isinstance(task, dict) else {})
+    task_payload = task if status == "ready" else wait_for_pegasus_pipeline_metadata(task_id)
+    metadata = parse_pegasus_pipeline_metadata(task_payload if isinstance(task_payload, dict) else {})
+    metadata["task_id"] = task_id
+    return metadata
 
 
 def run_search_query(client, kwargs, *, image_path=None, image_paths=None, image_url=None):

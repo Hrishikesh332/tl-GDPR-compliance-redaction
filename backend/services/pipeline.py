@@ -8,12 +8,12 @@ from datetime import datetime, timezone
 import numpy as np
 
 from config import (
-    OUTPUT_DIR, KEYFRAME_INTERVAL_SEC, OBJECT_CONF_THRESHOLD,
+    OUTPUT_DIR, KEYFRAME_INTERVAL_SEC,
     DEFAULT_BLUR_STRENGTH, DEFAULT_DETECT_EVERY_N,
 )
 from services import twelvelabs_service
-from services.detection import detect_faces, detect_objects
-from services.clustering import cluster_faces, cluster_objects
+from services.detection import detect_faces
+from services.clustering import cluster_faces
 from services.face_identity import ensure_face_identity, get_face_identity
 from services.redactor import redact_video
 from utils.video import (
@@ -25,9 +25,7 @@ from utils.downloads import safe_redacted_mp4_filename
 from utils.storage import (
     get_run_dir,
     save_unique_face_snaps,
-    save_unique_object_snaps,
     save_detection_metadata,
-    load_detection_metadata,
     load_faces_objects_from_disk,
     save_job_manifest,
     load_job_manifest,
@@ -35,9 +33,11 @@ from utils.storage import (
 )
 logger = logging.getLogger("video_redaction.pipeline")
 
-_jobs = {}
-_lock = threading.Lock()
-_manifests_cleaned = False
+jobs = {}
+jobs_lock = threading.Lock()
+manifests_cleaned = False
+FACE_DESCRIPTION_MIN_MATCH_SCORE = 4.0
+FACE_PRIVACY_MIN_CONFIDENCE = 0.68
 
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm")
 
@@ -72,10 +72,10 @@ def cleanup_duplicate_video_id_mappings():
     heuristic recovery), keep only the newest job's mapping and clear the
     rest.  This runs once on first lookup.
     """
-    global _manifests_cleaned
-    if _manifests_cleaned:
+    global manifests_cleaned
+    if manifests_cleaned:
         return
-    _manifests_cleaned = True
+    manifests_cleaned = True
     cleanup_orphan_temp_files()
 
     video_to_jobs = {}
@@ -94,7 +94,7 @@ def cleanup_duplicate_video_id_mappings():
             continue
         entries.sort(key=lambda e: e[1], reverse=True)
         winner_jid = entries[0][0]
-        for jid, _mtime, manifest in entries[1:]:
+        for jid, entry_mtime, manifest in entries[1:]:
             logger.info(
                 "Clearing stale video_id mapping: job %s had video_id %s (belongs to job %s)",
                 jid, vid, winner_jid,
@@ -310,6 +310,7 @@ def load_job_from_disk(job_id):
     manifest = load_job_manifest(job_id)
     disk = load_faces_objects_from_disk(job_id)
     run_mtime = run_dir_mtime(job_id)
+    manifest_changed = False
 
     if manifest is None and disk is None:
         return None
@@ -323,6 +324,7 @@ def load_job_from_disk(job_id):
         if video_path:
             manifest = manifest or {"job_id": job_id}
             manifest["video_path"] = video_path
+            manifest_changed = True
 
     created_at = (manifest or {}).get("created_at")
     if not created_at and run_mtime is not None:
@@ -340,6 +342,7 @@ def load_job_from_disk(job_id):
         )
         if manifest:
             manifest["status"] = stored_status
+            manifest_changed = True
 
     job = {
         "status": stored_status,
@@ -359,7 +362,7 @@ def load_job_from_disk(job_id):
         "total_object_detections": len(disk["unique_objects"]) if disk else 0,
     }
 
-    if manifest:
+    if manifest and manifest_changed:
         persist_job_manifest(job_id, overrides=manifest)
     return job
 
@@ -422,14 +425,14 @@ def new_job_id():
 
 
 def get_job(job_id):
-    with _lock:
-        job = _jobs.get(job_id)
+    with jobs_lock:
+        job = jobs.get(job_id)
     if job:
         return job
     disk_job = load_job_from_disk(job_id)
     if disk_job:
-        with _lock:
-            _jobs[job_id] = disk_job
+        with jobs_lock:
+            jobs[job_id] = disk_job
         return disk_job
     return None
 
@@ -440,7 +443,7 @@ def get_job_id_by_video_id(video_id):
         return None
     cleanup_duplicate_video_id_mappings()
 
-    def _candidate_key(job_id, source):
+    def candidate_key(job_id, source):
         created_at = parse_iso_timestamp((source or {}).get("created_at"))
         run_time = run_dir_mtime(job_id)
         effective_time = created_at if created_at is not None else (run_time if run_time is not None else 0.0)
@@ -453,8 +456,8 @@ def get_job_id_by_video_id(video_id):
         return (effective_time, status_rank, job_id)
 
     candidates = {}
-    with _lock:
-        for jid, j in _jobs.items():
+    with jobs_lock:
+        for jid, j in jobs.items():
             if j.get("twelvelabs_video_id") == video_id:
                 candidates[jid] = dict(j)
     for jid in list_run_ids():
@@ -463,7 +466,7 @@ def get_job_id_by_video_id(video_id):
             if jid not in candidates:
                 candidates[jid] = manifest
     if candidates:
-        return max(candidates.items(), key=lambda item: _candidate_key(item[0], item[1]))[0]
+        return max(candidates.items(), key=lambda item: candidate_key(item[0], item[1]))[0]
     return None
 
 
@@ -472,7 +475,7 @@ def get_exact_job_id_by_video_id(video_id):
     if not video_id:
         return None
 
-    def _candidate_key(job_id, source):
+    def candidate_key(job_id, source):
         created_at = parse_iso_timestamp((source or {}).get("created_at"))
         run_time = run_dir_mtime(job_id)
         effective_time = created_at if created_at is not None else (run_time if run_time is not None else 0.0)
@@ -485,8 +488,8 @@ def get_exact_job_id_by_video_id(video_id):
         return (effective_time, status_rank, job_id)
 
     candidates = {}
-    with _lock:
-        for jid, j in _jobs.items():
+    with jobs_lock:
+        for jid, j in jobs.items():
             if j.get("twelvelabs_video_id") == video_id:
                 candidates[jid] = dict(j)
     for jid in list_run_ids():
@@ -494,7 +497,7 @@ def get_exact_job_id_by_video_id(video_id):
         if manifest and manifest.get("twelvelabs_video_id") == video_id and jid not in candidates:
             candidates[jid] = manifest
     if candidates:
-        return max(candidates.items(), key=lambda item: _candidate_key(item[0], item[1]))[0]
+        return max(candidates.items(), key=lambda item: candidate_key(item[0], item[1]))[0]
     return None
 
 
@@ -548,7 +551,7 @@ def ensure_job_for_video(video_id, interval_sec=None, force=False):
 
 
 def list_jobs():
-    with _lock:
+    with jobs_lock:
         return [
             {
                 "job_id": jid,
@@ -556,7 +559,7 @@ def list_jobs():
                 "created_at": j.get("created_at"),
                 "video_filename": j.get("video_filename"),
             }
-            for jid, j in _jobs.items()
+            for jid, j in jobs.items()
         ]
 
 
@@ -564,8 +567,8 @@ def start_ingestion(video_path, video_filename=None, interval_sec=None, skip_ind
     job_id = new_job_id()
     interval = interval_sec or KEYFRAME_INTERVAL_SEC
 
-    with _lock:
-        _jobs[job_id] = {
+    with jobs_lock:
+        jobs[job_id] = {
             "status": "processing",
             "video_path": video_path,
             "video_filename": video_filename,
@@ -575,7 +578,7 @@ def start_ingestion(video_path, video_filename=None, interval_sec=None, skip_ind
             "local_status": "pending",
             "error": None,
         }
-    persist_job_manifest(job_id, job=_jobs[job_id])
+    persist_job_manifest(job_id, job=jobs[job_id])
 
     thread = threading.Thread(
         target=run_ingestion,
@@ -590,18 +593,16 @@ def run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existin
     try:
         logger.info("[Job %s] Pipeline started (interval=%.1fs, skip_indexing=%s)", job_id, interval_sec, skip_indexing)
 
-        # ── STEP 1: Video metadata ──────────────────────────────────────
         logger.info("[Job %s] STEP 1/7: Getting video metadata...", job_id)
         metadata = get_video_metadata(video_path)
-        with _lock:
-            _jobs[job_id]["video_metadata"] = metadata
-            snapshot = dict(_jobs[job_id])
+        with jobs_lock:
+            jobs[job_id]["video_metadata"] = metadata
+            snapshot = dict(jobs[job_id])
         persist_job_manifest(job_id, job=snapshot)
         logger.info("[Job %s] STEP 1/7: Done — %sx%s, %.1fs, %.0f fps", job_id,
                     metadata.get("width"), metadata.get("height"),
                     metadata.get("duration_sec"), metadata.get("fps"))
 
-        # ── STEP 2: TwelveLabs upload & index (skipped if already indexed) ──
         video_id = (existing_video_id or "").strip() or None
         people_desc = []
         objects_desc = []
@@ -609,79 +610,77 @@ def run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existin
 
         if skip_indexing and video_id:
             logger.info("[Job %s] STEP 2/7: Skipping indexing — using existing video_id=%s", job_id, video_id)
-            with _lock:
-                _jobs[job_id]["twelvelabs_video_id"] = video_id
-                _jobs[job_id]["twelvelabs_status"] = "indexed"
-                snapshot = dict(_jobs[job_id])
+            with jobs_lock:
+                jobs[job_id]["twelvelabs_video_id"] = video_id
+                jobs[job_id]["twelvelabs_status"] = "indexed"
+                snapshot = dict(jobs[job_id])
             persist_job_manifest(job_id, job=snapshot)
         elif skip_indexing:
             logger.info("[Job %s] STEP 2/7: Skipping indexing (no video_id provided)", job_id)
-            with _lock:
-                _jobs[job_id]["twelvelabs_status"] = "skipped"
-                snapshot = dict(_jobs[job_id])
+            with jobs_lock:
+                jobs[job_id]["twelvelabs_status"] = "skipped"
+                snapshot = dict(jobs[job_id])
             persist_job_manifest(job_id, job=snapshot)
         else:
             logger.info("[Job %s] STEP 2/7: TwelveLabs — uploading and indexing video...", job_id)
-            with _lock:
-                _jobs[job_id]["twelvelabs_status"] = "uploading"
+            with jobs_lock:
+                jobs[job_id]["twelvelabs_status"] = "uploading"
 
             try:
                 tl_result = twelvelabs_service.ingest_video(video_path)
                 video_id = tl_result["video_id"]
                 task_id = tl_result["task_id"]
 
-                with _lock:
-                    _jobs[job_id]["twelvelabs_video_id"] = video_id
-                    _jobs[job_id]["twelvelabs_task_id"] = task_id
-                    _jobs[job_id]["twelvelabs_status"] = "indexed"
-                    snapshot = dict(_jobs[job_id])
+                with jobs_lock:
+                    jobs[job_id]["twelvelabs_video_id"] = video_id
+                    jobs[job_id]["twelvelabs_task_id"] = task_id
+                    jobs[job_id]["twelvelabs_status"] = "indexed"
+                    snapshot = dict(jobs[job_id])
                 persist_job_manifest(job_id, job=snapshot)
 
                 logger.info("[Job %s] STEP 2/7: Done — indexed, video_id=%s", job_id, video_id)
 
             except Exception as e:
                 logger.warning("[Job %s] STEP 2/7: TwelveLabs indexing failed: %s (will use interval keyframes)", job_id, str(e))
-                with _lock:
-                    _jobs[job_id]["twelvelabs_status"] = f"index_failed: {str(e)}"
-                    snapshot = dict(_jobs[job_id])
+                with jobs_lock:
+                    jobs[job_id]["twelvelabs_status"] = f"index_failed: {str(e)}"
+                    snapshot = dict(jobs[job_id])
                 persist_job_manifest(job_id, job=snapshot)
 
-        # ── STEP 3: TwelveLabs analysis → get timestamps ────────────────
         if video_id:
-            logger.info("[Job %s] STEP 3/7: TwelveLabs — analyzing (people, objects, scenes)...", job_id)
-            with _lock:
-                _jobs[job_id]["twelvelabs_status"] = "analyzing"
+            logger.info("[Job %s] STEP 3/7: TwelveLabs — Pegasus 1.5 metadata (people, scenes)...", job_id)
+            with jobs_lock:
+                jobs[job_id]["twelvelabs_status"] = "pegasus_metadata"
 
             try:
-                people_desc = twelvelabs_service.describe_people(video_id)
-                objects_desc = twelvelabs_service.describe_objects(video_id)
-                scene_summary = twelvelabs_service.get_scene_summary(video_id)
+                pegasus_metadata = twelvelabs_service.describe_video_with_pegasus(video_id)
+                people_desc = pegasus_metadata.get("people", [])
+                objects_desc = []
+                scene_summary = pegasus_metadata.get("scene_summary", {})
 
-                with _lock:
-                    _jobs[job_id]["twelvelabs_people"] = people_desc
-                    _jobs[job_id]["twelvelabs_objects"] = objects_desc
-                    _jobs[job_id]["twelvelabs_scene_summary"] = scene_summary
-                    _jobs[job_id]["twelvelabs_status"] = "analyzed"
-                    snapshot = dict(_jobs[job_id])
+                with jobs_lock:
+                    jobs[job_id]["twelvelabs_people"] = people_desc
+                    jobs[job_id]["twelvelabs_objects"] = objects_desc
+                    jobs[job_id]["twelvelabs_scene_summary"] = scene_summary
+                    jobs[job_id]["twelvelabs_pegasus_metadata_task_id"] = pegasus_metadata.get("task_id")
+                    jobs[job_id]["twelvelabs_status"] = "pegasus_metadata_ready"
+                    snapshot = dict(jobs[job_id])
                 persist_job_manifest(job_id, job=snapshot)
 
-                logger.info("[Job %s] STEP 3/7: Done — analysis complete", job_id)
+                logger.info("[Job %s] STEP 3/7: Done — Pegasus 1.5 metadata complete", job_id)
 
             except Exception as e:
-                logger.warning("[Job %s] STEP 3/7: TwelveLabs analysis failed: %s", job_id, str(e))
-                with _lock:
-                    _jobs[job_id]["twelvelabs_status"] = f"analysis_failed: {str(e)}"
-                    snapshot = dict(_jobs[job_id])
+                logger.warning("[Job %s] STEP 3/7: Pegasus 1.5 metadata failed: %s", job_id, str(e))
+                with jobs_lock:
+                    jobs[job_id]["twelvelabs_status"] = f"pegasus_metadata_failed: {str(e)}"
+                    snapshot = dict(jobs[job_id])
                 persist_job_manifest(job_id, job=snapshot)
         else:
             logger.info("[Job %s] STEP 3/7: Skipped (no video_id)", job_id)
 
-        # ── STEP 4: Extract keyframes ───────────────────────────────────
-        # Prefer timestamps from TwelveLabs analysis; fall back to
-        # uniform interval sampling when analysis didn't produce ranges.
         logger.info("[Job %s] STEP 4/7: Extracting keyframes...", job_id)
-        with _lock:
-            _jobs[job_id]["local_status"] = "extracting_keyframes"
+        with jobs_lock:
+            jobs[job_id]["local_status"] = "extracting_keyframes"
 
         analyzed_timestamps = collect_timestamps_from_analysis(
             people_desc, objects_desc
@@ -694,56 +693,47 @@ def run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existin
             keyframes = extract_keyframes(video_path, interval_sec=interval_sec)
             logger.info("[Job %s] STEP 4/7: Done — %d keyframes at %.1fs interval (no analysis timestamps)", job_id, len(keyframes), interval_sec)
 
-        # ── STEP 5: Face + object detection on keyframes ────────────────
-        logger.info("[Job %s] STEP 5/7: Face and object detection on %d keyframes...", job_id, len(keyframes))
-        with _lock:
-            _jobs[job_id]["local_status"] = "detecting"
+        logger.info("[Job %s] STEP 5/7: Face detection on %d keyframes...", job_id, len(keyframes))
+        with jobs_lock:
+            jobs[job_id]["local_status"] = "detecting"
 
         all_faces = []
         all_objects = []
 
         for kf in keyframes:
             faces = detect_faces(kf["frame"], with_encodings=True)
-            objects = detect_objects(kf["frame"], conf_threshold=OBJECT_CONF_THRESHOLD)
             for f in faces:
                 f["frame_idx"] = kf["frame_idx"]
                 f["timestamp"] = kf["timestamp"]
                 all_faces.append(f)
-            for o in objects:
-                o["frame_idx"] = kf["frame_idx"]
-                o["timestamp"] = kf["timestamp"]
-                all_objects.append(o)
 
-        logger.info("[Job %s] STEP 5/7: Done — %d face detections, %d object detections", job_id, len(all_faces), len(all_objects))
+        logger.info("[Job %s] STEP 5/7: Done — %d face detections, object detection disabled", job_id, len(all_faces))
 
-        # ── STEP 6: Clustering ──────────────────────────────────────────
-        logger.info("[Job %s] STEP 6/7: Clustering into unique faces and objects...", job_id)
-        with _lock:
-            _jobs[job_id]["local_status"] = "clustering"
+        logger.info("[Job %s] STEP 6/7: Clustering into unique faces...", job_id)
+        with jobs_lock:
+            jobs[job_id]["local_status"] = "clustering"
 
         unique_faces = cluster_faces(all_faces)
-        unique_objects = cluster_objects(all_objects)
+        unique_objects = []
         logger.info("[Job %s] STEP 6/7: Done — %d unique faces, %d unique objects", job_id, len(unique_faces), len(unique_objects))
 
-        # ── STEP 7: Save snapshots ──────────────────────────────────────
         logger.info("[Job %s] STEP 7/7: Saving snapshots to disk...", job_id)
         run_dir = get_run_dir(job_id)
         save_unique_face_snaps(run_dir, unique_faces)
-        save_unique_object_snaps(run_dir, unique_objects)
 
         enrich_faces_with_descriptions(job_id, people_desc, unique_faces)
         save_detection_metadata(run_dir, unique_faces, unique_objects)
 
-        with _lock:
-            _jobs[job_id]["local_status"] = "done"
-            _jobs[job_id]["unique_faces"] = unique_faces
-            _jobs[job_id]["unique_objects"] = unique_objects
-            _jobs[job_id]["total_face_detections"] = len(all_faces)
-            _jobs[job_id]["total_object_detections"] = len(all_objects)
-            _jobs[job_id]["status"] = "ready"
-            if video_id and "failed" not in _jobs[job_id].get("twelvelabs_status", ""):
-                _jobs[job_id]["twelvelabs_status"] = "done"
-            snapshot = dict(_jobs[job_id])
+        with jobs_lock:
+            jobs[job_id]["local_status"] = "done"
+            jobs[job_id]["unique_faces"] = unique_faces
+            jobs[job_id]["unique_objects"] = unique_objects
+            jobs[job_id]["total_face_detections"] = len(all_faces)
+            jobs[job_id]["total_object_detections"] = len(all_objects)
+            jobs[job_id]["status"] = "ready"
+            if video_id and "failed" not in jobs[job_id].get("twelvelabs_status", ""):
+                jobs[job_id]["twelvelabs_status"] = "done"
+            snapshot = dict(jobs[job_id])
         persist_job_manifest(job_id, job=snapshot)
         logger.info("[Job %s] STEP 7/7: Done — snapshots saved", job_id)
 
@@ -751,18 +741,18 @@ def run_ingestion(job_id, video_path, interval_sec, skip_indexing=False, existin
 
     except Exception as e:
         logger.error("[Job %s] Pipeline failed: %s", job_id, str(e), exc_info=True)
-        with _lock:
-            _jobs[job_id]["status"] = "failed"
-            _jobs[job_id]["error"] = str(e)
-            snapshot = dict(_jobs[job_id])
+        with jobs_lock:
+            jobs[job_id]["status"] = "failed"
+            jobs[job_id]["error"] = str(e)
+            snapshot = dict(jobs[job_id])
         persist_job_manifest(job_id, job=snapshot)
 
 
 def collect_timestamps_from_analysis(people_desc, objects_desc):
-    """Extract smart keyframe timestamps from TwelveLabs analysis time ranges.
+    """Extract smart keyframe timestamps from Pegasus/person time ranges.
 
-    Only collects the actual time ranges where people/objects were detected,
-    merges overlapping ranges, and samples sparsely (every ~5s) within them.
+    Object detection is intentionally disabled in the ingestion pipeline, but
+    the optional ``objects_desc`` argument is kept for older persisted metadata.
     """
     all_ranges = []
 
@@ -876,6 +866,17 @@ def face_description_overlap_score(face, desc_entry):
     return inside_count * 4.0 + coverage * 2.5 + range_coverage
 
 
+def safe_float(value, default=None):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if value == value else default
+    if isinstance(value, str) and value.strip():
+        try:
+            return float(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
 def match_people_descriptions_to_faces(faces, people_desc):
     if not isinstance(people_desc, list) or not faces:
         return {}
@@ -886,7 +887,7 @@ def match_people_descriptions_to_faces(faces, people_desc):
             if not isinstance(desc_entry, dict):
                 continue
             score = face_description_overlap_score(face, desc_entry)
-            if score > 0:
+            if score >= FACE_DESCRIPTION_MIN_MATCH_SCORE:
                 scored_pairs.append((score, face_index, desc_index))
 
     scored_pairs.sort(key=lambda item: (-item[0], item[2], item[1]))
@@ -897,19 +898,9 @@ def match_people_descriptions_to_faces(faces, people_desc):
     for score, face_index, desc_index in scored_pairs:
         if face_index in used_faces or desc_index in used_desc:
             continue
-        assignments[face_index] = desc_index
+        assignments[face_index] = {"desc_index": desc_index, "score": score}
         used_faces.add(face_index)
         used_desc.add(desc_index)
-
-    remaining_desc_indexes = [
-        index
-        for index, desc_entry in enumerate(people_desc)
-        if isinstance(desc_entry, dict) and index not in used_desc
-    ]
-    for face_index, _face in enumerate(faces):
-        if face_index in assignments or not remaining_desc_indexes:
-            continue
-        assignments[face_index] = remaining_desc_indexes.pop(0)
 
     return assignments
 
@@ -917,6 +908,12 @@ def match_people_descriptions_to_faces(faces, people_desc):
 def normalize_face_tags(desc_entry):
     should_anonymize = bool(desc_entry.get("should_anonymize"))
     is_official = bool(desc_entry.get("is_official"))
+    confidence = safe_float(desc_entry.get("confidence"), None)
+    review_required = bool(desc_entry.get("review_required"))
+    if confidence is not None and confidence < FACE_PRIVACY_MIN_CONFIDENCE:
+        review_required = True
+    if review_required:
+        should_anonymize = False
     tags = []
     seen = set()
 
@@ -934,6 +931,10 @@ def normalize_face_tags(desc_entry):
             if not is_official:
                 continue
             normalized_tag = "Official"
+        elif normalized_key == "review":
+            if not review_required:
+                continue
+            normalized_tag = "Review"
         if normalized_key in seen:
             continue
         tags.append(normalized_tag)
@@ -944,8 +945,10 @@ def normalize_face_tags(desc_entry):
         seen.add("anonymized")
     if is_official and "official" not in seen:
         tags.append("Official")
+    if review_required and "review" not in seen:
+        tags.append("Review")
 
-    return tags, should_anonymize and not is_official, is_official
+    return tags, should_anonymize and not is_official, is_official, review_required
 
 
 def faces_need_description_refresh(faces, people_desc):
@@ -956,6 +959,8 @@ def faces_need_description_refresh(faces, people_desc):
         "priority_rank" not in face or
         "should_anonymize" not in face or
         "is_official" not in face or
+        "review_required" not in face or
+        "description_match_score" not in face or
         "tags" not in face
         for face in faces
         if isinstance(face, dict)
@@ -985,11 +990,11 @@ def faces_need_description_refresh(faces, people_desc):
     return not has_face_privacy_annotations
 
 
-def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
+def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None, preserve_redaction_decisions=False):
     faces = unique_faces
     if faces is None:
-        with _lock:
-            job = _jobs.get(job_id)
+        with jobs_lock:
+            job = jobs.get(job_id)
             if not job or not job.get("unique_faces"):
                 return
             faces = job["unique_faces"]
@@ -998,11 +1003,34 @@ def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
         return
 
     if isinstance(people_desc, list):
+        for i, face in enumerate(faces):
+            ensure_face_identity(face, fallback_index=i)
+            if preserve_redaction_decisions:
+                face.setdefault("tags", [])
+                face.setdefault("should_anonymize", False)
+                face.setdefault("is_official", False)
+                face.setdefault("review_required", False)
+            else:
+                face["tags"] = []
+                face["should_anonymize"] = False
+                face["is_official"] = False
+                face["review_required"] = False
+            face["description_match_score"] = 0.0
+
+    if isinstance(people_desc, list):
         assignments = match_people_descriptions_to_faces(faces, people_desc)
         for i, face in enumerate(faces):
             ensure_face_identity(face, fallback_index=i)
-            desc_index = assignments.get(i)
+            assignment = assignments.get(i)
+            if isinstance(assignment, dict):
+                desc_index = assignment.get("desc_index")
+                face["description_match_score"] = round(float(assignment.get("score") or 0.0), 3)
+            else:
+                desc_index = assignment
             if desc_index is None or desc_index >= len(people_desc):
+                if not preserve_redaction_decisions:
+                    face["review_required"] = True
+                    face["tags"] = ["Review"]
                 continue
             desc_entry = people_desc[desc_index]
             if not isinstance(desc_entry, dict):
@@ -1010,10 +1038,17 @@ def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
             face["description"] = desc_entry.get("description", "")
             face["time_ranges"] = desc_entry.get("time_ranges", [])
             face["priority_rank"] = desc_index
-            tags, should_anonymize, is_official = normalize_face_tags(desc_entry)
-            face["tags"] = tags
-            face["should_anonymize"] = should_anonymize
-            face["is_official"] = is_official
+            confidence = safe_float(desc_entry.get("confidence"), None)
+            if confidence is not None:
+                face["description_confidence"] = round(confidence, 3)
+            if desc_entry.get("redaction_reason"):
+                face["redaction_reason"] = desc_entry.get("redaction_reason")
+            tags, should_anonymize, is_official, review_required = normalize_face_tags(desc_entry)
+            if not preserve_redaction_decisions:
+                face["tags"] = tags
+                face["should_anonymize"] = should_anonymize
+                face["is_official"] = is_official
+                face["review_required"] = review_required
             raw_name = desc_entry.get("name") or desc_entry.get("person_name") or ""
             if raw_name:
                 face["name"] = raw_name
@@ -1030,6 +1065,8 @@ def enrich_faces_with_descriptions(job_id, people_desc, unique_faces=None):
             face["should_anonymize"] = False
         if "is_official" not in face:
             face["is_official"] = False
+        if "review_required" not in face:
+            face["review_required"] = False
 
 
 def push_job_entities_to_twelvelabs(job_id):
@@ -1048,8 +1085,8 @@ def push_job_entities_to_twelvelabs(job_id):
         return []
     run_dir = get_run_dir(job_id)
     entities = twelvelabs_service.create_entities_from_face_snaps(unique_faces, run_dir)
-    with _lock:
-        _jobs[job_id]["entities"] = entities
+    with jobs_lock:
+        jobs[job_id]["entities"] = entities
     save_detection_metadata(run_dir, unique_faces, job.get("unique_objects", []))
     logger.info("Job %s: pushed %d entities to TwelveLabs (user-requested)", job_id, len(entities))
     return entities
@@ -1065,20 +1102,23 @@ def get_enriched_faces(job_id):
         video_id = str(job.get("twelvelabs_video_id") or "").strip()
         if faces and not isinstance(people_desc, list) and video_id:
             try:
-                people_desc = twelvelabs_service.describe_people(video_id)
+                pegasus_metadata = twelvelabs_service.describe_video_with_pegasus(video_id)
+                people_desc = pegasus_metadata.get("people", [])
             except Exception as e:
-                logger.warning("Could not refresh people descriptions for job %s (%s): %s", job_id, video_id, e)
+                logger.warning("Could not refresh Pegasus 1.5 people metadata for job %s (%s): %s", job_id, video_id, e)
             else:
                 job["twelvelabs_people"] = people_desc
-                persist_job_manifest(job_id, job=job)
+                job["twelvelabs_objects"] = []
+                job["twelvelabs_scene_summary"] = pegasus_metadata.get("scene_summary", {})
+                job["twelvelabs_pegasus_metadata_task_id"] = pegasus_metadata.get("task_id")
         if faces and isinstance(people_desc, list):
             if faces_need_description_refresh(faces, people_desc):
-                enrich_faces_with_descriptions(job_id, people_desc, faces)
-                save_detection_metadata(get_run_dir(job_id), faces, job.get("unique_objects", []))
-        if job.get("unique_faces") or job.get("unique_objects"):
-            run_dir = get_run_dir(job_id)
-            if load_detection_metadata(run_dir) is None:
-                save_detection_metadata(run_dir, job.get("unique_faces", []), job.get("unique_objects", []))
+                enrich_faces_with_descriptions(
+                    job_id,
+                    people_desc,
+                    faces,
+                    preserve_redaction_decisions=True,
+                )
         return {
             "status": job["status"],
             "unique_faces": job.get("unique_faces", []),
@@ -1092,7 +1132,6 @@ def get_enriched_faces(job_id):
             "total_object_detections": job.get("total_object_detections", 0),
             "error": job.get("error"),
         }
-    # Fallback: load from disk when job is not in memory (e.g. after server restart)
     disk = load_faces_objects_from_disk(job_id)
     if disk:
         for index, face in enumerate(disk["unique_faces"]):
@@ -1209,15 +1248,8 @@ def run_redaction(
     else:
         enc_arrays = [np.array(e) for e in (face_encodings or [])]
 
-    obj_set = set(object_classes or [])
+    obj_set = set()
 
-    # Build (or load) face-lock lanes for every selected person before
-    # rendering. The lane is the precomputed per-frame bbox track on
-    # the local video; it is the source of truth for the blur during
-    # export, identical to what the live overlay shows. Persons whose
-    # lanes succeed are filtered out of the per-frame InsightFace path
-    # inside redact_video so the lane never has to compete with a
-    # potentially-drifting per-frame relock.
     face_lock_tracks = {}
     face_lock_failures = []
     if face_targets and not reverse_face_redaction:
@@ -1232,12 +1264,6 @@ def run_redaction(
                 or face.get("description")
                 or person_id
             )
-            # Snapped-on-the-fly faces have no InsightFace appearances
-            # or TwelveLabs anchors, so a face-lock lane cannot be built
-            # for them — they get redacted via the per-frame relock
-            # path using the encoding we just computed instead. Record
-            # this so the editor can show "<label>: redacted via
-            # per-frame match (no face-lock lane available)" if needed.
             if face.get("is_snapped_entity"):
                 face_lock_failures.append({
                     "person_id": person_id,

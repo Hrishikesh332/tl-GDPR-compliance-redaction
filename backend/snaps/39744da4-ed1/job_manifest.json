@@ -1,0 +1,536 @@
+{
+  "job_id": "39744da4-ed1",
+  "status": "ready",
+  "created_at": "2026-05-03T18:48:01.230694+00:00",
+  "video_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/output/index_sb96j2m4.mp4",
+  "video_filename": "index_sb96j2m4.mp4",
+  "twelvelabs_video_id": "69b67a843571b38304a513f9",
+  "video_metadata": {
+    "fps": 25.0,
+    "width": 1920,
+    "height": 1080,
+    "total_frames": 28689,
+    "duration_sec": 1147.56
+  },
+  "twelvelabs_status": "done",
+  "local_status": "done",
+  "twelvelabs_people": [
+    {
+      "name": "",
+      "description": "Woman with short dark hair, wearing a black robe and a grey and white scarf, sitting at a desk and typing on a laptop.",
+      "time_ranges": [
+        {
+          "start_sec": 9.0,
+          "end_sec": 27.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with short brown hair, wearing a black robe, sitting at a desk and typing on a computer, then standing to greet visitors.",
+      "time_ranges": [
+        {
+          "start_sec": 28.0,
+          "end_sec": 38.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with short brown hair, wearing a light beige coat over a suit, entering the courtroom and greeting others.",
+      "time_ranges": [
+        {
+          "start_sec": 38.0,
+          "end_sec": 86.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with short grey hair, wearing a plaid jacket, sitting at a table in the courtroom audience.",
+      "time_ranges": [
+        {
+          "start_sec": 86.0,
+          "end_sec": 91.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with grey hair, wearing a black jacket and headphones, operating a large professional video camera.",
+      "time_ranges": [
+        {
+          "start_sec": 92.0,
+          "end_sec": 100.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with blonde hair tied back, wearing a black sweater and a necklace, sitting at a table in the courtroom.",
+      "time_ranges": [
+        {
+          "start_sec": 101.0,
+          "end_sec": 112.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with short brown hair, wearing a dark pinstripe suit and a light tie, putting on a black robe in the courtroom.",
+      "time_ranges": [
+        {
+          "start_sec": 113.0,
+          "end_sec": 142.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with short dark hair, wearing a black robe and a grey and white scarf, sitting at a desk and looking at a laptop.",
+      "time_ranges": [
+        {
+          "start_sec": 143.0,
+          "end_sec": 162.0
+        },
+        {
+          "start_sec": 271.0,
+          "end_sec": 309.0
+        },
+        {
+          "start_sec": 368.0,
+          "end_sec": 391.0
+        },
+        {
+          "start_sec": 422.0,
+          "end_sec": 447.0
+        },
+        {
+          "start_sec": 472.0,
+          "end_sec": 482.0
+        },
+        {
+          "start_sec": 495.0,
+          "end_sec": 508.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Person with their head covered by a black jacket, being escorted up the stairs by police officers.",
+      "time_ranges": [
+        {
+          "start_sec": 163.0,
+          "end_sec": 210.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Person with their head covered by a black jacket, sitting at a desk in the courtroom.",
+      "time_ranges": [
+        {
+          "start_sec": 228.0,
+          "end_sec": 255.0
+        },
+        {
+          "start_sec": 317.0,
+          "end_sec": 358.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with blonde hair, wearing a black jacket, operating a video camera in the courtroom.",
+      "time_ranges": [
+        {
+          "start_sec": 256.0,
+          "end_sec": 260.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with blonde hair, wearing a black robe, sitting at a desk and smiling.",
+      "time_ranges": [
+        {
+          "start_sec": 261.0,
+          "end_sec": 270.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with blonde hair, wearing a black robe, sitting at a desk and looking at a computer.",
+      "time_ranges": [
+        {
+          "start_sec": 310.0,
+          "end_sec": 316.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with grey hair, wearing a black jacket, operating a large professional video camera.",
+      "time_ranges": [
+        {
+          "start_sec": 359.0,
+          "end_sec": 367.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with short brown hair, wearing a black robe, sitting at a desk and talking to someone.",
+      "time_ranges": [
+        {
+          "start_sec": 392.0,
+          "end_sec": 405.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with blonde hair tied back, wearing a black sweater, sitting at a table in the courtroom.",
+      "time_ranges": [
+        {
+          "start_sec": 406.0,
+          "end_sec": 421.0
+        },
+        {
+          "start_sec": 448.0,
+          "end_sec": 471.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with brown hair tied back, wearing a black jacket, taking a photo with a small camera.",
+      "time_ranges": [
+        {
+          "start_sec": 483.0,
+          "end_sec": 494.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Person with their head covered by a black jacket, standing at a desk in the courtroom.",
+      "time_ranges": [
+        {
+          "start_sec": 509.0,
+          "end_sec": 520.0
+        },
+        {
+          "start_sec": 534.0,
+          "end_sec": 561.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Woman with blonde hair, wearing a black robe, sitting at a desk and raising her hand.",
+      "time_ranges": [
+        {
+          "start_sec": 521.0,
+          "end_sec": 533.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with short brown hair, wearing a light beige coat over a suit, being interviewed in a hallway.",
+      "time_ranges": [
+        {
+          "start_sec": 562.0,
+          "end_sec": 779.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Man with short brown hair and glasses, wearing a dark suit and a pink tie, being interviewed in a hallway.",
+      "time_ranges": [
+        {
+          "start_sec": 780.0,
+          "end_sec": 949.0
+        }
+      ],
+      "should_anonymize": true,
+      "is_official": false,
+      "tags": [
+        "Anonymized"
+      ]
+    },
+    {
+      "name": "",
+      "description": "Male police officer with short grey hair and glasses, wearing a dark uniform with 'POLIZEI' on the back, escorting a person.",
+      "time_ranges": [
+        {
+          "start_sec": 211.0,
+          "end_sec": 227.0
+        }
+      ],
+      "should_anonymize": false,
+      "is_official": true,
+      "tags": [
+        "Official"
+      ]
+    }
+  ],
+  "twelvelabs_objects": [],
+  "twelvelabs_scene_summary": {
+    "scenes": [
+      {
+        "start_sec": 0.0,
+        "end_sec": 9.0,
+        "description": "A montage of still images from a courtroom setting, including lawyers, judges, and media personnel, displayed on a camera's playback screen."
+      },
+      {
+        "start_sec": 9.0,
+        "end_sec": 27.0,
+        "description": "A female lawyer in a black robe sits at a desk in a courtroom, typing on a laptop and looking around the room."
+      },
+      {
+        "start_sec": 27.0,
+        "end_sec": 55.0,
+        "description": "A male judge in a black robe sits at his desk, typing on a computer, then stands to greet a man and a woman who enter the courtroom."
+      },
+      {
+        "start_sec": 55.0,
+        "end_sec": 74.0,
+        "description": "The man and woman walk through the courtroom, passing media personnel, and shake hands with a female lawyer before taking their seats."
+      },
+      {
+        "start_sec": 74.0,
+        "end_sec": 91.0,
+        "description": "The camera pans across the audience seated in the courtroom, showing people looking at their phones and papers."
+      },
+      {
+        "start_sec": 91.0,
+        "end_sec": 100.0,
+        "description": "A close-up shot of two cameramen filming the proceedings in the courtroom."
+      },
+      {
+        "start_sec": 100.0,
+        "end_sec": 112.0,
+        "description": "A woman with blonde hair, wearing a black top and a necklace, sits in the courtroom looking concerned."
+      },
+      {
+        "start_sec": 112.0,
+        "end_sec": 142.0,
+        "description": "A man in a suit puts on a black lawyer's robe and sits down at a table in the courtroom."
+      },
+      {
+        "start_sec": 142.0,
+        "end_sec": 162.0,
+        "description": "The female lawyer from earlier is shown again, sitting at her desk and looking around the courtroom."
+      },
+      {
+        "start_sec": 162.0,
+        "end_sec": 210.0,
+        "description": "A person with their head covered by a black cloth is escorted up a staircase by two police officers."
+      },
+      {
+        "start_sec": 210.0,
+        "end_sec": 229.0,
+        "description": "The person with the covered head is escorted into the courtroom by police officers and approaches a desk."
+      },
+      {
+        "start_sec": 229.0,
+        "end_sec": 255.0,
+        "description": "The person with the covered head sits at a desk with their head down, while the female lawyer sits next to them."
+      },
+      {
+        "start_sec": 255.0,
+        "end_sec": 270.0,
+        "description": "Media personnel are shown filming and taking photos in the courtroom."
+      },
+      {
+        "start_sec": 270.0,
+        "end_sec": 309.0,
+        "description": "The female lawyer leans towards the person with the covered head, appearing to speak to them, while the person keeps their head down."
+      },
+      {
+        "start_sec": 309.0,
+        "end_sec": 358.0,
+        "description": "The camera shows the judges' bench, then pans back to the person with the covered head sitting at the desk."
+      },
+      {
+        "start_sec": 358.0,
+        "end_sec": 391.0,
+        "description": "Media personnel are shown again, followed by a shot of the female lawyer and the person with the covered head."
+      },
+      {
+        "start_sec": 391.0,
+        "end_sec": 405.0,
+        "description": "A male judge is shown speaking to someone off-camera while looking at his computer screen."
+      },
+      {
+        "start_sec": 405.0,
+        "end_sec": 421.0,
+        "description": "The camera focuses on the woman with blonde hair from earlier, who is now sitting at a table with a man."
+      },
+      {
+        "start_sec": 421.0,
+        "end_sec": 447.0,
+        "description": "The female lawyer is shown looking at a red folder and then looking around the courtroom."
+      },
+      {
+        "start_sec": 447.0,
+        "end_sec": 471.0,
+        "description": "The camera shows the woman with blonde hair and the man sitting at the table, then pans to the female lawyer and the person with the covered head."
+      },
+      {
+        "start_sec": 471.0,
+        "end_sec": 482.0,
+        "description": "The female lawyer is shown sitting at her desk, looking thoughtful."
+      },
+      {
+        "start_sec": 482.0,
+        "end_sec": 494.0,
+        "description": "Media personnel are shown taking photos and videos in the courtroom."
+      },
+      {
+        "start_sec": 494.0,
+        "end_sec": 508.0,
+        "description": "The person with the covered head stands up and adjusts the cloth over their head, while the judges stand at their bench."
+      },
+      {
+        "start_sec": 508.0,
+        "end_sec": 540.0,
+        "description": "The person with the covered head stands next to the female lawyer, while a woman in a blue sweater approaches the judges' bench."
+      },
+      {
+        "start_sec": 540.0,
+        "end_sec": 561.0,
+        "description": "A close-up shot of the person with the covered head, who is holding the cloth over their face."
+      },
+      {
+        "start_sec": 561.0,
+        "end_sec": 779.0,
+        "description": "A man in a beige coat is interviewed in a hallway, speaking into a pink microphone."
+      },
+      {
+        "start_sec": 779.0,
+        "end_sec": 949.0,
+        "description": "A man in a suit and glasses is interviewed in an office, speaking into a pink microphone."
+      },
+      {
+        "start_sec": 949.0,
+        "end_sec": 973.0,
+        "description": "A close-up shot of a sign on the exterior of a building, indicating it is a courthouse in Ansbach."
+      },
+      {
+        "start_sec": 973.0,
+        "end_sec": 1053.0,
+        "description": "A wide shot of the exterior of the courthouse building, showing its ornate facade and entrance."
+      },
+      {
+        "start_sec": 1053.0,
+        "end_sec": 1147.56,
+        "description": "The video ends with a color bar test pattern and a LiveU logo."
+      }
+    ]
+  }
+}

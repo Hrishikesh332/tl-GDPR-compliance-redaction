@@ -29,7 +29,9 @@ def crop_to_base64(img_bgr, box, fmt=".png", padding_ratio=0.0):
     if x2 <= x1 or y2 <= y1:
         return None
     crop = img_bgr[y1:y2, x1:x2]
-    _, buf = cv2.imencode(fmt, crop)
+    encoded_ok, buf = cv2.imencode(fmt, crop)
+    if not encoded_ok:
+        return None
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
@@ -77,11 +79,13 @@ def crop_with_bbox_to_base64(img_bgr, box, label=None, confidence=None,
         cv2.putText(crop, text, (rx1 + 3, bg_y2 - baseline - 2),
                     font, font_scale, (0, 0, 0), txt_thick, cv2.LINE_AA)
 
-    _, buf = cv2.imencode(fmt, crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    encoded_ok, buf = cv2.imencode(fmt, crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    if not encoded_ok:
+        return None
     return base64.b64encode(buf.tobytes()).decode("utf-8")
 
 
-def _build_elliptical_mask(roi_h, roi_w):
+def build_elliptical_mask(roi_h, roi_w):
     """Build an elliptical alpha mask: 1.0 at center, fading to 0.0 at edges."""
     cy, cx = roi_h / 2.0, roi_w / 2.0
     ys = np.arange(roi_h, dtype=np.float32)
@@ -93,7 +97,49 @@ def _build_elliptical_mask(roi_h, roi_w):
     return mask
 
 
-def apply_blur(frame, bbox, blur_strength=51):
+def build_solid_oval_mask(roi_h, roi_w, feather_ratio=0.08):
+    """Build a mostly-solid oval mask with a soft edge and transparent corners."""
+    cy, cx = roi_h / 2.0, roi_w / 2.0
+    ys = np.arange(roi_h, dtype=np.float32)
+    xs = np.arange(roi_w, dtype=np.float32)
+    yy, xx = np.meshgrid(ys, xs, indexing="ij")
+    dist = np.sqrt(((xx - cx) / max(cx, 1)) ** 2 + ((yy - cy) / max(cy, 1)) ** 2)
+    feather = max(0.015, float(feather_ratio))
+    mask = np.clip((1.0 - dist) / feather, 0.0, 1.0)
+    return mask.astype(np.float32)
+
+
+def build_face_oval_mask(roi_h, roi_w, feather_ratio=0.075):
+    """Build a face-shaped oval mask with cheek coverage and a tapered chin."""
+    cy, cx = roi_h * 0.48, roi_w / 2.0
+    ry, rx = max(roi_h * 0.52, 1.0), max(roi_w / 2.0, 1.0)
+    ys = np.arange(roi_h, dtype=np.float32)
+    xs = np.arange(roi_w, dtype=np.float32)
+    yy, xx = np.meshgrid(ys, xs, indexing="ij")
+    yn = (yy - cy) / ry
+    xn = (xx - cx) / rx
+
+    cheek_widen = 0.10 * np.exp(-((yn - 0.02) / 0.38) ** 2)
+    forehead_taper = 0.06 * (np.clip((-yn - 0.56) / 0.42, 0.0, 1.0) ** 1.35)
+    chin_taper = 0.18 * (np.clip((yn - 0.34) / 0.66, 0.0, 1.0) ** 1.45)
+    width_profile = np.clip(0.92 + cheek_widen - forehead_taper - chin_taper, 0.70, 1.0)
+
+    dist = np.sqrt((xn / width_profile) ** 2 + yn ** 2)
+    feather = max(0.015, float(feather_ratio))
+    mask = np.clip((1.0 - dist) / feather, 0.0, 1.0)
+    return mask.astype(np.float32)
+
+
+def redaction_mask_for_shape(shape, roi_h, roi_w):
+    shape_normalized = str(shape or "rect").strip().lower()
+    if shape_normalized in {"face", "face_oval", "face-oval"}:
+        return build_face_oval_mask(roi_h, roi_w)
+    if shape_normalized in {"oval", "ellipse"}:
+        return build_solid_oval_mask(roi_h, roi_w)
+    return None
+
+
+def apply_blur(frame, bbox, blur_strength=51, shape="rect"):
     x1, y1, x2, y2 = [int(v) for v in bbox]
     h, w = frame.shape[:2]
     x1, y1 = max(0, x1), max(0, y1)
@@ -129,11 +175,10 @@ def apply_blur(frame, bbox, blur_strength=51):
         flatten = min(0.42, 0.18 + ((strength - 160) / 220.0))
         blurred = (blurred.astype(np.float32) * (1.0 - flatten) + average_color.astype(np.float32) * flatten)
 
-    mask = _build_elliptical_mask(roi_h, roi_w)
-    if strength >= 130:
-        mask = np.ones_like(mask, dtype=np.float32)
-    elif strength >= 85:
-        mask = np.maximum(mask, 0.9)
+    mask = redaction_mask_for_shape(shape, roi_h, roi_w)
+    if mask is None:
+        frame[y1:y2, x1:x2] = np.clip(blurred, 0, 255).astype(np.uint8)
+        return frame
     mask_3ch = mask[:, :, np.newaxis]
     blended = (blurred.astype(np.float32) * mask_3ch +
                roi.astype(np.float32) * (1.0 - mask_3ch))
@@ -141,7 +186,7 @@ def apply_blur(frame, bbox, blur_strength=51):
     return frame
 
 
-def apply_pixelate(frame, bbox, pixel_size=12):
+def apply_pixelate(frame, bbox, pixel_size=12, shape="rect"):
     x1, y1, x2, y2 = [int(v) for v in bbox]
     h, w = frame.shape[:2]
     x1, y1 = max(0, x1), max(0, y1)
@@ -156,25 +201,59 @@ def apply_pixelate(frame, bbox, pixel_size=12):
     blur_kernel = max(3, (block_size // 2) | 1)
     distorted = cv2.GaussianBlur(roi, (blur_kernel, blur_kernel), 0)
     reduced = cv2.resize(distorted, (down_w, down_h), interpolation=cv2.INTER_LINEAR)
-    frame[y1:y2, x1:x2] = cv2.resize(reduced, (roi_w, roi_h), interpolation=cv2.INTER_NEAREST)
+    pixelated = cv2.resize(reduced, (roi_w, roi_h), interpolation=cv2.INTER_NEAREST)
+    mask = redaction_mask_for_shape(shape, roi_h, roi_w)
+    if mask is not None:
+        mask_3ch = mask[:, :, np.newaxis]
+        blended = (pixelated.astype(np.float32) * mask_3ch +
+                   roi.astype(np.float32) * (1.0 - mask_3ch))
+        frame[y1:y2, x1:x2] = np.clip(blended, 0, 255).astype(np.uint8)
+        return frame
+    frame[y1:y2, x1:x2] = pixelated
     return frame
 
 
-def apply_black_fill(frame, bbox):
+def apply_black_fill(frame, bbox, shape="rect"):
     x1, y1, x2, y2 = [int(v) for v in bbox]
     h, w = frame.shape[:2]
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(w, x2), min(h, y2)
     if x2 <= x1 or y2 <= y1:
         return frame
-    frame[y1:y2, x1:x2] = 0
+    roi = frame[y1:y2, x1:x2]
+    mask = redaction_mask_for_shape(shape, roi.shape[0], roi.shape[1])
+    if mask is not None:
+        mask = mask[:, :, np.newaxis]
+        frame[y1:y2, x1:x2] = np.clip(roi.astype(np.float32) * (1.0 - mask), 0, 255).astype(np.uint8)
+        return frame
+    roi[:] = 0
     return frame
 
 
-def apply_redaction(frame, bbox, mode="blur", blur_strength=51):
+def restore_region(frame, source_frame, bbox, shape="rect"):
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    h, w = frame.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    if x2 <= x1 or y2 <= y1:
+        return frame
+    target_roi = frame[y1:y2, x1:x2]
+    source_roi = source_frame[y1:y2, x1:x2]
+    mask = redaction_mask_for_shape(shape, target_roi.shape[0], target_roi.shape[1])
+    if mask is None:
+        frame[y1:y2, x1:x2] = source_roi
+        return frame
+    mask_3ch = mask[:, :, np.newaxis]
+    restored = (source_roi.astype(np.float32) * mask_3ch +
+                target_roi.astype(np.float32) * (1.0 - mask_3ch))
+    frame[y1:y2, x1:x2] = np.clip(restored, 0, 255).astype(np.uint8)
+    return frame
+
+
+def apply_redaction(frame, bbox, mode="blur", blur_strength=51, shape="rect"):
     mode_normalized = str(mode or "blur").strip().lower()
     if mode_normalized in {"solid", "black", "mask"}:
-      return apply_black_fill(frame, bbox)
+        return apply_black_fill(frame, bbox, shape=shape)
     if mode_normalized == "pixelate":
-      return apply_pixelate(frame, bbox, pixel_size=max(10, int(blur_strength) // 3))
-    return apply_blur(frame, bbox, blur_strength)
+        return apply_pixelate(frame, bbox, pixel_size=max(10, int(blur_strength) // 3), shape=shape)
+    return apply_blur(frame, bbox, blur_strength, shape=shape)

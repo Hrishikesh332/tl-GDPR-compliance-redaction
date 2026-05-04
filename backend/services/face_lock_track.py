@@ -40,49 +40,28 @@ LANE_BUILD_VERSION = 6
 FACE_LOCK_TRACKS_DIRNAME = "face_lock_tracks"
 DEFAULT_TRACKER_MAX_DIM = 960
 
-# Safety margin baked into the persisted lane so the visible blur
-# over-covers the head. Combined with the existing elliptical alpha
-# mask in utils.image.apply_blur this never reads as a halo.
+# Lane bboxes are persisted slightly larger than the raw detector bbox so the
+# face-shaped export mask never exposes forehead/chin edges during motion.
 FACE_LOCK_SAFETY_PAD_RATIO = 0.035
 FACE_LOCK_FAR_HEAD_PAD_RATIO = 0.065
 FACE_LOCK_HEAD_FALLBACK_PAD_RATIO = 0.025
-# Maximum gap (seconds) between InsightFace appearances before the lane
-# splits into separate segments. Anchors are at ~1 Hz in the existing
-# detection metadata, so a 4 s gap reliably catches scene cuts.
+
+# Sparse appearance anchors are grouped into segments, then widened in time so
+# the lane covers the whole visible presence instead of only sampled frames.
 APPEARANCE_SEGMENT_MAX_GAP_SEC = 4.0
-# Padding around InsightFace appearance windows (seconds) when merging
-# them with TwelveLabs entity time-ranges to define lane segments. The
-# padding also seeds extra frames before the first and after the last
-# anchor so the lane covers the entire on-screen presence.
 SEGMENT_TIME_PADDING_SEC = 0.9
-# Dense identity verification cadence (frames). Every Nth frame during
-# the build the tracker bbox is verified against an InsightFace
-# detection inside a search region around it. Verification confirms the
-# selected identity, but motion tracking keeps primary control unless
-# the visual track is weak or lost.
+
+# Identity verification corrects drift, but visual motion remains the main
+# position signal unless the tracker is weak or clearly lost.
 IDENTITY_VERIFY_INTERVAL_FRAMES = 2
 HEAD_FALLBACK_INTERVAL_FRAMES = 8
-# Search-region expansion factor (in face-bbox units) used when
-# re-localizing the face with InsightFace mid-track. Wide enough to
-# absorb camera shakes/zooms but tight enough to stay inside the
-# correct identity.
 IDENTITY_VERIFY_SEARCH_EXPAND = 2.25
-# Minimum embedding cosine similarity to accept a verification snap.
-# Below this the tracked bbox is kept as-is so we never let a different
-# face hijack the lane.
 IDENTITY_VERIFY_MIN_SIMILARITY = 0.34
-# Embedding cosine similarity above which a verification snap is
-# considered "high confidence" and the smoother is hard-locked
-# (alpha=1.0). Below this we still snap but apply a partial blend.
 IDENTITY_VERIFY_HARD_LOCK_SIMILARITY = 0.45
-# Maximum displacement (as a fraction of bbox diagonal) we allow a
-# verification snap to move the bbox. A snap larger than this is
-# rejected as a tracker that locked onto a different face — better to
-# trust the smooth track than to teleport.
 IDENTITY_VERIFY_MAX_SNAP_RATIO = 1.5
-# Bias towards tighter tracking: when CSRT and LK disagree on bbox
-# size by more than this ratio, prefer the smaller (LK) box because
-# CSRT tends to grow when adjacent textures match.
+
+# CSRT can grow onto nearby textures; LK points usually preserve tighter face
+# scale, so large area disagreement reduces the tracker weight.
 TRACKER_SCALE_DISAGREEMENT_RATIO = 0.25
 MOTION_VERIFY_AGREE_IOU = 0.28
 MOTION_VERIFY_AGREE_CENTER_RATIO = 0.52
@@ -336,7 +315,7 @@ def seek_and_read_frame(cap, target_frame, *, max_advance=240):
     target = max(0, int(target_frame))
     cap.set(cv2.CAP_PROP_POS_FRAMES, target)
     last_frame = None
-    for _ in range(max_advance + 1):
+    for attempt in range(max_advance + 1):
         pos_before = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
         ret, frame = cap.read()
         if not ret or frame is None:
@@ -998,10 +977,10 @@ def track_segment_one_direction(
             if verification is not None:
                 verified_bbox, similarity = verification
                 motion_bbox = smoothed_bbox
-                motion_agrees, _center_ratio, _iou = verification_agrees_with_motion(
+                motion_agrees = verification_agrees_with_motion(
                     verified_bbox,
                     motion_bbox,
-                )
+                )[0]
                 motion_has_signal = optical_ok or template_ok or tracker_ok or global_bbox is not None
                 motion_is_weak = (not motion_has_signal) or confidence < 0.62 or src in ("predicted", "global")
                 should_reset_tracker = False
@@ -1428,6 +1407,9 @@ def build_segment_lane(
         seg_start, seg_end, first_anchor_frame, last_anchor_frame, len(anchors_by_frame),
     )
 
+    # Build forward from the first reliable anchor, then backward from the last
+    # one. Fusing both directions keeps coverage before the first frontal-face
+    # detection and after the last one without trusting a single long tracker run.
     forward_t0 = time.monotonic()
     forward = track_segment_one_direction(
         cap,
@@ -1585,14 +1567,8 @@ def build_face_lock_lane(
                 f"could not build any face-lock segments for person {person_id}"
             )
 
-        # Compute the expected number of ``on_frame`` emits across the
-        # whole build. Forward walks ``first_anchor_frame -> seg_end_local``
-        # and backward walks ``seg_start_local <- last_anchor_frame`` for
-        # each segment, so frames outside the [first, last] anchor span
-        # only get one emit instead of two. Using the segment span * 2
-        # as a denominator overcounts by exactly that gap and pins the
-        # progress bar somewhere below 100%; computing the real expected
-        # emits lets the bar climb predictably for any segment shape.
+        # Count the real forward/backward emits so progress reaches 90%
+        # predictably even when anchors sit far inside a widened segment.
         expected_emits = 0
         for seg in segments:
             seg_anchors = seg.get("anchors") or []

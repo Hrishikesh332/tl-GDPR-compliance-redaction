@@ -184,7 +184,7 @@ def load_snap_base64_map(directory):
     return snapshots
 
 
-def _find_snapshot_by_candidates(snapshots_by_filename, candidates):
+def find_snapshot_by_candidates(snapshots_by_filename, candidates):
     for candidate in candidates:
         if not candidate:
             continue
@@ -216,12 +216,12 @@ def infer_face_snapshot_name(item, snapshots_by_filename):
     if name:
         candidates.append(safe_filename(name))
 
-    match = _find_snapshot_by_candidates(snapshots_by_filename, candidates)
+    match = find_snapshot_by_candidates(snapshots_by_filename, candidates)
     if match:
         return match
 
     for filename in sorted(snapshots_by_filename):
-        stem, _ = os.path.splitext(filename)
+        stem = os.path.splitext(filename)[0]
         if stem == person_id or stem == safe_filename(person_id) or stem == safe_filename(name):
             return filename
     return None
@@ -238,7 +238,7 @@ def infer_object_snapshot_name(item, snapshots_by_filename):
     if object_id:
         candidates.append(object_id)
 
-    match = _find_snapshot_by_candidates(snapshots_by_filename, candidates)
+    match = find_snapshot_by_candidates(snapshots_by_filename, candidates)
     if match:
         return match
 

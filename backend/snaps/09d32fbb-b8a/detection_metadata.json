@@ -3263,7 +3263,9 @@
           "start_sec": 0,
           "end_sec": 177
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 706.618
     },
     {
       "person_id": "person_10",
@@ -6367,7 +6369,9 @@
           "start_sec": 705,
           "end_sec": 828
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 490.191
     },
     {
       "person_id": "person_4",
@@ -8411,7 +8415,9 @@
           "start_sec": 407,
           "end_sec": 529
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 491.033
     },
     {
       "person_id": "person_1",
@@ -10285,7 +10291,9 @@
           "start_sec": 352,
           "end_sec": 407
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 226.053
     },
     {
       "person_id": "person_5",
@@ -12089,7 +12097,9 @@
           "start_sec": 458,
           "end_sec": 529
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 286.409
     },
     {
       "person_id": "person_3",
@@ -12673,9 +12683,9 @@
       "name": "person_3",
       "priority_rank": 4,
       "tags": [
-        "Anonymized"
+        "Review"
       ],
-      "should_anonymize": true,
+      "should_anonymize": false,
       "is_official": false,
       "description": "Man with dark hair and wearing a grey hoodie, standing near a gray-haired man in a black coat. Visible in the background during the third segment.",
       "time_ranges": [
@@ -12683,7 +12693,9 @@
           "start_sec": 458,
           "end_sec": 529
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_16",
@@ -13247,7 +13259,9 @@
           "start_sec": 835,
           "end_sec": 854
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 6.25
     },
     {
       "person_id": "person_17",
@@ -13800,7 +13814,9 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/09d32fbb-b8a/faces/person_17.png",
       "name": "person_17",
       "priority_rank": 7,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
       "is_official": false,
       "description": "Middle-aged man with graying hair, wearing a dark suit jacket and light-colored collared shirt. Appears in the first segment and later in the final interview segment. Identified by name in dialogue.",
@@ -13813,7 +13829,9 @@
           "start_sec": 733,
           "end_sec": 776
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_2",
@@ -14357,17 +14375,19 @@
       "name": "person_2",
       "priority_rank": 9,
       "tags": [
-        "Official"
+        "Review"
       ],
       "should_anonymize": false,
-      "is_official": true,
+      "is_official": false,
       "description": "Male judge, likely in formal attire, delivering the verdict. Appears in the first segment, speaking with authority. Identified by role and context.",
       "time_ranges": [
         {
           "start_sec": 0,
           "end_sec": 177
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_6",
@@ -14910,9 +14930,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/09d32fbb-b8a/faces/person_6.png",
       "name": "person_6",
       "priority_rank": 9,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_7",
@@ -15455,9 +15479,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/09d32fbb-b8a/faces/person_7.png",
       "name": "person_7",
       "priority_rank": 10,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_8",
@@ -16000,9 +16028,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/09d32fbb-b8a/faces/person_8.png",
       "name": "person_8",
       "priority_rank": 11,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_9",
@@ -16545,9 +16577,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/09d32fbb-b8a/faces/person_9.png",
       "name": "person_9",
       "priority_rank": 12,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_11",
@@ -17090,9 +17126,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/09d32fbb-b8a/faces/person_11.png",
       "name": "person_11",
       "priority_rank": 13,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_12",
@@ -17644,7 +17684,9 @@
           "start_sec": 816,
           "end_sec": 823
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 7.5
     },
     {
       "person_id": "person_13",
@@ -18187,9 +18229,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/09d32fbb-b8a/faces/person_13.png",
       "name": "person_13",
       "priority_rank": 15,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_14",
@@ -18732,9 +18778,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/09d32fbb-b8a/faces/person_14.png",
       "name": "person_14",
       "priority_rank": 16,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_15",
@@ -19277,9 +19327,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/09d32fbb-b8a/faces/person_15.png",
       "name": "person_15",
       "priority_rank": 17,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     }
   ],
   "unique_objects": []

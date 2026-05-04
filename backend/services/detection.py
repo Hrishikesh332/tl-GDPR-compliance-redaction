@@ -14,10 +14,10 @@ warnings.filterwarnings("ignore", category=FutureWarning, message=".*rcond.*")
 
 logger = logging.getLogger("video_redaction.detection")
 
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_PROTOTXT = os.path.join(_BACKEND_DIR, "models", "deploy.prototxt")
-_CAFFEMODEL = os.path.join(_BACKEND_DIR, "models", "res10_300x300_ssd_iter_140000.caffemodel")
-_RUNTIME_CACHE_DIR = os.path.join(_BACKEND_DIR, ".cache")
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROTOTXT = os.path.join(BACKEND_DIR, "models", "deploy.prototxt")
+CAFFEMODEL = os.path.join(BACKEND_DIR, "models", "res10_300x300_ssd_iter_140000.caffemodel")
+RUNTIME_CACHE_DIR = os.path.join(BACKEND_DIR, ".cache")
 
 
 def is_git_lfs_pointer(path: str) -> bool:
@@ -37,37 +37,37 @@ def build_yolo_model_candidates():
     configured = (os.environ.get("YOLO_OBJECT_MODEL") or "").strip()
     if configured:
         return [
-            configured if os.path.isabs(configured) else os.path.join(_BACKEND_DIR, configured),
+            configured if os.path.isabs(configured) else os.path.join(BACKEND_DIR, configured),
             configured,
         ]
 
     return [
-        os.path.join(_BACKEND_DIR, "yolov8n.pt"),
+        os.path.join(BACKEND_DIR, "yolov8n.pt"),
         "yolov8n.pt",
-        os.path.join(_BACKEND_DIR, "yolo11n.pt"),
+        os.path.join(BACKEND_DIR, "yolo11n.pt"),
         "yolo11n.pt",
     ]
 
 
-_YOLO_MODEL_CANDIDATES = []
-for _candidate in build_yolo_model_candidates():
-    if not _candidate:
+YOLO_MODEL_CANDIDATES = []
+for candidate_path in build_yolo_model_candidates():
+    if not candidate_path:
         continue
-    if os.path.isabs(_candidate):
-        if os.path.isfile(_candidate) and not is_git_lfs_pointer(_candidate):
-            _YOLO_MODEL_CANDIDATES.append(_candidate)
+    if os.path.isabs(candidate_path):
+        if os.path.isfile(candidate_path) and not is_git_lfs_pointer(candidate_path):
+            YOLO_MODEL_CANDIDATES.append(candidate_path)
     else:
-        _YOLO_MODEL_CANDIDATES.append(_candidate)
+        YOLO_MODEL_CANDIDATES.append(candidate_path)
 
-if not _YOLO_MODEL_CANDIDATES:
-    _YOLO_MODEL_CANDIDATES = ["yolov8n.pt"]
+if not YOLO_MODEL_CANDIDATES:
+    YOLO_MODEL_CANDIDATES = ["yolov8n.pt"]
 
-_face_net = None
-_face_app = None
-_face_app_load_failed = False
-_obj_model = None
-_obj_model_load_failed = False
-_obj_model_error = None
+face_net = None
+face_app = None
+face_app_load_failed = False
+obj_model = None
+obj_model_load_failed = False
+obj_model_error = None
 
 MIN_FACE_SIZE = 30
 SMALL_FACE_MIN_SIZE = 10
@@ -100,21 +100,21 @@ class ObjectDetectionUnavailable(RuntimeError):
 
 
 def get_object_detection_error():
-    return _obj_model_error
+    return obj_model_error
 
 
 def get_face_net():
-    global _face_net
-    if _face_net is None:
-        _face_net = cv2.dnn.readNetFromCaffe(_PROTOTXT, _CAFFEMODEL)
+    global face_net
+    if face_net is None:
+        face_net = cv2.dnn.readNetFromCaffe(PROTOTXT, CAFFEMODEL)
         logger.info("Loaded res10_300x300_ssd_iter_140000 for face detection (~10.7 MB)")
-    return _face_net
+    return face_net
 
 
 def ensure_runtime_cache_dirs():
     cache_dirs = {
-        "MPLCONFIGDIR": os.path.join(_RUNTIME_CACHE_DIR, "matplotlib"),
-        "XDG_CACHE_HOME": os.path.join(_RUNTIME_CACHE_DIR, "xdg-cache"),
+        "MPLCONFIGDIR": os.path.join(RUNTIME_CACHE_DIR, "matplotlib"),
+        "XDG_CACHE_HOME": os.path.join(RUNTIME_CACHE_DIR, "xdg-cache"),
     }
     for env_name, path in cache_dirs.items():
         current = (os.environ.get(env_name) or "").strip()
@@ -160,16 +160,16 @@ def build_insightface_provider_candidates():
 
 
 def get_face_app():
-    global _face_app, _face_app_load_failed
-    if _face_app_load_failed:
+    global face_app, face_app_load_failed
+    if face_app_load_failed:
         return None
-    if _face_app is None:
+    if face_app is None:
         ensure_runtime_cache_dirs()
         try:
             from insightface.app import FaceAnalysis
         except Exception as e:
-            _face_app = None
-            _face_app_load_failed = True
+            face_app = None
+            face_app_load_failed = True
             logger.warning(
                 "InsightFace unavailable; falling back to res10-only face detection. "
                 "Manual blur tracking will still run, but face embeddings/supplemental detections are disabled: %s",
@@ -186,12 +186,12 @@ def get_face_app():
                     providers=providers,
                 )
                 app.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.5)
-                _face_app = app
+                face_app = app
                 logger.info(
                     "Loaded InsightFace buffalo_l for face detection and embeddings (providers=%s)",
                     ",".join(providers),
                 )
-                return _face_app
+                return face_app
             except Exception as e:
                 last_error = e
                 logger.warning(
@@ -200,58 +200,58 @@ def get_face_app():
                     e,
                 )
 
-        _face_app = None
-        _face_app_load_failed = True
+        face_app = None
+        face_app_load_failed = True
         logger.warning(
             "InsightFace unavailable; falling back to res10-only face detection. "
             "Manual blur tracking will still run, but face embeddings/supplemental detections are disabled: %s",
             last_error,
         )
-    return _face_app
+    return face_app
 
 
 def get_obj_model():
-    global _obj_model, _obj_model_load_failed, _obj_model_error
-    if _obj_model_load_failed:
-        raise ObjectDetectionUnavailable(_obj_model_error or "YOLO object detection is unavailable.")
-    if _obj_model is None:
+    global obj_model, obj_model_load_failed, obj_model_error
+    if obj_model_load_failed:
+        raise ObjectDetectionUnavailable(obj_model_error or "YOLO object detection is unavailable.")
+    if obj_model is None:
         tried = []
         last_error = None
         try:
             from ultralytics import YOLO
         except Exception as e:
-            _obj_model = None
-            _obj_model_load_failed = True
-            _obj_model_error = (
+            obj_model = None
+            obj_model_load_failed = True
+            obj_model_error = (
                 "YOLO object detection could not start because Ultralytics failed to import in the active Python "
                 "environment. Make sure the backend is running from backend/.venv and restart the server."
             )
-            logger.warning("%s Underlying error: %s", _obj_model_error, e)
-            raise ObjectDetectionUnavailable(_obj_model_error) from e
+            logger.warning("%s Underlying error: %s", obj_model_error, e)
+            raise ObjectDetectionUnavailable(obj_model_error) from e
 
-        for candidate in _YOLO_MODEL_CANDIDATES:
+        for candidate in YOLO_MODEL_CANDIDATES:
             display_name = os.path.basename(candidate) if os.path.isabs(candidate) else candidate
             try:
-                _obj_model = YOLO(candidate)
+                obj_model = YOLO(candidate)
                 logger.info("Loaded YOLO model for object detection: %s", display_name)
-                _obj_model_error = None
-                return _obj_model
+                obj_model_error = None
+                return obj_model
             except Exception as e:
                 last_error = e
                 tried.append(display_name)
                 logger.warning("Failed loading YOLO model candidate %s: %s", display_name, e)
 
-        _obj_model = None
-        _obj_model_load_failed = True
+        obj_model = None
+        obj_model_load_failed = True
         tried_display = ", ".join(tried) if tried else "none"
-        _obj_model_error = (
+        obj_model_error = (
             "YOLO object detection could not start. Tried these model candidates: "
             f"{tried_display}. Ensure the backend is running from backend/.venv and that newer Ultralytics "
             "weights can be downloaded when needed, then restart the backend."
         )
-        logger.warning("%s Underlying error: %s", _obj_model_error, last_error)
-        raise ObjectDetectionUnavailable(_obj_model_error) from last_error
-    return _obj_model
+        logger.warning("%s Underlying error: %s", obj_model_error, last_error)
+        raise ObjectDetectionUnavailable(obj_model_error) from last_error
+    return obj_model
 
 
 def face_sharpness(img_bgr, bbox):
@@ -484,12 +484,12 @@ def detect_face_boxes(
     if not include_supplemental:
         return results
 
-    _, unmatched_insight = get_embeddings_for_boxes(
+    unmatched_insight = get_embeddings_for_boxes(
         img_bgr,
         res10_boxes,
         min_face_size=min_face_size,
         upscale=upscale,
-    )
+    )[1]
     for extra in unmatched_insight:
         x1, y1, x2, y2 = extra["bbox"]
         sharpness = face_sharpness(img_bgr, (x1, y1, x2, y2))
@@ -1114,12 +1114,12 @@ def detect_faces(
                 upscale=upscale,
             )
         else:
-            _, unmatched_insight = get_embeddings_for_boxes(
+            unmatched_insight = get_embeddings_for_boxes(
                 img_bgr,
                 [],
                 min_face_size=min_face_size,
                 upscale=upscale,
-            )
+            )[1]
 
     results = []
 
@@ -1207,12 +1207,12 @@ def detect_uploaded_reference_faces(
             upscale=detect_upscale,
         )
     else:
-        _, unmatched_insight = get_embeddings_for_boxes(
+        unmatched_insight = get_embeddings_for_boxes(
             img_bgr,
             [],
             min_face_size=min_face_size,
             upscale=detect_upscale,
-        )
+        )[1]
     if not with_encodings:
         embeddings = [None] * len(res10_boxes)
 

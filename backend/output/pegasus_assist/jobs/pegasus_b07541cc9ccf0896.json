@@ -1,7 +1,7 @@
 {
   "job_id": "pegasus_b07541cc9ccf0896",
   "status": "ready",
-  "artifact_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/aebe2f59-f3d/pegasus_privacy_assist.json",
-  "cached": false,
-  "updated_at": "2026-04-29T21:42:27.355224Z"
+  "artifact_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/output/pegasus_assist/artifacts/69b67a843571b38304a513f9_b07541cc9ccf.json",
+  "cached": true,
+  "updated_at": "2026-05-04T18:36:37.024473Z"
 }

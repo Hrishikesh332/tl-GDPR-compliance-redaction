@@ -12,29 +12,29 @@ logger = logging.getLogger("video_redaction.routes.indexing")
 
 indexing_bp = Blueprint("indexing", __name__)
 
-_indexing_jobs = {}
-_lock = threading.Lock()
+indexing_jobs = {}
+indexing_jobs_lock = threading.Lock()
 
 
 def track_indexing_async(tracking_id, task_id):
-    def _run():
+    def run_indexing_tracker():
         try:
-            with _lock:
-                _indexing_jobs[tracking_id]["status"] = "indexing"
+            with indexing_jobs_lock:
+                indexing_jobs[tracking_id]["status"] = "indexing"
 
             result = twelvelabs_service.wait_for_indexing(task_id)
 
-            with _lock:
-                _indexing_jobs[tracking_id]["status"] = result["status"]
-                _indexing_jobs[tracking_id]["video_id"] = result["video_id"]
-                _indexing_jobs[tracking_id]["result"] = result
+            with indexing_jobs_lock:
+                indexing_jobs[tracking_id]["status"] = result["status"]
+                indexing_jobs[tracking_id]["video_id"] = result["video_id"]
+                indexing_jobs[tracking_id]["result"] = result
         except Exception as e:
             logger.error("Indexing tracking failed for %s: %s", tracking_id, str(e))
-            with _lock:
-                _indexing_jobs[tracking_id]["status"] = "failed"
-                _indexing_jobs[tracking_id]["error"] = str(e)
+            with indexing_jobs_lock:
+                indexing_jobs[tracking_id]["status"] = "failed"
+                indexing_jobs[tracking_id]["error"] = str(e)
 
-    thread = threading.Thread(target=_run, daemon=True)
+    thread = threading.Thread(target=run_indexing_tracker, daemon=True)
     thread.start()
 
 
@@ -80,8 +80,8 @@ def index_video():
             return jsonify({"error": "provide video file, video_url, or video_path"}), 400
 
     tracking_id = result["task_id"]
-    with _lock:
-        _indexing_jobs[tracking_id] = {
+    with indexing_jobs_lock:
+        indexing_jobs[tracking_id] = {
             "task_id": result["task_id"],
             "video_id": result["video_id"],
             "index_id": result["index_id"],
@@ -123,8 +123,8 @@ def index_local_file():
     result = twelvelabs_service.index_video_from_file(video_path, index_id=TWELVELABS_INDEX_ID)
 
     tracking_id = result["task_id"]
-    with _lock:
-        _indexing_jobs[tracking_id] = {
+    with indexing_jobs_lock:
+        indexing_jobs[tracking_id] = {
             "task_id": result["task_id"],
             "video_id": result["video_id"],
             "index_id": result["index_id"],
@@ -167,8 +167,8 @@ def list_tasks():
 
 @indexing_bp.route("/indexing/tasks/<task_id>", methods=["GET"])
 def get_task(task_id):
-    with _lock:
-        local_job = _indexing_jobs.get(task_id)
+    with indexing_jobs_lock:
+        local_job = indexing_jobs.get(task_id)
 
     tl_status = twelvelabs_service.get_task_status(task_id)
 

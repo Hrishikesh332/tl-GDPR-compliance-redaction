@@ -18,16 +18,20 @@ from utils.video import EXPORT_HEIGHTS, normalize_export_height
 logger = logging.getLogger("video_redaction.routes.redaction")
 
 redaction_bp = Blueprint("redaction", __name__)
-_redaction_jobs = {}
-_redaction_jobs_lock = threading.Lock()
+redaction_jobs = {}
+redaction_jobs_lock = threading.Lock()
 
 
 class RedactionRequestError(Exception):
-    def __init__(self, message, status_code=400, payload=None):
-        super().__init__(message)
-        self.message = message
-        self.status_code = status_code
-        self.payload = payload or {}
+    pass
+
+
+def create_redaction_request_error(message, status_code=400, payload=None):
+    error = RedactionRequestError(message)
+    error.message = message
+    error.status_code = status_code
+    error.payload = payload or {}
+    return error
 
 
 def parse_custom_regions(data):
@@ -107,9 +111,9 @@ def parse_output_height(data):
         else:
             parsed = int(raw_value)
     except (TypeError, ValueError):
-        raise RedactionRequestError("export_quality must be one of 480p, 720p, or 1080p", 400)
+        raise create_redaction_request_error("export_quality must be one of 480p, 720p, or 1080p", 400)
     if parsed not in EXPORT_HEIGHTS:
-        raise RedactionRequestError("export_quality must be one of 480p, 720p, or 1080p", 400)
+        raise create_redaction_request_error("export_quality must be one of 480p, 720p, or 1080p", 400)
     return parsed
 
 
@@ -123,12 +127,7 @@ def custom_region_is_face(region):
     return any(token in reason for token in ("face", "person", "head"))
 
 
-def _decode_face_image_base64(image_b64):
-    """Decode a base64-encoded face image to a BGR numpy array.
-
-    Accepts either the raw base64 payload or a full data URL ("data:...;base64,...").
-    Returns ``None`` if the data cannot be decoded into an image.
-    """
+def decode_face_image_base64(image_b64):
     if not image_b64 or not isinstance(image_b64, str):
         return None
     payload = image_b64.strip()
@@ -151,25 +150,6 @@ def _decode_face_image_base64(image_b64):
 
 
 def parse_face_images(data, key="face_images"):
-    """Parse and validate the optional ``face_images`` field on a redact request.
-
-    Accepts a list of ``{person_id, label, image_base64}`` entries. Each entry's
-    base64 image is run through the InsightFace pipeline so we can attach a
-    real encoding for per-frame redaction at export time. Used for entities
-    that the user added via "Snap face from video" — those have no
-    pre-existing entry in the job's ``unique_faces`` list, so the only way
-    to redact them is to compute the encoding now from the image they
-    snapped.
-
-    Returns ``(face_targets, encoding_failures)`` where:
-      - ``face_targets`` is a list of dicts compatible with the existing
-        face target / encoding plumbing (each has ``encoding`` and a
-        synthetic ``person_id``).
-      - ``encoding_failures`` is a list of ``{person_id, label, reason}``
-        for images we could not decode or that contained no detectable
-        face — surfaced back to the client so the editor can show a
-        popup explaining what was skipped.
-    """
     raw_value = data.get(key)
     if raw_value is None:
         raw_form = request.form.get(key, "")
@@ -189,7 +169,7 @@ def parse_face_images(data, key="face_images"):
         person_id = str(entry.get("person_id") or "").strip()
         label = str(entry.get("label") or person_id or f"face_{index}").strip() or person_id
         image_b64 = entry.get("image_base64") or entry.get("snap_base64") or ""
-        img = _decode_face_image_base64(image_b64)
+        img = decode_face_image_base64(image_b64)
         if img is None:
             failures.append({
                 "person_id": person_id,
@@ -218,8 +198,6 @@ def parse_face_images(data, key="face_images"):
                 "reason": "No face encoding could be extracted from the snapped image",
             })
             continue
-        # Pick the highest-scoring face — typically the snapped image is a
-        # tight crop, so the largest/most-confident face is the right one.
         with_encoding.sort(
             key=lambda d: (
                 float(d.get("det_score") or d.get("confidence") or 0.0),
@@ -245,8 +223,6 @@ def parse_face_images(data, key="face_images"):
                 "reason": "Could not normalize face encoding",
             })
             continue
-        # Use the synthetic person_id from the editor so the snapped face
-        # is identifiable in logs/responses; if absent, generate one.
         target_person_id = person_id or f"snap_{index}"
         face_targets.append({
             "person_id": target_person_id,
@@ -262,13 +238,13 @@ def parse_face_images(data, key="face_images"):
 def build_redaction_request(data):
     job_id = data.get("job_id") or request.form.get("job_id")
     if not job_id:
-        raise RedactionRequestError("job_id is required", 400)
+        raise create_redaction_request_error("job_id is required", 400)
 
     job = get_job(job_id)
     if not job:
-        raise RedactionRequestError("job not found", 404)
+        raise create_redaction_request_error("job not found", 404)
     if job["status"] != "ready":
-        raise RedactionRequestError(
+        raise create_redaction_request_error(
             "job is not ready for redaction",
             409,
             {"status": job["status"]},
@@ -319,7 +295,7 @@ def build_redaction_request(data):
             if pid not in matched_focus_ids
         ]
         if unresolved_focus_ids and not focus_face_targets:
-            raise RedactionRequestError(
+            raise create_redaction_request_error(
                 "Focused face could not be resolved for Reverse redaction.",
                 400,
                 {
@@ -328,10 +304,6 @@ def build_redaction_request(data):
                 },
             )
 
-        # In Reverse mode the blur target is not the saved entity list.
-        # The renderer detects every face live and excludes the focused
-        # identity when one is selected. With no focus selected, every
-        # detected face is blurred, so nothing is revealed by default.
         person_ids = []
         logger.info(
             "Reverse face redaction for job %s: preserving %s with %d focus targets; live all-face detection is enabled",
@@ -375,11 +347,6 @@ def build_redaction_request(data):
             matched_ids,
         )
 
-    # Snapped-face entities arrive via ``face_images`` (rather than via
-    # the job's ``unique_faces``). Run them through InsightFace now so
-    # their encodings join the per-frame relock pipeline like any other
-    # selected face. Anything that produces no encoding becomes a
-    # ``face_blur_failure`` we report back to the client.
     snapped_face_targets, snapped_face_failures = ([], []) if reverse_face_redaction else parse_face_images(data)
     for snap_face in snapped_face_targets:
         snap_person_id = str(snap_face.get("person_id") or "").strip()
@@ -388,11 +355,6 @@ def build_redaction_request(data):
         if snap_person_id and snap_person_id not in matched_ids:
             matched_ids.append(snap_person_id)
 
-    # Person IDs that the editor sent but for which we found neither a
-    # matching ``unique_faces`` entry nor a snapped image with a usable
-    # encoding. These are surfaced back to the client so the editor can
-    # tell the user which faces could not be redacted, instead of the
-    # whole export silently failing with a 400.
     unresolved_person_ids = []
     for pid in person_ids:
         if pid in matched_ids:
@@ -403,8 +365,7 @@ def build_redaction_request(data):
             "reason": "No matching face encoding was available",
         })
 
-    object_classes = parse_list_field(data, "object_classes", split_csv=True) or []
-    object_classes = [str(item).strip() for item in object_classes if str(item).strip()]
+    object_classes = []
 
     redaction_style = str(
         data.get("redaction_style", request.form.get("redaction_style", "blur")) or "blur"
@@ -450,12 +411,8 @@ def build_redaction_request(data):
 
     total_targets = max(len(face_targets), len(face_encodings)) + len(object_classes) + len(custom_regions)
     if total_targets == 0 and not entity_ids:
-        # Differentiate the "you selected nothing" case from the "you
-        # selected only snapped faces but none of them had a usable
-        # encoding" case so the editor can show a helpful popup instead
-        # of a generic failure.
         if unresolved_person_ids or snapped_face_failures:
-            raise RedactionRequestError(
+            raise create_redaction_request_error(
                 "None of the selected faces could be redacted: their face encodings could not be resolved.",
                 400,
                 {
@@ -463,8 +420,8 @@ def build_redaction_request(data):
                     "face_blur_failures": snapped_face_failures,
                 },
             )
-        raise RedactionRequestError(
-            "No targets selected. Provide person_ids, face_encodings, object_classes, entity_ids, or custom_regions (drawn regions with motion tracking).",
+        raise create_redaction_request_error(
+                "No targets selected. Provide person_ids, face_encodings, entity_ids, or custom_regions (drawn regions with motion tracking).",
             400,
         )
 
@@ -525,8 +482,8 @@ def serialize_redaction_response(prepared, result):
 
 
 def update_redaction_job(redaction_job_id, **updates):
-    with _redaction_jobs_lock:
-        job = _redaction_jobs.get(redaction_job_id)
+    with redaction_jobs_lock:
+        job = redaction_jobs.get(redaction_job_id)
         if not job:
             return
         job.update(updates)
@@ -649,8 +606,8 @@ def start_redaction():
         return jsonify({"error": error.message, **error.payload}), error.status_code
 
     redaction_job_id = uuid.uuid4().hex
-    with _redaction_jobs_lock:
-        _redaction_jobs[redaction_job_id] = {
+    with redaction_jobs_lock:
+        redaction_jobs[redaction_job_id] = {
             "redaction_job_id": redaction_job_id,
             "source_job_id": prepared["job_id"],
             "status": "queued",
@@ -684,8 +641,8 @@ def start_redaction():
 
 @redaction_bp.route("/redact/jobs/<redaction_job_id>", methods=["GET"])
 def get_redaction_status(redaction_job_id):
-    with _redaction_jobs_lock:
-        job = dict(_redaction_jobs.get(redaction_job_id) or {})
+    with redaction_jobs_lock:
+        job = dict(redaction_jobs.get(redaction_job_id) or {})
 
     if not job:
         return jsonify({"error": "redaction job not found"}), 404

@@ -35,8 +35,8 @@ logger = logging.getLogger("video_redaction.routes.analysis")
 
 analysis_bp = Blueprint("analysis", __name__)
 
-_live_track_state = {}
-_live_track_lock = threading.Lock()
+live_track_state = {}
+live_track_lock = threading.Lock()
 
 LIVE_TRACK_MAX_GAP_SEC = 0.85
 LIVE_TRACK_KEEP_CONFIDENCE = 0.12
@@ -58,7 +58,7 @@ LIVE_TRACK_FACE_IDENTIFIED_RELOCK_MAX_CENTER_SHIFT = 0.72
 REVERSE_FOCUS_PRESERVE_EXPAND = 2.25
 
 
-def _is_twelvelabs_timeout(exc):
+def is_twelvelabs_timeout(exc):
     text = str(exc).lower()
     return "read timed out" in text or "read timeout" in text or "timed out" in text or "timeout" in text
 
@@ -370,7 +370,7 @@ def estimate_global_live_motion(prev_gray, gray):
     if points is None or len(points) < LIVE_TRACK_GLOBAL_MIN_POINTS:
         return None
 
-    next_points, status, _ = cv2.calcOpticalFlowPyrLK(
+    flow_result = cv2.calcOpticalFlowPyrLK(
         prev_gray,
         gray,
         points,
@@ -379,6 +379,7 @@ def estimate_global_live_motion(prev_gray, gray):
         maxLevel=4,
         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 24, 0.02),
     )
+    next_points, status = flow_result[:2]
     if next_points is None or status is None:
         return None
 
@@ -460,10 +461,10 @@ def build_tracked_live_detections(
     previous_state = None
     known_faces_by_person_id = known_faces_by_person_id or {}
 
-    with _live_track_lock:
-        previous_state = _live_track_state.get(job_id)
+    with live_track_lock:
+        previous_state = live_track_state.get(job_id)
         if reset_tracking:
-            _live_track_state.pop(job_id, None)
+            live_track_state.pop(job_id, None)
             previous_state = None
 
     if previous_state is None:
@@ -660,11 +661,12 @@ def merge_live_tracked_detections(
     pairs.sort(key=lambda item: item[0], reverse=True)
     merged = []
     next_track_id = 0
-    with _live_track_lock:
-        previous_state = _live_track_state.get(job_id)
+    with live_track_lock:
+        previous_state = live_track_state.get(job_id)
         next_track_id = int((previous_state or {}).get("next_track_id", 0))
 
-    for _, track_idx, det_idx in pairs:
+    for pair in pairs:
+        track_idx, det_idx = pair[1], pair[2]
         if track_idx in used_tracks or det_idx in used_detections:
             continue
         used_tracks.add(track_idx)
@@ -711,8 +713,8 @@ def merge_live_tracked_detections(
             "points": points,
         })
 
-    with _live_track_lock:
-        _live_track_state[job_id] = {
+    with live_track_lock:
+        live_track_state[job_id] = {
             "time_sec": float(time_sec),
             "gray_small": gray_small,
             "tracks": next_tracks,
@@ -769,12 +771,12 @@ def merge_temporal_detections(detections, requested_time, preserve_distinct_face
             weight = confidence * time_weight
             grouped.append({
                 **det,
-                "_sum_weight": weight,
-                "_sum_x": det["x"] * weight,
-                "_sum_y": det["y"] * weight,
-                "_sum_width": det["width"] * weight,
-                "_sum_height": det["height"] * weight,
-                "_members": 1,
+                "sum_weight": weight,
+                "sum_x": det["x"] * weight,
+                "sum_y": det["y"] * weight,
+                "sum_width": det["width"] * weight,
+                "sum_height": det["height"] * weight,
+                "member_count": 1,
             })
             continue
 
@@ -783,17 +785,17 @@ def merge_temporal_detections(detections, requested_time, preserve_distinct_face
         time_weight = 1.0 / (1.0 + abs(sample_time - requested_time) * 12.0)
         confidence = max(0.05, float(det.get("confidence", 0.0)))
         weight = confidence * time_weight
-        group["_sum_weight"] += weight
-        group["_sum_x"] += det["x"] * weight
-        group["_sum_y"] += det["y"] * weight
-        group["_sum_width"] += det["width"] * weight
-        group["_sum_height"] += det["height"] * weight
-        group["x"] = group["_sum_x"] / group["_sum_weight"]
-        group["y"] = group["_sum_y"] / group["_sum_weight"]
-        group["width"] = group["_sum_width"] / group["_sum_weight"]
-        group["height"] = group["_sum_height"] / group["_sum_weight"]
+        group["sum_weight"] += weight
+        group["sum_x"] += det["x"] * weight
+        group["sum_y"] += det["y"] * weight
+        group["sum_width"] += det["width"] * weight
+        group["sum_height"] += det["height"] * weight
+        group["x"] = group["sum_x"] / group["sum_weight"]
+        group["y"] = group["sum_y"] / group["sum_weight"]
+        group["width"] = group["sum_width"] / group["sum_weight"]
+        group["height"] = group["sum_height"] / group["sum_weight"]
         group["confidence"] = max(float(group.get("confidence", 0.0)), float(det.get("confidence", 0.0)))
-        group["_members"] += 1
+        group["member_count"] += 1
 
     merged = []
     for idx, group in enumerate(grouped):
@@ -888,6 +890,10 @@ def get_faces(job_id):
             "tags": f.get("tags", []),
             "should_anonymize": bool(f.get("should_anonymize", False)),
             "is_official": bool(f.get("is_official", False)),
+            "review_required": bool(f.get("review_required", False)),
+            "description_confidence": f.get("description_confidence"),
+            "description_match_score": f.get("description_match_score"),
+            "redaction_reason": f.get("redaction_reason"),
             "priority_rank": f.get("priority_rank"),
         })
 
@@ -966,7 +972,7 @@ def analyze_custom():
         result = twelvelabs_service.analyze_video_custom(video_id, prompt)
         return jsonify(result)
     except Exception as exc:
-        if _is_twelvelabs_timeout(exc):
+        if is_twelvelabs_timeout(exc):
             logger.warning("TwelveLabs analyze request timed out for video %s: %s", video_id, exc)
             return jsonify({
                 "error": (
@@ -1003,8 +1009,6 @@ def live_redaction_detect():
     reset_tracking = str(data.get("reset_tracking", request.form.get("reset_tracking", "false"))).lower() in ("true", "1", "yes")
 
     include_faces = str(data.get("include_faces", request.form.get("include_faces", "true"))).lower() not in ("false", "0", "no")
-    include_objects = str(data.get("include_objects", request.form.get("include_objects", "true"))).lower() not in ("false", "0", "no")
-    forensic_only = str(data.get("forensic_only", request.form.get("forensic_only", "true"))).lower() not in ("false", "0", "no")
     redaction_mode = str(
         data.get("redaction_mode", request.form.get("redaction_mode", "")) or ""
     ).strip().lower()
@@ -1036,35 +1040,11 @@ def live_redaction_detect():
     focus_person_ids = [str(item).strip() for item in focus_person_ids if str(item).strip()]
     if reverse_face_redaction:
         person_ids = []
-        include_objects = False
     if person_ids and job.get("status") not in ("ready",):
         return jsonify({
             "error": "saved face identities are still being prepared for this video",
             "status": job.get("status"),
         }), 409
-
-    object_classes = data.get("object_classes")
-    if object_classes is None:
-        raw_object_classes = request.form.get("object_classes", "")
-        if raw_object_classes:
-            try:
-                object_classes = json.loads(raw_object_classes)
-            except json.JSONDecodeError:
-                object_classes = [item.strip() for item in raw_object_classes.split(",") if item.strip()]
-    if not isinstance(object_classes, list):
-        object_classes = []
-    object_class_set = {
-        normalize_object_class_name(item)
-        for item in object_classes
-        if normalize_object_class_name(item)
-    }
-    if reverse_face_redaction:
-        object_class_set = set()
-
-    try:
-        object_confidence = float(data.get("object_confidence", request.form.get("object_confidence", 0.25)) or 0.25)
-    except (TypeError, ValueError):
-        object_confidence = 0.25
 
     try:
         face_confidence = float(data.get("face_confidence", request.form.get("face_confidence", 0.28)) or 0.28)
@@ -1082,8 +1062,6 @@ def live_redaction_detect():
     sample_offsets = (-0.12, -0.06, 0.0, 0.06, 0.12)
     if reverse_face_redaction or person_ids:
         sample_offsets = (0.0,)
-    elif object_class_set:
-        sample_offsets = (-0.08, 0.0, 0.08)
 
     sample_times = []
     for offset in sample_offsets:
@@ -1194,40 +1172,13 @@ def live_redaction_detect():
                     })
 
     object_detection_error = None
-    if include_objects:
-        from services.detection import detect_objects, get_object_detection_error
-
-        for sample_time in sample_times:
-            sample_frame = frames_by_time.get(round(sample_time, 3), frame)
-            for obj in detect_objects(
-                sample_frame,
-                conf_threshold=object_confidence,
-                forensic_only=forensic_only,
-                strict=False,
-            ):
-                obj_label = str(obj.get("identification") or "Object")
-                obj_class = normalize_object_class_name(obj_label)
-                if object_class_set and obj_class not in object_class_set:
-                    continue
-                normalized = normalize_bbox(obj.get("bbox"), frame_w, frame_h)
-                if normalized is None:
-                    continue
-                detections.append({
-                    "kind": "object",
-                    "label": obj_label,
-                    "objectClass": obj_class or obj_label,
-                    "confidence": round(float(obj.get("confidence", 0.0)), 4),
-                    "sample_time": sample_time,
-                    **normalized,
-                })
-        object_detection_error = get_object_detection_error()
 
     detections = merge_temporal_detections(
         detections,
         time_sec,
         preserve_distinct_faces=reverse_face_redaction,
     )
-    tracked_detections, gray_small, scale_back, _ = build_tracked_live_detections(
+    tracked_result = build_tracked_live_detections(
         job_id,
         time_sec,
         frame,
@@ -1237,6 +1188,7 @@ def live_redaction_detect():
         known_faces_by_person_id=selected_faces_by_person_id,
         face_tolerance=0.55,
     )
+    tracked_detections, gray_small, scale_back = tracked_result[:3]
     detections = merge_live_tracked_detections(
         job_id,
         detections,
@@ -1250,7 +1202,7 @@ def live_redaction_detect():
     detections = filter_detections_to_selected_targets(
         detections,
         person_ids=person_ids,
-        object_class_set=object_class_set,
+        object_class_set=set(),
     )
     if reverse_face_redaction and focus_preserve_boxes:
         detections = filter_reverse_focus_detections(detections, focus_preserve_boxes)
@@ -1336,7 +1288,9 @@ def detect_faces_endpoint():
             if crop.size == 0:
                 continue
 
-            _, buf = cv2.imencode(".png", crop)
+            encoded_ok, buf = cv2.imencode(".png", crop)
+            if not encoded_ok:
+                continue
             b64 = base64.b64encode(buf).decode("ascii")
 
             faces.append({

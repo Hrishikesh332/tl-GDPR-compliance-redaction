@@ -40,14 +40,14 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 logger = logging.getLogger("video_redaction")
-_self_ping_scheduler = None
-_self_ping_scheduler_lock = threading.Lock()
+self_ping_scheduler = None
+self_ping_scheduler_lock = threading.Lock()
 
 
-def _shutdown_self_ping_scheduler():
-    global _self_ping_scheduler
-    scheduler = _self_ping_scheduler
-    _self_ping_scheduler = None
+def shutdown_self_ping_scheduler():
+    global self_ping_scheduler
+    scheduler = self_ping_scheduler
+    self_ping_scheduler = None
     if scheduler is None:
         return
     try:
@@ -56,18 +56,18 @@ def _shutdown_self_ping_scheduler():
         logger.debug("Self-ping scheduler shutdown skipped", exc_info=True)
 
 
-def _start_self_ping_scheduler():
-    global _self_ping_scheduler
+def start_self_ping_scheduler():
+    global self_ping_scheduler
     if not SELF_APP_PING_URL:
         return
 
-    with _self_ping_scheduler_lock:
-        if _self_ping_scheduler is not None:
+    with self_ping_scheduler_lock:
+        if self_ping_scheduler is not None:
             return
 
         scheduler = BackgroundScheduler(timezone="UTC", daemon=True)
 
-        def _ping_self_app():
+        def ping_self_app():
             try:
                 response = requests.get(SELF_APP_PING_URL, timeout=SELF_APP_PING_TIMEOUT_SEC)
                 logger.info(
@@ -79,7 +79,7 @@ def _start_self_ping_scheduler():
                 logger.warning("Self-ping to %s failed: %s", SELF_APP_PING_URL, exc)
 
         scheduler.add_job(
-            _ping_self_app,
+            ping_self_app,
             trigger="interval",
             minutes=max(1, SELF_APP_PING_INTERVAL_MINUTES),
             id="self-app-ping",
@@ -88,7 +88,7 @@ def _start_self_ping_scheduler():
             max_instances=1,
         )
         scheduler.start()
-        _self_ping_scheduler = scheduler
+        self_ping_scheduler = scheduler
         logger.info(
             "Started self-ping scheduler for %s every %d minutes",
             SELF_APP_PING_URL,
@@ -105,18 +105,18 @@ def create_app():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     register_blueprints(app)
-    _start_self_ping_scheduler()
+    start_self_ping_scheduler()
 
     @app.route("/")
     def health():
         return jsonify({"status": "ok", "service": "video-redaction-api"})
 
-    _HLS_PROXY_ALLOWED_SUFFIXES = (".cloudfront.net", ".twelvelabs.io")
+    HLS_PROXY_ALLOWED_SUFFIXES = (".cloudfront.net", ".twelvelabs.io")
 
     @app.route("/api/hls-proxy/<host>/<path:rest>")
     def hls_proxy(host, rest):
         """Proxy HLS streams so the browser avoids CORS blocks from the CDN."""
-        if not any(host.endswith(s) for s in _HLS_PROXY_ALLOWED_SUFFIXES):
+        if not any(host.endswith(s) for s in HLS_PROXY_ALLOWED_SUFFIXES):
             return jsonify({"error": "host not allowed"}), 403
 
         url = f"https://{host}/{rest}"
@@ -138,7 +138,7 @@ def create_app():
                 r"https://([\w.\-]+)(/\S+)",
                 lambda m: (
                     f"/api/hls-proxy/{m.group(1)}{m.group(2)}"
-                    if any(m.group(1).endswith(s) for s in _HLS_PROXY_ALLOWED_SUFFIXES)
+                    if any(m.group(1).endswith(s) for s in HLS_PROXY_ALLOWED_SUFFIXES)
                     else m.group(0)
                 ),
                 body,
@@ -170,7 +170,7 @@ def create_app():
     return app
 
 
-register_atexit(_shutdown_self_ping_scheduler)
+register_atexit(shutdown_self_ping_scheduler)
 app = create_app()
 
 if __name__ == "__main__":

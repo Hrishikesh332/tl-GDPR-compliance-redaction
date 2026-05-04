@@ -25,7 +25,7 @@ from config import (
     MANUAL_FACE_DETECTION_CONFIDENCE,
 )
 from services.face_identity import get_face_identity
-from utils.image import apply_redaction
+from utils.image import apply_redaction, restore_region
 from utils.video import small_frame_for_tracking, finalize_mp4_export, export_video_dimensions, normalize_export_height
 
 logger = logging.getLogger("video_redaction.redactor")
@@ -72,10 +72,19 @@ REVERSE_FACE_DETECT_MAX_DIM = int(os.environ.get("REVERSE_FACE_DETECT_MAX_DIM", 
 REVERSE_FACE_DETECT_CONFIDENCE = float(os.environ.get("REVERSE_FACE_DETECT_CONFIDENCE", "0.16") or 0.16)
 REVERSE_FACE_DETECT_MIN_SIZE = int(os.environ.get("REVERSE_FACE_DETECT_MIN_SIZE", "8") or 8)
 REVERSE_FACE_DETECT_MIN_SHARPNESS = float(os.environ.get("REVERSE_FACE_DETECT_MIN_SHARPNESS", "2.0") or 2.0)
-_NO_TRACKER_FACTORY = object()
-_TRACKER_FACTORY_CACHE = {}
-_TRACKER_FACTORY_LOGGED = set()
-_TRACKER_UNAVAILABLE_WARNING_EMITTED = False
+REVERSE_FACE_MASK_PAD_X_RATIO = 0.04
+REVERSE_FACE_MASK_PAD_TOP_RATIO = 0.05
+REVERSE_FACE_MASK_PAD_BOTTOM_RATIO = 0.08
+REVERSE_FOCUS_MEMORY_GRACE_FRAMES = 18
+REVERSE_FOCUS_MEMORY_PAD_PER_FRAME = 0.035
+REVERSE_FOCUS_MEMORY_PAD_CAP = 0.85
+REVERSE_FOCUS_RESTORE_PAD_X_RATIO = 0.03
+REVERSE_FOCUS_RESTORE_PAD_TOP_RATIO = 0.04
+REVERSE_FOCUS_RESTORE_PAD_BOTTOM_RATIO = 0.06
+NO_TRACKER_FACTORY = object()
+TRACKER_FACTORY_CACHE = {}
+TRACKER_FACTORY_LOGGED = set()
+TRACKER_UNAVAILABLE_WARNING_EMITTED = False
 
 
 def tracker_factory_candidates(scale_adaptive=False):
@@ -106,29 +115,29 @@ def tracker_factory_candidates(scale_adaptive=False):
 
 def resolve_tracker_factory(scale_adaptive=False):
     key = bool(scale_adaptive)
-    cached = _TRACKER_FACTORY_CACHE.get(key)
+    cached = TRACKER_FACTORY_CACHE.get(key)
     if cached is not None:
-        return None if cached is _NO_TRACKER_FACTORY else cached
+        return None if cached is NO_TRACKER_FACTORY else cached
 
     for name, create in tracker_factory_candidates(scale_adaptive=scale_adaptive):
         try:
             t = create()
             if t is not None:
-                _TRACKER_FACTORY_CACHE[key] = (name, create)
-                if name not in _TRACKER_FACTORY_LOGGED:
+                TRACKER_FACTORY_CACHE[key] = (name, create)
+                if name not in TRACKER_FACTORY_LOGGED:
                     logger.info("Using tracker: %s for motion tracking", name)
-                    _TRACKER_FACTORY_LOGGED.add(name)
+                    TRACKER_FACTORY_LOGGED.add(name)
                 return name, create
         except (AttributeError, cv2.error, Exception):
             continue
 
-    global _TRACKER_UNAVAILABLE_WARNING_EMITTED
-    _TRACKER_FACTORY_CACHE[key] = _NO_TRACKER_FACTORY
-    if not _TRACKER_UNAVAILABLE_WARNING_EMITTED:
+    global TRACKER_UNAVAILABLE_WARNING_EMITTED
+    TRACKER_FACTORY_CACHE[key] = NO_TRACKER_FACTORY
+    if not TRACKER_UNAVAILABLE_WARNING_EMITTED:
         logger.warning(
             "No preferred OpenCV tracker was available. Tracking will fall back to optical-flow/static tracking."
         )
-        _TRACKER_UNAVAILABLE_WARNING_EMITTED = True
+        TRACKER_UNAVAILABLE_WARNING_EMITTED = True
     return None
 
 
@@ -138,13 +147,13 @@ def create_tracker(scale_adaptive=False):
     if resolved is None:
         return None
 
-    _name, create = resolved
+    create = resolved[1]
     try:
         return create()
     except (AttributeError, cv2.error, Exception):
         # If a cached constructor later becomes unusable, clear it so future calls
         # can probe lower-priority trackers instead of retrying the same one forever.
-        _TRACKER_FACTORY_CACHE.pop(bool(scale_adaptive), None)
+        TRACKER_FACTORY_CACHE.pop(bool(scale_adaptive), None)
     return None
 
 
@@ -229,8 +238,8 @@ def face_motion_rate(velocity, state):
     """
     if not velocity or not state:
         return 0.0
-    vx, vy, _vw, _vh = velocity
-    _cx, _cy, w, h = state
+    vx, vy = velocity[:2]
+    w, h = state[2:4]
     diag = max(8.0, math.hypot(w, h))
     return float(math.hypot(vx, vy) / diag)
 
@@ -324,8 +333,8 @@ def scale_change_strength(velocity, state):
     """
     if not velocity or not state:
         return 0.0
-    _vx, _vy, vw, vh = velocity
-    _cx, _cy, w, h = state
+    vw, vh = velocity[2:4]
+    w, h = state[2:4]
     rate_w = abs(vw) / max(1.0, w)
     rate_h = abs(vh) / max(1.0, h)
     return max(rate_w, rate_h)
@@ -393,6 +402,54 @@ def scale_bbox_to_frame(bbox, scale_back, frame_w, frame_h):
     if scaled[2] <= scaled[0] or scaled[3] <= scaled[1]:
         return None
     return scaled
+
+
+def scale_frame_bbox(bbox, scale_x, scale_y, frame_w, frame_h):
+    if not bbox:
+        return None
+    try:
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+        sx = float(scale_x)
+        sy = float(scale_y)
+    except (TypeError, ValueError):
+        return None
+    scaled = (
+        max(0.0, min(x1 * sx, float(frame_w))),
+        max(0.0, min(y1 * sy, float(frame_h))),
+        max(0.0, min(x2 * sx, float(frame_w))),
+        max(0.0, min(y2 * sy, float(frame_h))),
+    )
+    if scaled[2] <= scaled[0] or scaled[3] <= scaled[1]:
+        return None
+    return scaled
+
+
+def scale_known_face_target_for_frame(face, scale_x, scale_y, frame_w, frame_h):
+    if not isinstance(face, dict):
+        return face
+    scaled_face = dict(face)
+    scaled_bbox = scale_frame_bbox(face.get("bbox"), scale_x, scale_y, frame_w, frame_h)
+    if scaled_bbox is not None:
+        scaled_face["bbox"] = [round(v, 3) for v in scaled_bbox]
+
+    scaled_appearances = []
+    for appearance in face.get("appearances") or []:
+        if not isinstance(appearance, dict):
+            continue
+        scaled_appearance = dict(appearance)
+        appearance_bbox = scale_frame_bbox(
+            appearance.get("bbox"),
+            scale_x,
+            scale_y,
+            frame_w,
+            frame_h,
+        )
+        if appearance_bbox is not None:
+            scaled_appearance["bbox"] = [round(v, 3) for v in appearance_bbox]
+        scaled_appearances.append(scaled_appearance)
+    if scaled_appearances:
+        scaled_face["appearances"] = scaled_appearances
+    return scaled_face
 
 
 def detect_reverse_face_tracks(frame, frame_w, frame_h):
@@ -522,19 +579,21 @@ def face_bbox_is_preserved(candidate_bbox, preserve_bboxes, frame_w=None, frame_
             continue
         preserve = tuple(float(v) for v in preserve_bbox[:4])
         preserve_area = max(1.0, float(bbox_area(preserve)))
-        overlap_area = bbox_intersection_area(candidate, preserve)
-        if overlap_area <= 0:
-            continue
-        iou = overlap_area / max(1.0, candidate_area + preserve_area - overlap_area)
-        if iou >= 0.10:
-            return True
-        if overlap_area / candidate_area >= 0.42:
-            return True
         preserve_diag = max(
             1.0,
             math.hypot(preserve[2] - preserve[0], preserve[3] - preserve[1]),
         )
         center_distance = bbox_center_distance(candidate, preserve)
+        if center_distance <= min(candidate_diag, preserve_diag) * 0.42:
+            return True
+        overlap_area = bbox_intersection_area(candidate, preserve)
+        iou = overlap_area / max(1.0, candidate_area + preserve_area - overlap_area)
+        if iou >= 0.10:
+            return True
+        if overlap_area / candidate_area >= 0.42:
+            return True
+        if overlap_area <= 0:
+            continue
         if center_distance <= max(candidate_diag * 0.52, preserve_diag * 0.42):
             return True
     return False
@@ -557,57 +616,45 @@ def filter_reverse_focus_detected_tracks(detected_tracks, preserve_bboxes):
     if not detected_tracks or not preserve_bboxes:
         return detected_tracks
 
-    remove_indices = set()
-    for preserve_bbox in preserve_bboxes:
-        if not preserve_bbox:
+    filtered = []
+    for detected_track in detected_tracks:
+        if detected_track.get("kind") != "face":
+            filtered.append(detected_track)
             continue
-        preserve = tuple(float(v) for v in preserve_bbox[:4])
-        preserve_area = max(1.0, float(bbox_area(preserve)))
-        preserve_diag = max(
+        candidate_bbox = detected_track.get("bbox")
+        if not candidate_bbox:
+            filtered.append(detected_track)
+            continue
+        candidate = tuple(float(v) for v in candidate_bbox[:4])
+        candidate_area = max(1.0, float(bbox_area(candidate)))
+        candidate_diag = max(
             1.0,
-            math.hypot(preserve[2] - preserve[0], preserve[3] - preserve[1]),
+            math.hypot(candidate[2] - candidate[0], candidate[3] - candidate[1]),
         )
-        best_idx = None
-        best_score = -1e9
-        for idx, detected_track in enumerate(detected_tracks):
-            if idx in remove_indices or detected_track.get("kind") != "face":
+        should_remove = face_bbox_is_preserved(candidate, preserve_bboxes)
+        for preserve_bbox in preserve_bboxes:
+            if should_remove or not preserve_bbox:
                 continue
-            candidate_bbox = detected_track.get("bbox")
-            if not candidate_bbox:
-                continue
-            candidate = tuple(float(v) for v in candidate_bbox[:4])
-            candidate_area = max(1.0, float(bbox_area(candidate)))
-            candidate_diag = max(
+            preserve = tuple(float(v) for v in preserve_bbox[:4])
+            preserve_area = max(1.0, float(bbox_area(preserve)))
+            preserve_diag = max(
                 1.0,
-                math.hypot(candidate[2] - candidate[0], candidate[3] - candidate[1]),
+                math.hypot(preserve[2] - preserve[0], preserve[3] - preserve[1]),
             )
             overlap = bbox_intersection_area(candidate, preserve)
             overlap_ratio = overlap / candidate_area
             preserve_overlap_ratio = overlap / preserve_area
             iou = bbox_iou(candidate, preserve)
             center_distance = bbox_center_distance(candidate, preserve)
-            center_ratio = center_distance / max(candidate_diag, preserve_diag)
-            is_candidate = (
+            should_remove = (
                 iou >= 0.05
                 or overlap_ratio >= 0.18
                 or preserve_overlap_ratio >= 0.18
                 or center_distance <= max(candidate_diag * 0.65, preserve_diag * 0.55)
             )
-            if not is_candidate:
-                continue
-            score = iou * 5.0 + overlap_ratio * 2.0 + preserve_overlap_ratio - center_ratio
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-        if best_idx is not None:
-            remove_indices.add(best_idx)
-
-    if not remove_indices:
-        return detected_tracks
-    return [
-        detected_track for idx, detected_track in enumerate(detected_tracks)
-        if idx not in remove_indices
-    ]
+        if not should_remove:
+            filtered.append(detected_track)
+    return filtered
 
 
 def is_face_track_motion_consistent(candidate_bbox, reference_bbox):
@@ -908,7 +955,7 @@ def optical_flow_bbox_update(prev_gray, gray, prev_points, prev_bbox, frame_w, f
 
     # Forward-backward LK validation rejects points that drift onto the
     # background during camera pans or low-texture frames.
-    back_points, back_status, _ = cv2.calcOpticalFlowPyrLK(
+    back_flow_result = cv2.calcOpticalFlowPyrLK(
         gray,
         prev_gray,
         good_new,
@@ -917,6 +964,7 @@ def optical_flow_bbox_update(prev_gray, gray, prev_points, prev_bbox, frame_w, f
         maxLevel=3,
         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03),
     )
+    back_points, back_status = back_flow_result[:2]
     if back_points is not None and back_status is not None:
         fb_error = np.linalg.norm(
             back_points.reshape(-1, 2) - good_old.reshape(-1, 2),
@@ -1018,7 +1066,9 @@ def template_match_bbox_update(
 
     try:
         result = cv2.matchTemplate(search, template, cv2.TM_CCOEFF_NORMED)
-        _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(result)
+        match_result = cv2.minMaxLoc(result)
+        max_val = match_result[1]
+        max_loc = match_result[3]
     except (cv2.error, ValueError):
         return None, 0.0
 
@@ -1048,7 +1098,7 @@ def estimate_global_frame_motion(prev_gray, gray):
     if points is None or len(points) < GLOBAL_MOTION_MIN_POINTS:
         return None
 
-    next_points, status, _ = cv2.calcOpticalFlowPyrLK(
+    flow_result = cv2.calcOpticalFlowPyrLK(
         prev_gray,
         gray,
         points,
@@ -1057,6 +1107,7 @@ def estimate_global_frame_motion(prev_gray, gray):
         maxLevel=4,
         criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 24, 0.02),
     )
+    next_points, status = flow_result[:2]
     if next_points is None or status is None:
         return None
 
@@ -1141,7 +1192,7 @@ def weighted_fuse_bboxes(candidates, frame_w, frame_h):
     ]
     if not valid:
         return None
-    anchor_bbox, _anchor_weight, _anchor_name = max(valid, key=lambda item: item[1])
+    anchor_bbox = max(valid, key=lambda item: item[1])[0]
     anchor_diag = max(
         1.0,
         math.hypot(anchor_bbox[2] - anchor_bbox[0], anchor_bbox[3] - anchor_bbox[1]),
@@ -1156,12 +1207,13 @@ def weighted_fuse_bboxes(candidates, frame_w, frame_h):
             clustered.append((bbox, weight, name))
     if not clustered:
         return anchor_bbox
-    total = sum(weight for _bbox, weight, _name in clustered)
+    total = sum(item[1] for item in clustered)
     if total <= 0:
         return anchor_bbox
 
     cx = cy = bw = bh = 0.0
-    for bbox, weight, _name in clustered:
+    for item in clustered:
+        bbox, weight = item[0], item[1]
         state = bbox_to_state(bbox)
         if state is None:
             continue
@@ -1402,7 +1454,8 @@ def associate_detections_to_tracks(detected_tracks, existing_tracks, frame_w, fr
             candidates.append((score, d_idx, e_idx, identity_match))
 
     candidates.sort(key=lambda item: item[0], reverse=True)
-    for score, d_idx, e_idx, _identity in candidates:
+    for candidate in candidates:
+        d_idx, e_idx = candidate[1], candidate[2]
         if d_idx in used_detections or e_idx in used_existing:
             continue
         matches[d_idx] = e_idx
@@ -1804,13 +1857,9 @@ def redact_video(
         face_targets = []
         object_classes = set()
 
-    # Face-lock lanes are precomputed per-frame bboxes for selected
-    # persons. When present, the lane is the source of truth for that
-    # person at every covered frame and the existing per-frame
-    # InsightFace path is skipped for those persons. This makes the blur
-    # locked-on across camera shakes/zooms because the lane was built
-    # offline on the local video using fused CSRT/optical-flow/global
-    # motion plus InsightFace anchors and TwelveLabs guidance.
+    # Face-lock lanes are precomputed per-frame tracks for selected people.
+    # When available, they draw the blur directly so export does not depend on
+    # frame-by-frame identity relock during camera shake, zoom, or profile turns.
     face_lock_tracks = face_lock_tracks or {}
     face_lock_lanes_by_person = {}
     face_lock_bboxes_by_frame = {}
@@ -1840,12 +1889,9 @@ def redact_video(
                     "bbox": bbox,
                 })
 
-    # Filter out persons whose lane will draw their blur, so the
-    # existing identity-relock loop never moves the blur for them.
-    # face_encodings here is rebuilt from the remaining targets' stored
-    # embeddings; this avoids double-processing without breaking the
-    # __ALL__ auto-mode (which uses no face_targets).
     if face_lock_lanes_by_person and face_targets:
+        # Remove lane-backed people from the live relock list; otherwise the
+        # renderer can double-process the same face with two competing boxes.
         remaining_targets = [
             face for face in face_targets
             if str(get_face_identity(face) or "") not in face_lock_lanes_by_person
@@ -1890,7 +1936,7 @@ def redact_video(
             anchor_sec = float(reg.get("anchor_sec", reg.get("start_sec", 0.0)) or 0.0)
         except (TypeError, ValueError):
             anchor_sec = 0.0
-        prepared_custom_regions.append({**reg, "_anchor_sec": max(0.0, anchor_sec)})
+        prepared_custom_regions.append({**reg, "resolved_anchor_sec": max(0.0, anchor_sec)})
     custom_regions = prepared_custom_regions
 
     cap = cv2.VideoCapture(input_path)
@@ -1916,6 +1962,7 @@ def redact_video(
         and (output_w != source_w or output_h != source_h)
         and (not preserve_face_targets or bool(preserve_lock_bboxes_by_frame))
     )
+    active_preserve_face_targets = preserve_face_targets
     if process_at_output_resolution:
         scale_x = output_w / float(source_w)
         scale_y = output_h / float(source_h)
@@ -1931,6 +1978,10 @@ def redact_video(
                     max(0.0, min(x2 * scale_x, float(output_w))),
                     max(0.0, min(y2 * scale_y, float(output_h))),
                 )
+        active_preserve_face_targets = [
+            scale_known_face_target_for_frame(face, scale_x, scale_y, output_w, output_h)
+            for face in preserve_face_targets
+        ]
         w, h = output_w, output_h
 
     last_progress_stage = None
@@ -1970,7 +2021,7 @@ def redact_video(
             logger.info(
                 "Custom region %d: start=%.3fs norm x=%.2f y=%.2f w=%.2f h=%.2f -> pixel bbox %s",
                 i,
-                reg.get("_anchor_sec", 0.0),
+                reg.get("resolved_anchor_sec", 0.0),
                 reg.get("x", 0),
                 reg.get("y", 0),
                 reg.get("width", 0),
@@ -2002,32 +2053,36 @@ def redact_video(
     trackers = []
     frame_idx = 0
     detection_frames_processed = 0
+    reverse_preserve_frames = 0
+    reverse_preserve_lane_frames = 0
+    reverse_preserve_localized_frames = 0
+    reverse_preserve_memory_frames = 0
+    reverse_focus_memory_bboxes = []
+    reverse_focus_memory_frame_idx = None
     auto_prev_small_gray = None
     AUTO_TRACKER_REINIT_INTERVAL = 20
     AUTO_TRACKER_REINIT_AFTER_FAILS = 5
 
-    # Motion tracking for manual (drawn) regions: tracker per region, init on frame 0, update every frame.
-    # Each entry: (tracker or None for static fallback, effect, static_bbox, last_bbox from tracker or None).
     custom_trackers = [None] * len(custom_regions)  # tracker or None
     custom_started = [False] * len(custom_regions)
     custom_modes = [None] * len(custom_regions)
     custom_effects = [None] * len(custom_regions)
-    custom_static_bboxes = [None] * len(custom_regions)  # initial bbox (x1,y1,x2,y2) once region becomes active
-    custom_last_bboxes = [None] * len(custom_regions)    # last successful tracker bbox; used when update() fails so blur keeps following
-    custom_smoothed_bboxes = [None] * len(custom_regions)  # EMA-smoothed bbox per region (when TRACKER_SMOOTHING_ALPHA > 0)
-    custom_face_boxes = [None] * len(custom_regions)  # last confirmed face bbox for face-aware manual blur regions
-    custom_face_paddings = [None] * len(custom_regions)  # keeps the user's drawn framing relative to the detected face
-    custom_small_bboxes = [None] * len(custom_regions)  # current tracked bbox in scaled tracking frame
-    custom_feature_points = [None] * len(custom_regions)  # feature points used for optical-flow tracking
-    custom_fail_count = [0] * len(custom_regions)     # consecutive update() failures per region; used to re-init after several failures
-    CUSTOM_TRACKER_REINIT_INTERVAL = 20   # re-init tracker every N frames so it keeps following (avoids freeze)
-    CUSTOM_TRACKER_REINIT_AFTER_FAILS = 5  # re-init when update() fails this many times in a row
+    custom_static_bboxes = [None] * len(custom_regions)
+    custom_last_bboxes = [None] * len(custom_regions)
+    custom_smoothed_bboxes = [None] * len(custom_regions)
+    custom_face_boxes = [None] * len(custom_regions)
+    custom_face_paddings = [None] * len(custom_regions)
+    custom_small_bboxes = [None] * len(custom_regions)
+    custom_feature_points = [None] * len(custom_regions)
+    custom_fail_count = [0] * len(custom_regions)
+    CUSTOM_TRACKER_REINIT_INTERVAL = 20
+    CUSTOM_TRACKER_REINIT_AFTER_FAILS = 5
     sampled_custom_tracks = [
         {
             "id": str(reg.get("id", idx)),
             "shape": reg.get("shape") or "rectangle",
             "effect": reg.get("effect") or "blur",
-            "anchor_sec": reg.get("_anchor_sec", 0.0),
+            "anchor_sec": reg.get("resolved_anchor_sec", 0.0),
             "samples": [],
         }
         for idx, reg in enumerate(custom_regions)
@@ -2037,8 +2092,62 @@ def redact_video(
     if collect_custom_track_data:
         sample_step = 1.0 / max(1.0, float(track_sample_fps or fps or 1.0))
     prev_small_gray = None
+
+    def remember_reverse_focus_bboxes(focus_bboxes):
+        nonlocal reverse_focus_memory_bboxes, reverse_focus_memory_frame_idx
+        valid_bboxes = [
+            tuple(float(v) for v in bbox[:4])
+            for bbox in focus_bboxes or []
+            if bbox and bbox[2] > bbox[0] and bbox[3] > bbox[1]
+        ]
+        if not valid_bboxes:
+            return
+        reverse_focus_memory_bboxes = valid_bboxes
+        reverse_focus_memory_frame_idx = frame_idx
+
+    def reverse_focus_bboxes_from_memory():
+        if reverse_focus_memory_frame_idx is None or not reverse_focus_memory_bboxes:
+            return []
+        age = frame_idx - reverse_focus_memory_frame_idx
+        if age < 0 or age > REVERSE_FOCUS_MEMORY_GRACE_FRAMES:
+            return []
+        pad = min(
+            REVERSE_FOCUS_MEMORY_PAD_CAP,
+            REVERSE_FOCUS_MEMORY_PAD_PER_FRAME * max(1, age),
+        )
+        return [
+            expand_bbox(bbox, w, h, 1.0 + pad)
+            for bbox in reverse_focus_memory_bboxes
+        ]
+
+    def apply_detection_redaction(target_frame, bbox, kind="face"):
+        kind_normalized = str(kind or "").lower()
+        shape = "rect"
+        redaction_bbox = bbox
+        if kind_normalized == "face":
+            if reverse_face_redaction and face_bbox_is_preserved(bbox, current_preserve_bboxes, w, h):
+                return target_frame
+            if reverse_face_redaction:
+                redaction_bbox = expand_face_redaction_bbox(
+                    bbox,
+                    w,
+                    h,
+                    pad_x_ratio=REVERSE_FACE_MASK_PAD_X_RATIO,
+                    pad_top_ratio=REVERSE_FACE_MASK_PAD_TOP_RATIO,
+                    pad_bottom_ratio=REVERSE_FACE_MASK_PAD_BOTTOM_RATIO,
+                )
+                if face_bbox_is_preserved(redaction_bbox, current_preserve_bboxes, w, h):
+                    return target_frame
+        return apply_redaction(
+            target_frame,
+            redaction_bbox,
+            redaction_style,
+            blur_strength,
+            shape=shape,
+        )
+
     if preview_only and custom_regions:
-        earliest_anchor_sec = min((float(reg.get("_anchor_sec", 0.0)) for reg in custom_regions), default=0.0)
+        earliest_anchor_sec = min((float(reg.get("resolved_anchor_sec", 0.0)) for reg in custom_regions), default=0.0)
         start_frame = max(0, min(total, int(earliest_anchor_sec * fps)))
         if start_frame > 0:
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -2052,6 +2161,11 @@ def redact_video(
             break
         if process_at_output_resolution:
             frame = cv2.resize(frame, (output_w, output_h), interpolation=cv2.INTER_AREA)
+        reverse_focus_restore_frame = (
+            frame.copy()
+            if reverse_face_redaction and (active_preserve_face_targets or preserve_lock_bboxes_by_frame)
+            else None
+        )
 
         current_sec = frame_idx / fps
         current_preserve_bboxes = [
@@ -2059,17 +2173,12 @@ def redact_video(
             for entry in preserve_lock_bboxes_by_frame.get(frame_idx, ())
             if entry.get("bbox")
         ]
-        # Apply face-lock lane blurs first so they always cover the
-        # face for selected persons regardless of what the per-frame
-        # detection/tracking path decides later in this iteration. The
-        # lane bbox is the source of truth: it was built bidirectionally
-        # on the local video using fused tracking + InsightFace anchors
-        # so it survives camera shakes, pans, zooms, and brief misses.
+        had_lane_preserve_bbox = bool(current_preserve_bboxes)
         if face_lock_bboxes_by_frame and not preview_only:
             for entry in face_lock_bboxes_by_frame.get(frame_idx, ()):  # iterates 0..N
                 lane_bbox = entry.get("bbox")
                 if lane_bbox:
-                    apply_redaction(frame, lane_bbox, redaction_style, blur_strength)
+                    apply_detection_redaction(frame, lane_bbox, "face")
         frame_custom_display_bboxes = [None] * len(custom_regions)
         in_temporal_range = True
         if temporal_ranges:
@@ -2098,7 +2207,7 @@ def redact_video(
             for idx, reg in enumerate(custom_regions):
                 if custom_started[idx]:
                     continue
-                if current_sec + (0.5 / max(fps, 1.0)) < reg.get("_anchor_sec", 0.0):
+                if current_sec + (0.5 / max(fps, 1.0)) < reg.get("resolved_anchor_sec", 0.0):
                     continue
 
                 bbox = normalized_region_to_bbox(reg, w, h)
@@ -2150,7 +2259,7 @@ def redact_video(
                     "Activated custom region %d at %.3fs (requested %.3fs, mode=%s, tracker=%s)",
                     idx,
                     current_sec,
-                    reg.get("_anchor_sec", 0.0),
+                    reg.get("resolved_anchor_sec", 0.0),
                     mode,
                     "yes" if tracker is not None else "no",
                 )
@@ -2369,10 +2478,11 @@ def redact_video(
 
         if run_detection:
             from services.detection import match_faces_in_frame, detect_face_boxes, localize_known_faces_in_frame
-            if reverse_face_redaction and preserve_face_targets and not current_preserve_bboxes:
+            localized_preserve_count = 0
+            if reverse_face_redaction and active_preserve_face_targets and not current_preserve_bboxes:
                 preserved_faces = localize_known_faces_in_frame(
                     frame,
-                    preserve_face_targets,
+                    active_preserve_face_targets,
                     time_sec=current_sec,
                     tolerance=face_tolerance if face_tolerance is not None else 0.55,
                 )
@@ -2381,6 +2491,20 @@ def redact_video(
                     if bbox:
                         preserve_bbox = expand_face_redaction_bbox(tuple(bbox), w, h)
                         current_preserve_bboxes.append(preserve_bbox)
+                        localized_preserve_count += 1
+            if reverse_face_redaction and current_preserve_bboxes:
+                remember_reverse_focus_bboxes(current_preserve_bboxes)
+            elif reverse_face_redaction and (active_preserve_face_targets or preserve_lock_bboxes_by_frame):
+                memory_bboxes = reverse_focus_bboxes_from_memory()
+                if memory_bboxes:
+                    current_preserve_bboxes.extend(memory_bboxes)
+                    reverse_preserve_memory_frames += 1
+            if reverse_face_redaction and current_preserve_bboxes:
+                reverse_preserve_frames += 1
+                if had_lane_preserve_bbox:
+                    reverse_preserve_lane_frames += 1
+                elif localized_preserve_count:
+                    reverse_preserve_localized_frames += 1
             localized_faces = []
             if reverse_face_redaction and auto_face_mode:
                 face_boxes = []
@@ -2449,10 +2573,6 @@ def redact_video(
             detection_frames_processed += 1
 
             if small is not None and gray_small is not None and scale_back_actual is not None:
-                # Persist track identity (and the underlying CV tracker, points,
-                # smoothing buffer, and velocity estimate) across detection
-                # passes so the blur stays attached to the same person instead
-                # of resetting every detect_every_n frames.
                 matches, unmatched_detections, unmatched_existing = associate_detections_to_tracks(
                     detected_tracks,
                     trackers,
@@ -2461,8 +2581,9 @@ def redact_video(
                 )
 
                 refreshed_trackers = []
-                # Track which detection indices we have already drawn the blur
-                # for, so the rest can fall back to the raw detection bbox.
+                # Matched detections reseed existing tracks while preserving
+                # smoothing and velocity, so the visible mask does not jump to
+                # a raw detector box on every detection pass.
                 drawn_detection_indices = set()
 
                 for d_idx, e_idx in matches.items():
@@ -2484,16 +2605,8 @@ def redact_video(
                         h,
                     )
                     refreshed_trackers.append(reseeded)
-                    # Apply the blur with the smoothed (associated) bbox so
-                    # the visible blur does not jump to the raw detection
-                    # box every detect_every_n frames.
                     seed_bbox = reseeded.get("smoothed_bbox") or reseeded.get("last_bbox") or detection["bbox"]
-                    apply_redaction(
-                        frame,
-                        seed_bbox,
-                        redaction_style,
-                        blur_strength,
-                    )
+                    apply_detection_redaction(frame, seed_bbox, detection.get("kind"))
                     drawn_detection_indices.add(d_idx)
 
                 for d_idx in sorted(unmatched_detections):
@@ -2512,19 +2625,12 @@ def redact_video(
                         metadata,
                     ))
                     if d_idx not in drawn_detection_indices:
-                        apply_redaction(
-                            frame,
-                            detection["bbox"],
-                            redaction_style,
-                            blur_strength,
-                        )
+                        apply_detection_redaction(frame, detection["bbox"], detection.get("kind"))
                         drawn_detection_indices.add(d_idx)
 
-                # Allow recently-tracked subjects, including selected faces, to
-                # survive short detection misses. Selected faces stay
-                # identity-locked: the bridge uses only that track's own
-                # tracker/optical-flow/global-motion prediction, never another
-                # unmatched face detection.
+                # Bridge short detector misses with the track's own motion.
+                # Identity-locked faces avoid generic fallback detections so a
+                # selected person's blur cannot drift onto a nearby face.
                 for e_idx in sorted(unmatched_existing):
                     existing = trackers[e_idx]
                     requires_identity = existing.get("kind") == "face" and existing.get("known_face") is not None
@@ -2548,10 +2654,6 @@ def redact_video(
                     refreshed["lost_count"] = lost_count
 
                     if bridge_bbox is None and not requires_identity:
-                        # Generic faces/objects can fall back to a simple
-                        # velocity hold. Identity-locked selected faces do not:
-                        # if their own track cannot predict a box, we avoid
-                        # attaching blur to the wrong person.
                         bridge_state = bbox_to_state(refreshed.get("smoothed_bbox") or refreshed.get("last_bbox"))
                         if bridge_state is not None:
                             bridge_state = predict_state(
@@ -2568,42 +2670,28 @@ def redact_video(
                             bridge_bbox = refreshed.get("smoothed_bbox") or refreshed.get("last_bbox")
 
                     if bridge_bbox is not None:
-                        apply_redaction(
-                            frame,
-                            bridge_bbox,
-                            redaction_style,
-                            blur_strength,
-                        )
+                        apply_detection_redaction(frame, bridge_bbox, refreshed.get("kind"))
                         refreshed_trackers.append(refreshed)
 
-                # Fallback: if the association block somehow did not draw a
-                # detection (it should always be associated to a track or a
-                # new track), still cover it. This guarantees the blur is
-                # always applied on every detected face/object.
+                # If association skipped a detection for any reason, still draw
+                # it once so a newly visible face is never left uncovered.
                 for d_idx, detected_track in enumerate(detected_tracks):
                     if d_idx in drawn_detection_indices:
                         continue
-                    apply_redaction(
-                        frame,
-                        detected_track["bbox"],
-                        redaction_style,
-                        blur_strength,
-                    )
+                    apply_detection_redaction(frame, detected_track["bbox"], detected_track.get("kind"))
 
                 trackers = refreshed_trackers
             else:
-                # No tracking buffers yet (first frame); apply the raw
-                # detections directly so the blur is still always present.
                 for detected_track in detected_tracks:
-                    apply_redaction(
-                        frame,
-                        detected_track["bbox"],
-                        redaction_style,
-                        blur_strength,
-                    )
+                    apply_detection_redaction(frame, detected_track["bbox"], detected_track.get("kind"))
                 trackers = []
             auto_prev_small_gray = gray_small
         elif trackers and in_temporal_range and small is not None and gray_small is not None and scale_back_actual is not None:
+            if reverse_face_redaction and not current_preserve_bboxes:
+                memory_bboxes = reverse_focus_bboxes_from_memory()
+                if memory_bboxes:
+                    current_preserve_bboxes.extend(memory_bboxes)
+                    reverse_preserve_memory_frames += 1
             periodic_reinit = (frame_idx % AUTO_TRACKER_REINIT_INTERVAL == 0)
             next_trackers = []
             for track in trackers:
@@ -2622,12 +2710,9 @@ def redact_video(
                 if reverse_face_redaction and face_bbox_is_preserved(display_bbox, current_preserve_bboxes, w, h):
                     continue
                 if display_bbox is not None:
-                    apply_redaction(frame, display_bbox, redaction_style, blur_strength)
+                    apply_detection_redaction(frame, display_bbox, updated_track.get("kind"))
                 if updated_track.get("last_bbox") is None:
                     continue
-                # Drop tracks that have been unable to confirm a face for too
-                # many consecutive frames, so the blur cannot get stuck on a
-                # stale prediction long after the subject has left the frame.
                 if int(updated_track.get("lost_streak", 0) or 0) > TRACK_LOST_GRACE_FRAMES:
                     continue
                 next_trackers.append(updated_track)
@@ -2637,6 +2722,18 @@ def redact_video(
             if not in_temporal_range:
                 trackers = []
             auto_prev_small_gray = gray_small if trackers else None
+
+        if reverse_focus_restore_frame is not None and current_preserve_bboxes:
+            for focus_bbox in current_preserve_bboxes:
+                restore_bbox = expand_face_redaction_bbox(
+                    focus_bbox,
+                    w,
+                    h,
+                    pad_x_ratio=REVERSE_FOCUS_RESTORE_PAD_X_RATIO,
+                    pad_top_ratio=REVERSE_FOCUS_RESTORE_PAD_TOP_RATIO,
+                    pad_bottom_ratio=REVERSE_FOCUS_RESTORE_PAD_BOTTOM_RATIO,
+                )
+                restore_region(frame, reverse_focus_restore_frame, restore_bbox)
 
         if writer is not None:
             if output_w != w or output_h != h:
@@ -2691,6 +2788,12 @@ def redact_video(
         "detection_frames_processed": detection_frames_processed,
         "detection_frames_skipped": 0,
     }
+    if reverse_face_redaction:
+        result["reverse_preserve_frames"] = reverse_preserve_frames
+        result["reverse_preserve_lane_frames"] = reverse_preserve_lane_frames
+        result["reverse_preserve_localized_frames"] = reverse_preserve_localized_frames
+        result["reverse_preserve_memory_frames"] = reverse_preserve_memory_frames
+        result["reverse_preserve_target_count"] = len(preserve_face_targets)
     if output_metadata is not None:
         result["output_size_bytes"] = output_metadata["size_bytes"]
         result["h264_encoded"] = h264_encoded

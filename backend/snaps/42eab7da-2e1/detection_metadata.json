@@ -2915,7 +2915,9 @@
           "start_sec": 235,
           "end_sec": 243
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 209.556
     },
     {
       "person_id": "person_58",
@@ -4369,7 +4371,9 @@
           "start_sec": 153,
           "end_sec": 166
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 49.33
     },
     {
       "person_id": "person_75",
@@ -5733,7 +5737,9 @@
           "start_sec": 124,
           "end_sec": 131
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 33.244
     },
     {
       "person_id": "person_76",
@@ -7077,7 +7083,9 @@
           "start_sec": 153,
           "end_sec": 166
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 53.406
     },
     {
       "person_id": "person_13",
@@ -7981,9 +7989,9 @@
       "name": "person_13",
       "priority_rank": 2,
       "tags": [
-        "Anonymized"
+        "Review"
       ],
-      "should_anonymize": true,
+      "should_anonymize": false,
       "is_official": false,
       "description": "Another individual in business attire following the previous person, placing items on a desk and leaving",
       "time_ranges": [
@@ -7991,7 +7999,9 @@
           "start_sec": 41,
           "end_sec": 48
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_67",
@@ -8859,7 +8869,9 @@
           "start_sec": 99,
           "end_sec": 107
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 29.047
     },
     {
       "person_id": "person_71",
@@ -9703,7 +9715,9 @@
           "start_sec": 62,
           "end_sec": 80
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 66.333
     },
     {
       "person_id": "person_21",
@@ -10537,7 +10551,9 @@
           "start_sec": 138,
           "end_sec": 144
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 17.345
     },
     {
       "person_id": "person_50",
@@ -11311,9 +11327,9 @@
       "name": "person_50",
       "priority_rank": 4,
       "tags": [
-        "Anonymized"
+        "Review"
       ],
-      "should_anonymize": true,
+      "should_anonymize": false,
       "is_official": false,
       "description": "Two men standing side-by-side facing forward, both in formal attire, one adjusting his hair",
       "time_ranges": [
@@ -11321,7 +11337,9 @@
           "start_sec": 107,
           "end_sec": 112
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_7",
@@ -12075,9 +12093,9 @@
       "name": "person_7",
       "priority_rank": 5,
       "tags": [
-        "Anonymized"
+        "Review"
       ],
-      "should_anonymize": true,
+      "should_anonymize": false,
       "is_official": false,
       "description": "Two men standing back-to-back, both in formal clothing, being photographed by an unseen photographer",
       "time_ranges": [
@@ -12085,7 +12103,9 @@
           "start_sec": 112,
           "end_sec": 120
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_87",
@@ -12829,9 +12849,9 @@
       "name": "person_87",
       "priority_rank": 12,
       "tags": [
-        "Anonymized"
+        "Review"
       ],
-      "should_anonymize": true,
+      "should_anonymize": false,
       "is_official": false,
       "description": "Two men in close-up conversation, both in formal attire, focused on their exchange despite surrounding movement",
       "time_ranges": [
@@ -12839,7 +12859,9 @@
           "start_sec": 229,
           "end_sec": 235
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_1",
@@ -13573,17 +13595,19 @@
       "name": "person_1",
       "priority_rank": 13,
       "tags": [
-        "Official"
+        "Review"
       ],
       "should_anonymize": false,
-      "is_official": true,
+      "is_official": false,
       "description": "Two men in the courtroom, both wearing black robes, standing near a table with orange chairs",
       "time_ranges": [
         {
           "start_sec": 121,
           "end_sec": 124
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_78",
@@ -14317,7 +14341,9 @@
           "start_sec": 210,
           "end_sec": 221
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 17.526
     },
     {
       "person_id": "person_0",
@@ -15031,17 +15057,19 @@
       "name": "person_0",
       "priority_rank": 15,
       "tags": [
-        "Official"
+        "Review"
       ],
       "should_anonymize": false,
-      "is_official": true,
+      "is_official": false,
       "description": "Three men entering the courtroom, two in suits, one in black robe, all part of an official legal or judicial group",
       "time_ranges": [
         {
           "start_sec": 124,
           "end_sec": 131
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_2",
@@ -15755,17 +15783,19 @@
       "name": "person_2",
       "priority_rank": 16,
       "tags": [
-        "Official"
+        "Review"
       ],
       "should_anonymize": false,
-      "is_official": true,
+      "is_official": false,
       "description": "Woman wearing glasses entering the courtroom from the right-hand side, part of an official legal or judicial setting",
       "time_ranges": [
         {
           "start_sec": 124,
           "end_sec": 131
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_6",
@@ -16479,17 +16509,19 @@
       "name": "person_6",
       "priority_rank": 19,
       "tags": [
-        "Official"
+        "Review"
       ],
       "should_anonymize": false,
-      "is_official": true,
+      "is_official": false,
       "description": "Two men in formal attire standing near a table, possibly part of a legal or official proceeding",
       "time_ranges": [
         {
           "start_sec": 144,
           "end_sec": 148
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_68",
@@ -17203,17 +17235,19 @@
       "name": "person_68",
       "priority_rank": 20,
       "tags": [
-        "Official"
+        "Review"
       ],
       "should_anonymize": false,
-      "is_official": true,
+      "is_official": false,
       "description": "One man adjusting his hair while conversing near a wall backdrop, part of a formal setting",
       "time_ranges": [
         {
           "start_sec": 148,
           "end_sec": 153
         }
-      ]
+      ],
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_4",
@@ -17916,9 +17950,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_4.png",
       "name": "person_4",
       "priority_rank": 17,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_5",
@@ -18621,9 +18659,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_5.png",
       "name": "person_5",
       "priority_rank": 18,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_8",
@@ -19326,9 +19368,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_8.png",
       "name": "person_8",
       "priority_rank": 19,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_51",
@@ -20021,9 +20067,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_51.png",
       "name": "person_51",
       "priority_rank": 20,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_16",
@@ -20696,9 +20746,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_16.png",
       "name": "person_16",
       "priority_rank": 21,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_18",
@@ -21371,9 +21425,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_18.png",
       "name": "person_18",
       "priority_rank": 22,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_65",
@@ -22046,9 +22104,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_65.png",
       "name": "person_65",
       "priority_rank": 23,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_24",
@@ -22711,9 +22773,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_24.png",
       "name": "person_24",
       "priority_rank": 24,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_11",
@@ -23366,9 +23432,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_11.png",
       "name": "person_11",
       "priority_rank": 25,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_19",
@@ -24021,9 +24091,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_19.png",
       "name": "person_19",
       "priority_rank": 26,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_23",
@@ -24676,9 +24750,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_23.png",
       "name": "person_23",
       "priority_rank": 27,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_62",
@@ -25342,7 +25420,9 @@
           "start_sec": 48,
           "end_sec": 62
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 38.875
     },
     {
       "person_id": "person_3",
@@ -25985,9 +26065,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_3.png",
       "name": "person_3",
       "priority_rank": 29,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_17",
@@ -26630,9 +26714,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_17.png",
       "name": "person_17",
       "priority_rank": 30,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_88",
@@ -27275,9 +27363,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_88.png",
       "name": "person_88",
       "priority_rank": 31,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_55",
@@ -27921,7 +28013,9 @@
           "start_sec": 29,
           "end_sec": 41
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 39.25
     },
     {
       "person_id": "person_36",
@@ -28544,9 +28638,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_36.png",
       "name": "person_36",
       "priority_rank": 33,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_38",
@@ -29169,9 +29267,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_38.png",
       "name": "person_38",
       "priority_rank": 34,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_42",
@@ -29794,9 +29896,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_42.png",
       "name": "person_42",
       "priority_rank": 35,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_59",
@@ -30419,9 +30525,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_59.png",
       "name": "person_59",
       "priority_rank": 36,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_64",
@@ -31044,9 +31154,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_64.png",
       "name": "person_64",
       "priority_rank": 37,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_70",
@@ -31669,9 +31783,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_70.png",
       "name": "person_70",
       "priority_rank": 38,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_9",
@@ -32284,9 +32402,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_9.png",
       "name": "person_9",
       "priority_rank": 39,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_44",
@@ -32899,9 +33021,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_44.png",
       "name": "person_44",
       "priority_rank": 40,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_90",
@@ -33504,9 +33630,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_90.png",
       "name": "person_90",
       "priority_rank": 41,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_12",
@@ -34099,9 +34229,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_12.png",
       "name": "person_12",
       "priority_rank": 42,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_15",
@@ -34694,9 +34828,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_15.png",
       "name": "person_15",
       "priority_rank": 43,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_33",
@@ -35289,9 +35427,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_33.png",
       "name": "person_33",
       "priority_rank": 44,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_89",
@@ -35884,9 +36026,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_89.png",
       "name": "person_89",
       "priority_rank": 45,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_26",
@@ -36469,9 +36615,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_26.png",
       "name": "person_26",
       "priority_rank": 46,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_45",
@@ -37054,9 +37204,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_45.png",
       "name": "person_45",
       "priority_rank": 47,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_10",
@@ -37629,9 +37783,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_10.png",
       "name": "person_10",
       "priority_rank": 48,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_20",
@@ -38204,9 +38362,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_20.png",
       "name": "person_20",
       "priority_rank": 49,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_47",
@@ -38779,9 +38941,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_47.png",
       "name": "person_47",
       "priority_rank": 50,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_82",
@@ -39365,7 +39531,9 @@
           "start_sec": 176,
           "end_sec": 188
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 5.625
     },
     {
       "person_id": "person_22",
@@ -39928,9 +40096,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_22.png",
       "name": "person_22",
       "priority_rank": 52,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_35",
@@ -40493,9 +40665,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_35.png",
       "name": "person_35",
       "priority_rank": 53,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_77",
@@ -41069,7 +41245,9 @@
           "start_sec": 131,
           "end_sec": 138
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 10.667
     },
     {
       "person_id": "person_25",
@@ -41622,9 +41800,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_25.png",
       "name": "person_25",
       "priority_rank": 55,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_27",
@@ -42177,9 +42359,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_27.png",
       "name": "person_27",
       "priority_rank": 56,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_29",
@@ -42732,9 +42918,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_29.png",
       "name": "person_29",
       "priority_rank": 57,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_40",
@@ -43287,9 +43477,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_40.png",
       "name": "person_40",
       "priority_rank": 58,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_48",
@@ -43842,9 +44036,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_48.png",
       "name": "person_48",
       "priority_rank": 59,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_61",
@@ -44397,9 +44595,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_61.png",
       "name": "person_61",
       "priority_rank": 60,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_63",
@@ -44952,9 +45154,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_63.png",
       "name": "person_63",
       "priority_rank": 61,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_66",
@@ -45507,9 +45713,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_66.png",
       "name": "person_66",
       "priority_rank": 62,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_69",
@@ -46062,9 +46272,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_69.png",
       "name": "person_69",
       "priority_rank": 63,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_72",
@@ -46617,9 +46831,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_72.png",
       "name": "person_72",
       "priority_rank": 64,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_79",
@@ -47183,7 +47401,9 @@
           "start_sec": 131,
           "end_sec": 138
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 11.5
     },
     {
       "person_id": "person_86",
@@ -47736,9 +47956,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_86.png",
       "name": "person_86",
       "priority_rank": 66,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_28",
@@ -48281,9 +48505,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_28.png",
       "name": "person_28",
       "priority_rank": 67,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_30",
@@ -48826,9 +49054,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_30.png",
       "name": "person_30",
       "priority_rank": 68,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_31",
@@ -49371,9 +49603,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_31.png",
       "name": "person_31",
       "priority_rank": 69,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_32",
@@ -49916,9 +50152,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_32.png",
       "name": "person_32",
       "priority_rank": 70,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_34",
@@ -50461,9 +50701,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_34.png",
       "name": "person_34",
       "priority_rank": 71,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_37",
@@ -51006,9 +51250,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_37.png",
       "name": "person_37",
       "priority_rank": 72,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_39",
@@ -51551,9 +51799,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_39.png",
       "name": "person_39",
       "priority_rank": 73,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_41",
@@ -52096,9 +52348,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_41.png",
       "name": "person_41",
       "priority_rank": 74,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_43",
@@ -52641,9 +52897,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_43.png",
       "name": "person_43",
       "priority_rank": 75,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_46",
@@ -53186,9 +53446,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_46.png",
       "name": "person_46",
       "priority_rank": 76,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_49",
@@ -53731,9 +53995,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_49.png",
       "name": "person_49",
       "priority_rank": 77,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_52",
@@ -54276,9 +54544,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_52.png",
       "name": "person_52",
       "priority_rank": 78,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_53",
@@ -54821,9 +55093,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_53.png",
       "name": "person_53",
       "priority_rank": 79,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_54",
@@ -55366,9 +55642,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_54.png",
       "name": "person_54",
       "priority_rank": 80,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_56",
@@ -55911,9 +56191,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_56.png",
       "name": "person_56",
       "priority_rank": 81,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_57",
@@ -56456,9 +56740,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_57.png",
       "name": "person_57",
       "priority_rank": 82,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_60",
@@ -57001,9 +57289,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_60.png",
       "name": "person_60",
       "priority_rank": 83,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_73",
@@ -57546,9 +57838,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_73.png",
       "name": "person_73",
       "priority_rank": 84,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_74",
@@ -58091,9 +58387,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_74.png",
       "name": "person_74",
       "priority_rank": 85,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_80",
@@ -58636,9 +58936,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_80.png",
       "name": "person_80",
       "priority_rank": 86,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_81",
@@ -59181,9 +59485,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_81.png",
       "name": "person_81",
       "priority_rank": 87,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_83",
@@ -59726,9 +60034,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_83.png",
       "name": "person_83",
       "priority_rank": 88,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_84",
@@ -60271,9 +60583,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_84.png",
       "name": "person_84",
       "priority_rank": 89,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_85",
@@ -60827,7 +61143,9 @@
           "start_sec": 221,
           "end_sec": 229
         }
-      ]
+      ],
+      "review_required": false,
+      "description_match_score": 7.5
     },
     {
       "person_id": "person_91",
@@ -61370,9 +61688,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_91.png",
       "name": "person_91",
       "priority_rank": 91,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     },
     {
       "person_id": "person_92",
@@ -61915,9 +62237,13 @@
       "snap_path": "/Users/hrishikesh/Desktop/Video Redaction/backend/snaps/42eab7da-2e1/faces/person_92.png",
       "name": "person_92",
       "priority_rank": 92,
-      "tags": [],
+      "tags": [
+        "Review"
+      ],
       "should_anonymize": false,
-      "is_official": false
+      "is_official": false,
+      "review_required": true,
+      "description_match_score": 0.0
     }
   ],
   "unique_objects": [

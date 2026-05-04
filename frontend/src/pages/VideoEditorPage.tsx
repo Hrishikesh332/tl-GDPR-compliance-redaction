@@ -732,21 +732,6 @@ const PEGASUS_LANE_HEIGHT_PX = 68
 const VIDEO_TIMELINE_LANE_HEIGHT_PX = 76
 const FACE_LANE_DEBUG_CACHE_KEY = 'video_redaction_face_lane_debug_cache_v1'
 const FACE_LOCK_INTRO_SEEN_KEY = 'video_redaction_face_lock_intro_seen_v1'
-const LIVE_REDACTION_OBJECT_CLASSES = [
-  'backpack',
-  'bicycle',
-  'bus',
-  'car',
-  'cell phone',
-  'gun',
-  'handbag',
-  'knife',
-  'laptop',
-  'motorcycle',
-  'scissors',
-  'suitcase',
-  'truck',
-]
 
 type DetectionItem = {
   id: string
@@ -763,6 +748,10 @@ type DetectionItem = {
   appearanceCount?: number
   shouldAnonymize?: boolean
   isOfficial?: boolean
+  reviewRequired?: boolean
+  descriptionConfidence?: number
+  descriptionMatchScore?: number
+  redactionReason?: string
   priorityRank?: number
 }
 
@@ -790,6 +779,10 @@ type FaceDetectionApiRecord = {
   tags?: string[]
   should_anonymize?: boolean
   is_official?: boolean
+  review_required?: boolean
+  description_confidence?: number
+  description_match_score?: number
+  redaction_reason?: string
   priority_rank?: number
   appearance_count?: number
 }
@@ -1245,12 +1238,17 @@ function buildDetectionItemsFromApi(
     const personId = (face.person_id || `person_${index}`).toString().trim()
     const shouldAnonymize = Boolean(face.should_anonymize) && !Boolean(face.is_official)
     const isOfficial = Boolean(face.is_official)
+    const reviewRequired = Boolean(face.review_required)
+    const tags = normalizeDetectionTags(face.tags, { shouldAnonymize, isOfficial })
+    if (reviewRequired && !tags.some((tag) => tag.toLowerCase() === 'review')) {
+      tags.push('Review')
+    }
     const label = (face.name || face.description || personId || `Person ${index + 1}`).toString().trim()
     items.push({
       id: `face-${personId}`,
       kind: 'face',
       label: label.slice(0, 60),
-      tags: normalizeDetectionTags(face.tags, { shouldAnonymize, isOfficial }),
+      tags,
       color: faceColor,
       snapBase64: face.snap_base64,
       personId,
@@ -1260,6 +1258,10 @@ function buildDetectionItemsFromApi(
       appearanceCount: typeof face.appearance_count === 'number' ? face.appearance_count : 0,
       shouldAnonymize,
       isOfficial,
+      reviewRequired,
+      descriptionConfidence: typeof face.description_confidence === 'number' ? face.description_confidence : undefined,
+      descriptionMatchScore: typeof face.description_match_score === 'number' ? face.description_match_score : undefined,
+      redactionReason: typeof face.redaction_reason === 'string' ? face.redaction_reason : undefined,
       priorityRank: typeof face.priority_rank === 'number' ? face.priority_rank : undefined,
     })
   })
@@ -1582,16 +1584,13 @@ function filterLiveDetectionsToSelections(
   options: {
     hasRunDetection: boolean
     selectedFacePersonIds: string[]
-    selectedObjectClasses: string[]
   },
 ): LiveRedactionDetection[] {
-  if (!options.hasRunDetection) return detections
+  if (!options.hasRunDetection) return detections.filter((detection) => detection.kind === 'face')
 
   const selectedFaces = new Set(options.selectedFacePersonIds)
-  const selectedObjects = new Set(options.selectedObjectClasses.map((item) => normalizeObjectClass(item)).filter(Boolean) as string[])
 
   const hasFaceSelection = selectedFaces.size > 0
-  const hasObjectSelection = selectedObjects.size > 0
 
   return detections.filter((detection) => {
     if (detection.kind === 'face') {
@@ -1602,12 +1601,6 @@ function filterLiveDetectionsToSelections(
       // between identity re-lock cycles.
       if (!detection.personId && hasFaceSelection) return true
       return false
-    }
-    if (detection.kind === 'object') {
-      const objectClass = normalizeObjectClass(detection.objectClass)
-      if (!objectClass) return false
-      if (hasObjectSelection) return selectedObjects.has(objectClass)
-      return true
     }
     return false
   })
@@ -3502,13 +3495,6 @@ export default function VideoEditorPage() {
         .map((item) => item.personId as string),
     [apiDetections, excludedFromRedactionIds, reverseFaceRedactionEnabled, reverseFocusPersonId]
   )
-  const selectedObjectClasses = useMemo(
-    () =>
-      apiDetections
-        .filter((item) => item.kind === 'object' && item.objectClass && !excludedFromRedactionIds.includes(item.id))
-        .map((item) => item.objectClass as string),
-    [apiDetections, excludedFromRedactionIds]
-  )
   const faceDetectionItemsByPersonId = useMemo(() => {
     const map: Record<string, DetectionItem> = {}
     for (const item of apiDetections) {
@@ -4031,9 +4017,7 @@ export default function VideoEditorPage() {
       const liveIncludeFaces = reverseFaceRedactionEnabled
         ? true
         : !hasRunDetection || (liveRequestPersonIds?.length ?? 0) > 0
-      const liveIncludeObjects = reverseFaceRedactionEnabled
-        ? false
-        : !hasRunDetection || selectedObjectClasses.length > 0
+      const liveIncludeObjects = false
       if (!liveIncludeFaces && !liveIncludeObjects) {
         setLiveRedactionDetections([])
         setLiveRedactionSeekPending(false)
@@ -4055,9 +4039,6 @@ export default function VideoEditorPage() {
           person_ids: liveRequestPersonIds,
           reverse_face_redaction: reverseFaceRedactionEnabled,
           focus_person_ids: reverseFaceRedactionEnabled && reverseFocusPersonId ? [reverseFocusPersonId] : undefined,
-          object_classes: hasRunDetection && !reverseFaceRedactionEnabled ? selectedObjectClasses : undefined,
-          forensic_only: true,
-          object_confidence: 0.25,
         }),
       })
 
@@ -4083,7 +4064,6 @@ export default function VideoEditorPage() {
             {
               hasRunDetection,
               selectedFacePersonIds,
-              selectedObjectClasses,
             },
           )
       setLiveRedactionDetections((previous) => {
@@ -4111,7 +4091,7 @@ export default function VideoEditorPage() {
         }, 0)
       }
     }
-  }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionPreviewActive, lockedFacePersonIdsSet, resolveRedactionJobId, reverseFaceRedactionEnabled, reverseFocusPersonId, selectedFacePersonIds, selectedObjectClasses])
+  }, [effectiveStreamUrl, hasRunDetection, isPlaying, liveRedactionPreviewActive, lockedFacePersonIdsSet, resolveRedactionJobId, reverseFaceRedactionEnabled, reverseFocusPersonId, selectedFacePersonIds])
 
   const requestLiveRedactionRef = useRef(requestLiveRedaction)
   requestLiveRedactionRef.current = requestLiveRedaction
@@ -4175,9 +4155,12 @@ export default function VideoEditorPage() {
         output_height: exportQuality,
       }
       if (reverseFaceRedactionEnabled) {
+        if (!reverseFocusPersonId) {
+          throw new Error('Choose one focused face before exporting Reverse redaction.')
+        }
         body.redaction_mode = 'reverse_faces'
         body.reverse_face_redaction = true
-        body.focus_person_ids = reverseFocusPersonId ? [reverseFocusPersonId] : []
+        body.focus_person_ids = [reverseFocusPersonId]
         const focusFaceItem = reverseFocusPersonId
           ? apiDetections.find((item) => item.kind === 'face' && item.personId === reverseFocusPersonId)
           : null
@@ -4234,12 +4217,8 @@ export default function VideoEditorPage() {
         if (Object.keys(personLabelMap).length > 0) {
           body.person_labels = personLabelMap
         }
-        if (!reverseFaceRedactionEnabled && selectedObjectClasses.length > 0) {
-          body.object_classes = selectedObjectClasses
-        }
       } else if (!reverseFaceRedactionEnabled && customRegions.length === 0) {
         body.face_encodings = ['__ALL__']
-        body.object_classes = LIVE_REDACTION_OBJECT_CLASSES
       }
 
       const startRes = await fetch(`${API_BASE}/api/redact/jobs`, {
@@ -4320,7 +4299,7 @@ export default function VideoEditorPage() {
       setExportRedactLoading(false)
       setTimeout(() => setExportRedactProgress(null), 3000)
     }
-  }, [apiDetections, blurIntensity, buildCustomRegionPayload, exportQuality, hasRunDetection, redactionStyle, resolveRedactionJobId, reverseFaceRedactionEnabled, reverseFocusPersonId, selectedFacePersonIds, selectedObjectClasses, trackingRegions])
+  }, [apiDetections, blurIntensity, buildCustomRegionPayload, exportQuality, hasRunDetection, redactionStyle, resolveRedactionJobId, reverseFaceRedactionEnabled, reverseFocusPersonId, selectedFacePersonIds, trackingRegions])
 
   useEffect(() => {
     if (!liveRedactionPreviewActive || !effectiveStreamUrl) {
