@@ -209,7 +209,7 @@ export default function OverviewPage() {
           </div>
           <figure className="rounded-2xl border border-border bg-surface overflow-hidden shadow-sm">
             <img
-              src="/generated-thumbnails/Redaction_final.png"
+              src="/generated-thumbnails/redaction_final.png"
               alt="System architecture: TwelveLabs indexing and analysis, local face detection and Face Lock tracking, and MP4 redaction export"
               className="w-full h-auto block"
               loading="lazy"
