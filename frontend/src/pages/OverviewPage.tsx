@@ -1,4 +1,5 @@
 import { Link } from 'react-router-dom'
+import architectureDiagramUrl from '../assets/redaction-architecture.png'
 import analyzeIconSvg from '../../strand/icons/analyze.svg?raw'
 import embedIconSvg from '../../strand/icons/embed.svg?raw'
 import entityCollectionIconSvg from '../../strand/icons/entity-collection.svg?raw'
@@ -208,7 +209,7 @@ export default function OverviewPage() {
           </div>
           <figure className="rounded-2xl border border-border bg-surface overflow-hidden shadow-sm">
             <img
-              src="/generated-thumbnails/redaction_final.png"
+              src={architectureDiagramUrl}
               alt="System architecture: TwelveLabs indexing and analysis, local face detection and Face Lock tracking, and MP4 redaction export"
               className="w-full h-auto block"
               loading="lazy"
