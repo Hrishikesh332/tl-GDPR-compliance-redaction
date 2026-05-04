@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import analyzeIconSvg from '../../strand/icons/analyze.svg?raw'
 import embedIconSvg from '../../strand/icons/embed.svg?raw'
 import entityCollectionIconSvg from '../../strand/icons/entity-collection.svg?raw'
@@ -117,14 +118,12 @@ export default function OverviewPage() {
             local computer vision.
           </p>
           <div className="flex flex-wrap gap-3 mt-7">
-            <a
-              href="https://docs.twelvelabs.io"
-              target="_blank"
-              rel="noopener noreferrer"
+            <Link
+              to="/dashboard"
               className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg bg-accent text-brand-charcoal text-sm font-brand-bold hover:bg-accent-hover transition-colors"
             >
-              Docs
-            </a>
+              Dashboard
+            </Link>
             <a
               href="https://github.com/Hrishikesh332/tl-GDPR-compliance-redaction"
               target="_blank"
