@@ -5867,6 +5867,21 @@ export default function VideoEditorPage() {
             </div>
           )}
 
+          {!reverseFaceRedactionEnabled && hasRunDetection && selectedFacePersonIds.length > 0 && (
+            <div className="shrink-0 px-5 py-2 bg-gradient-to-r from-warning/10 via-warning/5 to-transparent border-b border-warning/20 flex items-center gap-3">
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-warning/15 text-warning border border-warning/25 shrink-0">
+                Selected blur
+              </span>
+              <p className="text-xs text-text-secondary leading-snug min-w-0">
+                For the better face redaction, use{' '}
+                <span className="font-semibold text-text-primary">Export</span>{' '}
+                and click{' '}
+                <span className="font-semibold text-text-primary">Download Redacted Video</span>{' '}
+                after choosing Blur for a person.
+              </p>
+            </div>
+          )}
+
           {reverseFaceRedactionEnabled && hasRunDetection && !reverseRedactionBannerDismissed && (
             <div className="shrink-0 px-5 py-2.5 bg-gradient-to-r from-accent/10 via-accent/5 to-transparent border-b border-accent/20 flex items-center gap-3">
               <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-accent/15 text-accent border border-accent/25 shrink-0">

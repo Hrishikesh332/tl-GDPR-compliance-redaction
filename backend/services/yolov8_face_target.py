@@ -505,7 +505,7 @@ def redact_video_yolov8_face_targets(
                     progress,
                     processed_frames,
                     render_total,
-                    "Rendering selected-face blur with YOLOv8-Face",
+                    "Rendering selected-face blur",
                     fps_render=round(processed_frames / elapsed, 2),
                 )
     finally:
