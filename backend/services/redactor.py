@@ -72,15 +72,30 @@ REVERSE_FACE_DETECT_MAX_DIM = int(os.environ.get("REVERSE_FACE_DETECT_MAX_DIM", 
 REVERSE_FACE_DETECT_CONFIDENCE = float(os.environ.get("REVERSE_FACE_DETECT_CONFIDENCE", "0.16") or 0.16)
 REVERSE_FACE_DETECT_MIN_SIZE = int(os.environ.get("REVERSE_FACE_DETECT_MIN_SIZE", "8") or 8)
 REVERSE_FACE_DETECT_MIN_SHARPNESS = float(os.environ.get("REVERSE_FACE_DETECT_MIN_SHARPNESS", "2.0") or 2.0)
-REVERSE_FACE_MASK_PAD_X_RATIO = 0.04
-REVERSE_FACE_MASK_PAD_TOP_RATIO = 0.05
-REVERSE_FACE_MASK_PAD_BOTTOM_RATIO = 0.08
+REVERSE_FACE_MASK_PAD_X_RATIO = 0.08
+REVERSE_FACE_MASK_PAD_TOP_RATIO = 0.12
+REVERSE_FACE_MASK_PAD_BOTTOM_RATIO = 0.12
 REVERSE_FOCUS_MEMORY_GRACE_FRAMES = 18
 REVERSE_FOCUS_MEMORY_PAD_PER_FRAME = 0.035
 REVERSE_FOCUS_MEMORY_PAD_CAP = 0.85
 REVERSE_FOCUS_RESTORE_PAD_X_RATIO = 0.03
 REVERSE_FOCUS_RESTORE_PAD_TOP_RATIO = 0.04
 REVERSE_FOCUS_RESTORE_PAD_BOTTOM_RATIO = 0.06
+REVERSE_TINY_FACE_SOLID_MAX_SIDE = int(os.environ.get("REVERSE_TINY_FACE_SOLID_MAX_SIDE", "96") or 96)
+FACE_LOCK_EXPORT_MAX_BRIDGE_GAP_SECONDS = float(os.environ.get("FACE_LOCK_EXPORT_MAX_BRIDGE_GAP_SECONDS", "18") or 18)
+FACE_LOCK_EXPORT_TEMPORAL_RADIUS = int(os.environ.get("FACE_LOCK_EXPORT_TEMPORAL_RADIUS", "1") or 1)
+FACE_LOCK_EXPORT_SMOOTH_ALPHA = float(os.environ.get("FACE_LOCK_EXPORT_SMOOTH_ALPHA", "0.34") or 0.34)
+FACE_LOCK_EXPORT_SIZE_ALPHA = float(os.environ.get("FACE_LOCK_EXPORT_SIZE_ALPHA", "0.22") or 0.22)
+FACE_LOCK_EXPORT_RUNTIME_ALPHA = float(os.environ.get("FACE_LOCK_EXPORT_RUNTIME_ALPHA", "0.42") or 0.42)
+FACE_LOCK_EXPORT_RUNTIME_SIZE_ALPHA = float(os.environ.get("FACE_LOCK_EXPORT_RUNTIME_SIZE_ALPHA", "0.24") or 0.24)
+FACE_LOCK_EXPORT_REFINE_SEARCH_EXPAND = float(os.environ.get("FACE_LOCK_EXPORT_REFINE_SEARCH_EXPAND", "2.35") or 2.35)
+FACE_LOCK_EXPORT_REFINE_EVERY_N = max(1, int(os.environ.get("FACE_LOCK_EXPORT_REFINE_EVERY_N", "1") or 1))
+FACE_LOCK_EXPORT_MOT_ENABLED = os.environ.get("FACE_LOCK_EXPORT_MOT_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+FACE_LOCK_EXPORT_MOT_TRACKER = os.environ.get("FACE_LOCK_EXPORT_MOT_TRACKER", "botsort.yaml") or "botsort.yaml"
+FACE_LOCK_EXPORT_MOT_CONFIDENCE = float(os.environ.get("FACE_LOCK_EXPORT_MOT_CONFIDENCE", "0.12") or 0.12)
+FACE_LOCK_EXPORT_MOT_IOU = float(os.environ.get("FACE_LOCK_EXPORT_MOT_IOU", "0.5") or 0.5)
+FACE_LOCK_EXPORT_MOT_IMGSZ = int(os.environ.get("FACE_LOCK_EXPORT_MOT_IMGSZ", "960") or 960)
+FACE_LOCK_EXPORT_MOT_LOST_GRACE_FRAMES = int(os.environ.get("FACE_LOCK_EXPORT_MOT_LOST_GRACE_FRAMES", "10") or 10)
 NO_TRACKER_FACTORY = object()
 TRACKER_FACTORY_CACHE = {}
 TRACKER_FACTORY_LOGGED = set()
@@ -452,6 +467,515 @@ def scale_known_face_target_for_frame(face, scale_x, scale_y, frame_w, frame_h):
     return scaled_face
 
 
+def normalize_export_face_lock_bbox(bbox, frame_w, frame_h):
+    if not bbox or len(bbox) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+    except (TypeError, ValueError):
+        return None
+    out = (
+        max(0.0, min(x1, float(frame_w))),
+        max(0.0, min(y1, float(frame_h))),
+        max(0.0, min(x2, float(frame_w))),
+        max(0.0, min(y2, float(frame_h))),
+    )
+    if out[2] <= out[0] or out[3] <= out[1]:
+        return None
+    return out
+
+
+def union_bboxes(*boxes):
+    valid = [tuple(float(v) for v in box[:4]) for box in boxes if box and len(box) >= 4]
+    if not valid:
+        return None
+    return (
+        min(box[0] for box in valid),
+        min(box[1] for box in valid),
+        max(box[2] for box in valid),
+        max(box[3] for box in valid),
+    )
+
+
+def interpolate_face_lock_bbox(left_bbox, right_bbox, ratio, frame_w, frame_h):
+    left = bbox_to_state(left_bbox)
+    right = bbox_to_state(right_bbox)
+    if left is None or right is None:
+        return normalize_export_face_lock_bbox(left_bbox or right_bbox, frame_w, frame_h)
+    t = max(0.0, min(1.0, float(ratio)))
+    state = tuple(left[i] * (1.0 - t) + right[i] * t for i in range(4))
+    return state_to_bbox(state, frame_w, frame_h)
+
+
+def lane_entry_bbox(entry, frame_w, frame_h, scale_x=1.0, scale_y=1.0):
+    if not isinstance(entry, dict):
+        return None
+    bbox = (
+        entry.get("x1", 0.0),
+        entry.get("y1", 0.0),
+        entry.get("x2", 0.0),
+        entry.get("y2", 0.0),
+    )
+    if scale_x != 1.0 or scale_y != 1.0:
+        bbox = (
+            float(bbox[0]) * scale_x,
+            float(bbox[1]) * scale_y,
+            float(bbox[2]) * scale_x,
+            float(bbox[3]) * scale_y,
+        )
+    return normalize_export_face_lock_bbox(bbox, frame_w, frame_h)
+
+
+def derive_lane_coverage_ranges(lane_doc, lane_frames, fps, total_frames):
+    ranges = []
+    for seg in lane_doc.get("segments") or []:
+        if not isinstance(seg, dict):
+            continue
+        try:
+            start = int(seg.get("start_frame"))
+            end = int(seg.get("end_frame"))
+        except (TypeError, ValueError):
+            continue
+        if end < start:
+            start, end = end, start
+        ranges.append((start, end))
+    if not ranges and lane_frames:
+        max_gap = max(1, int(round(max(1.0, fps) * FACE_LOCK_EXPORT_MAX_BRIDGE_GAP_SECONDS)))
+        start = prev = lane_frames[0]
+        for f_idx in lane_frames[1:]:
+            if f_idx - prev > max_gap:
+                ranges.append((start, prev))
+                start = f_idx
+            prev = f_idx
+        ranges.append((start, prev))
+    if total_frames and total_frames > 0:
+        capped = []
+        for start, end in ranges:
+            start = max(0, min(int(start), total_frames - 1))
+            end = max(0, min(int(end), total_frames - 1))
+            if end >= start:
+                capped.append((start, end))
+        ranges = capped
+    return sorted(ranges)
+
+
+def merge_export_coverage_ranges(ranges, fps):
+    if not ranges:
+        return []
+    max_bridge = max(1, int(round(max(1.0, fps) * FACE_LOCK_EXPORT_MAX_BRIDGE_GAP_SECONDS)))
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1] + max_bridge + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def source_needs_export_refine(src):
+    source = str(src or "").lower()
+    if not source:
+        return True
+    return any(
+        token in source
+        for token in (
+            "bridge",
+            "interpolated",
+            "held",
+            "motion_only",
+            "tracker",
+            "optical",
+            "predicted",
+            "global",
+            "head_fallback",
+            "head_walk",
+        )
+    )
+
+
+def source_is_reliable_face_lock_anchor(src):
+    source = str(src or "").lower()
+    return "anchor" in source or "verified" in source
+
+
+def smooth_dense_face_lock_entries(entries_by_frame, frame_w, frame_h):
+    if not entries_by_frame:
+        return entries_by_frame
+    frames = sorted(entries_by_frame.keys())
+    dense = {f: dict(entries_by_frame[f]) for f in frames}
+    raw_bboxes = {f: dense[f]["bbox"] for f in frames}
+    prev_bbox = None
+    prev_frame = None
+    for f_idx in frames:
+        entry = dense[f_idx]
+        bbox = entry["bbox"]
+        if prev_bbox is None or (prev_frame is not None and f_idx - prev_frame > 1):
+            smoothed = bbox
+        else:
+            smoothed = smooth_bbox(
+                bbox,
+                prev_bbox,
+                FACE_LOCK_EXPORT_SMOOTH_ALPHA,
+                frame_w,
+                frame_h,
+                size_alpha=FACE_LOCK_EXPORT_SIZE_ALPHA,
+            ) or bbox
+        entry["bbox"] = smoothed
+        prev_bbox = smoothed
+        prev_frame = f_idx
+
+    prev_bbox = None
+    prev_frame = None
+    for f_idx in reversed(frames):
+        entry = dense[f_idx]
+        bbox = entry["bbox"]
+        if prev_bbox is None or (prev_frame is not None and prev_frame - f_idx > 1):
+            smoothed = bbox
+        else:
+            smoothed = smooth_bbox(
+                bbox,
+                prev_bbox,
+                FACE_LOCK_EXPORT_SMOOTH_ALPHA,
+                frame_w,
+                frame_h,
+                size_alpha=FACE_LOCK_EXPORT_SIZE_ALPHA,
+            ) or bbox
+        cover = smoothed
+        for near in range(
+            f_idx - FACE_LOCK_EXPORT_TEMPORAL_RADIUS,
+            f_idx + FACE_LOCK_EXPORT_TEMPORAL_RADIUS + 1,
+        ):
+            if near in raw_bboxes:
+                cover = union_bboxes(cover, raw_bboxes[near])
+        cover = normalize_export_face_lock_bbox(cover, frame_w, frame_h) or smoothed
+        entry["bbox"] = cover
+        prev_bbox = smoothed
+        prev_frame = f_idx
+    return dense
+
+
+def prepare_face_lock_export_bboxes(face_lock_lanes_by_person, frame_w, frame_h, fps, total_frames):
+    """Create a dense, stabilized frame->bbox map for export rendering.
+
+    The cached lane is treated as an identity/coverage signal, not a literal
+    "draw only on these exact frames" instruction. Export fills short lane
+    gaps, smooths the box path, and marks weak/interpolated frames for live
+    person-head refinement inside the render loop.
+    """
+    bboxes_by_frame = {}
+    stats = {}
+    if not face_lock_lanes_by_person:
+        return bboxes_by_frame, stats
+
+    for pid, lane_doc in face_lock_lanes_by_person.items():
+        lane_array = lane_doc.get("lane") or []
+        if not lane_array:
+            continue
+        lane_video = lane_doc.get("video") or {}
+        try:
+            src_w = float(lane_video.get("width") or frame_w)
+            src_h = float(lane_video.get("height") or frame_h)
+        except (TypeError, ValueError):
+            src_w, src_h = float(frame_w), float(frame_h)
+        scale_x = float(frame_w) / src_w if src_w > 0 else 1.0
+        scale_y = float(frame_h) / src_h if src_h > 0 else 1.0
+
+        points = {}
+        for raw_entry in lane_array:
+            try:
+                f_idx = int(raw_entry.get("f"))
+            except (TypeError, ValueError):
+                continue
+            bbox = lane_entry_bbox(raw_entry, frame_w, frame_h, scale_x, scale_y)
+            if bbox is None:
+                continue
+            points[f_idx] = {
+                "person_id": str(pid),
+                "bbox": bbox,
+                "src": raw_entry.get("src") or "lane",
+                "conf": raw_entry.get("conf"),
+                "needs_refine": source_needs_export_refine(raw_entry.get("src")),
+                "filled": False,
+            }
+        if not points:
+            continue
+
+        lane_frames = sorted(points.keys())
+        coverage = derive_lane_coverage_ranges(lane_doc, lane_frames, fps, total_frames)
+        coverage = merge_export_coverage_ranges(coverage, fps)
+        if not coverage:
+            coverage = [(lane_frames[0], lane_frames[-1])]
+
+        dense = {}
+        max_bridge = max(1, int(round(max(1.0, fps) * FACE_LOCK_EXPORT_MAX_BRIDGE_GAP_SECONDS)))
+        point_pos = 0
+        for start, end in coverage:
+            start = max(0, int(start))
+            end = int(end)
+            if total_frames and total_frames > 0:
+                end = min(end, total_frames - 1)
+            if end < start:
+                continue
+            while point_pos + 1 < len(lane_frames) and lane_frames[point_pos + 1] < start:
+                point_pos += 1
+            local_pos = point_pos
+            for f_idx in range(start, end + 1):
+                if f_idx in points:
+                    dense[f_idx] = dict(points[f_idx])
+                    while local_pos + 1 < len(lane_frames) and lane_frames[local_pos + 1] <= f_idx:
+                        local_pos += 1
+                    continue
+                while local_pos + 1 < len(lane_frames) and lane_frames[local_pos + 1] < f_idx:
+                    local_pos += 1
+                left_f = lane_frames[local_pos] if local_pos < len(lane_frames) and lane_frames[local_pos] < f_idx else None
+                right_i = local_pos + 1 if left_f is not None else local_pos
+                right_f = lane_frames[right_i] if right_i < len(lane_frames) else None
+                bbox = None
+                src = "export_bridge"
+                if left_f is not None and right_f is not None and (right_f - left_f) <= max_bridge + 1:
+                    ratio = (f_idx - left_f) / max(1, right_f - left_f)
+                    bbox = interpolate_face_lock_bbox(points[left_f]["bbox"], points[right_f]["bbox"], ratio, frame_w, frame_h)
+                    src = "export_interpolated"
+                elif left_f is not None and (f_idx - left_f) <= max_bridge:
+                    bbox = points[left_f]["bbox"]
+                    src = "export_held_forward"
+                elif right_f is not None and (right_f - f_idx) <= max_bridge:
+                    bbox = points[right_f]["bbox"]
+                    src = "export_held_backward"
+                if bbox is None:
+                    continue
+                dense[f_idx] = {
+                    "person_id": str(pid),
+                    "bbox": bbox,
+                    "src": src,
+                    "conf": 0.52,
+                    "needs_refine": True,
+                    "filled": True,
+                }
+        dense = smooth_dense_face_lock_entries(dense, frame_w, frame_h)
+        filled_count = sum(1 for entry in dense.values() if entry.get("filled"))
+        refined_candidates = sum(1 for entry in dense.values() if entry.get("needs_refine"))
+        stats[str(pid)] = {
+            "build_version": lane_doc.get("build_version"),
+            "source_frames": len(points),
+            "export_frames": len(dense),
+            "filled_frames": filled_count,
+            "refine_candidate_frames": refined_candidates,
+            "coverage_ranges": [
+                {"start_frame": int(start), "end_frame": int(end)}
+                for start, end in coverage
+            ],
+        }
+        for f_idx, entry in dense.items():
+            bboxes_by_frame.setdefault(f_idx, []).append(entry)
+    return bboxes_by_frame, stats
+
+
+def track_export_person_head_candidates(frame, frame_w, frame_h):
+    if not FACE_LOCK_EXPORT_MOT_ENABLED or frame is None:
+        return []
+    try:
+        from services.detection import get_obj_model, infer_head_bbox_from_person_bbox
+        model = get_obj_model()
+    except Exception:
+        return []
+    try:
+        results = model.track(
+            frame,
+            persist=True,
+            tracker=FACE_LOCK_EXPORT_MOT_TRACKER,
+            classes=[0],
+            conf=FACE_LOCK_EXPORT_MOT_CONFIDENCE,
+            iou=FACE_LOCK_EXPORT_MOT_IOU,
+            imgsz=FACE_LOCK_EXPORT_MOT_IMGSZ,
+            verbose=False,
+        )
+    except Exception as exc:
+        logger.debug("Export MOT person-head tracking failed: %s", exc)
+        return []
+
+    candidates = []
+    for result in results or []:
+        boxes = getattr(result, "boxes", None)
+        if boxes is None:
+            continue
+        for box in boxes:
+            try:
+                person_bbox = tuple(float(v) for v in box.xyxy[0].tolist())
+            except (TypeError, IndexError, ValueError):
+                continue
+            person_bbox = normalize_export_face_lock_bbox(person_bbox, frame_w, frame_h)
+            if person_bbox is None:
+                continue
+            try:
+                cls_id = int(box.cls[0])
+                if getattr(model, "names", {}).get(cls_id) != "person":
+                    continue
+            except Exception:
+                pass
+            head_bbox = infer_head_bbox_from_person_bbox(person_bbox, frame_w, frame_h)
+            head_bbox = normalize_export_face_lock_bbox(head_bbox, frame_w, frame_h)
+            if head_bbox is None:
+                continue
+            track_id = None
+            try:
+                if box.id is not None:
+                    track_id = int(box.id[0])
+            except Exception:
+                track_id = None
+            try:
+                confidence = float(box.conf[0])
+            except Exception:
+                confidence = FACE_LOCK_EXPORT_MOT_CONFIDENCE
+            candidates.append({
+                "track_id": track_id,
+                "person_bbox": person_bbox,
+                "head_bbox": head_bbox,
+                "confidence": confidence,
+            })
+    return candidates
+
+
+def choose_export_mot_head(entry_bbox, mot_candidates, state, *, allow_reacquire=False):
+    if not mot_candidates or entry_bbox is None:
+        return None
+    existing_track_id = state.get("mot_track_id")
+    if existing_track_id is not None:
+        for candidate in mot_candidates:
+            if candidate.get("track_id") == existing_track_id:
+                return candidate
+        if not allow_reacquire:
+            return None
+
+    reference = state.get("last_bbox") or entry_bbox
+    ref_diag = max(1.0, math.hypot(reference[2] - reference[0], reference[3] - reference[1]))
+    entry_diag = max(1.0, math.hypot(entry_bbox[2] - entry_bbox[0], entry_bbox[3] - entry_bbox[1]))
+    best = None
+    best_score = -1e9
+    for candidate in mot_candidates:
+        head_bbox = candidate.get("head_bbox")
+        person_bbox = candidate.get("person_bbox")
+        if head_bbox is None:
+            continue
+        head_ref_dist = bbox_center_distance(head_bbox, reference) / ref_diag
+        head_entry_dist = bbox_center_distance(head_bbox, entry_bbox) / entry_diag
+        head_iou = bbox_iou(head_bbox, entry_bbox)
+        person_iou = bbox_iou(person_bbox, entry_bbox)
+        contains_entry_center = 0.0
+        if person_bbox:
+            cx = (entry_bbox[0] + entry_bbox[2]) * 0.5
+            cy = (entry_bbox[1] + entry_bbox[3]) * 0.5
+            contains_entry_center = 1.0 if person_bbox[0] <= cx <= person_bbox[2] and person_bbox[1] <= cy <= person_bbox[3] else 0.0
+        if head_iou <= 0.0 and person_iou <= 0.0 and min(head_ref_dist, head_entry_dist) > 2.4:
+            continue
+        score = (
+            float(candidate.get("confidence") or 0.0) * 1.2
+            + head_iou * 5.0
+            + person_iou * 1.4
+            + contains_entry_center * 0.7
+            - min(head_ref_dist, head_entry_dist) * 1.25
+            - head_ref_dist * 0.45
+        )
+        if score > best_score:
+            best = candidate
+            best_score = score
+    return best
+
+
+def resolve_export_face_lock_bbox(entry, frame, frame_idx, frame_w, frame_h, runtime_state, stats, mot_candidates=None):
+    bbox = normalize_export_face_lock_bbox(entry.get("bbox"), frame_w, frame_h)
+    if bbox is None:
+        return None
+    person_id = str(entry.get("person_id") or "unknown")
+    state = runtime_state.setdefault(person_id, {})
+    resolved = bbox
+    refined = False
+
+    reliable_anchor = source_is_reliable_face_lock_anchor(entry.get("src"))
+    mot_candidate = choose_export_mot_head(
+        bbox,
+        mot_candidates,
+        state,
+        allow_reacquire=reliable_anchor,
+    )
+    if mot_candidate is not None:
+        mot_head = expand_face_redaction_bbox(tuple(mot_candidate["head_bbox"]), frame_w, frame_h)
+        resolved = smooth_bbox(
+            mot_head,
+            bbox,
+            0.82,
+            frame_w,
+            frame_h,
+            size_alpha=0.76,
+        ) or mot_head
+        if mot_candidate.get("track_id") is not None:
+            state["mot_track_id"] = mot_candidate.get("track_id")
+        state["mot_lost_count"] = 0
+        refined = True
+        stats["mot_refined_frames"] = int(stats.get("mot_refined_frames", 0) or 0) + 1
+    elif state.get("mot_track_id") is not None and bool(entry.get("needs_refine")):
+        lost_count = int(state.get("mot_lost_count", 0) or 0) + 1
+        state["mot_lost_count"] = lost_count
+        if state.get("last_bbox") is not None and lost_count <= FACE_LOCK_EXPORT_MOT_LOST_GRACE_FRAMES:
+            pad_factor = 1.0 + min(0.28, 0.035 * lost_count)
+            resolved = expand_bbox(state["last_bbox"], frame_w, frame_h, pad_factor)
+            refined = True
+            stats["mot_held_frames"] = int(stats.get("mot_held_frames", 0) or 0) + 1
+        elif entry.get("filled") or source_needs_export_refine(entry.get("src")):
+            stats["mot_suppressed_weak_frames"] = int(stats.get("mot_suppressed_weak_frames", 0) or 0) + 1
+            return None
+
+    should_refine = bool(entry.get("needs_refine")) and (frame_idx % FACE_LOCK_EXPORT_REFINE_EVERY_N == 0)
+    if should_refine and not refined:
+        search_anchor = union_bboxes(bbox, state.get("last_bbox"))
+        search_bbox = expand_bbox(
+            normalize_export_face_lock_bbox(search_anchor, frame_w, frame_h) or bbox,
+            frame_w,
+            frame_h,
+            FACE_LOCK_EXPORT_REFINE_SEARCH_EXPAND,
+        )
+        try:
+            from services.detection import localize_head_in_search_region
+            match = localize_head_in_search_region(
+                frame,
+                search_bbox=search_bbox,
+                preferred_bbox=bbox,
+                strict=False,
+            )
+        except Exception:
+            match = None
+        if match is not None and match.get("bbox"):
+            head_bbox = expand_face_redaction_bbox(tuple(match["bbox"]), frame_w, frame_h)
+            resolved = smooth_bbox(
+                head_bbox,
+                bbox,
+                0.68,
+                frame_w,
+                frame_h,
+                size_alpha=0.58,
+            ) or head_bbox
+            refined = True
+            stats["head_refined_frames"] = int(stats.get("head_refined_frames", 0) or 0) + 1
+
+    previous = state.get("last_bbox")
+    if previous is not None:
+        smoothed = smooth_bbox(
+            resolved,
+            previous,
+            FACE_LOCK_EXPORT_RUNTIME_ALPHA,
+            frame_w,
+            frame_h,
+            size_alpha=FACE_LOCK_EXPORT_RUNTIME_SIZE_ALPHA,
+        ) or resolved
+        # If the live head refiner succeeded, trust that corrected head path;
+        # otherwise keep the planned dense export bbox covered.
+        resolved = union_bboxes(smoothed, resolved if refined else bbox) or resolved
+    state["last_bbox"] = normalize_export_face_lock_bbox(resolved, frame_w, frame_h) or resolved
+    if entry.get("filled"):
+        stats["filled_frames_rendered"] = int(stats.get("filled_frames_rendered", 0) or 0) + 1
+    return state["last_bbox"]
+
+
 def detect_reverse_face_tracks(frame, frame_w, frame_h):
     """Fast all-face detector for reverse export.
 
@@ -460,7 +984,7 @@ def detect_reverse_face_tracks(frame, frame_w, frame_h):
     CPU. The tracker/refinement loop still smooths and bridges these detections
     after they are seeded.
     """
-    from services.detection import detect_faces_res10, face_sharpness
+    from services.detection import detect_faces_res10, detect_face_boxes, face_sharpness
 
     max_dim = max(360, int(REVERSE_FACE_DETECT_MAX_DIM or 960))
     detector_frame, scale_back = small_frame_for_tracking(frame, max_dim)
@@ -493,6 +1017,35 @@ def detect_reverse_face_tracks(frame, frame_w, frame_h):
             "bbox": expand_face_redaction_bbox(frame_bbox, frame_w, frame_h),
             "confidence": round(float(conf), 4),
             "source": "res10-fast",
+            "fast_reverse": True,
+            "disable_cv_tracker": True,
+        })
+    try:
+        supplemental = detect_face_boxes(
+            frame,
+            confidence_threshold=min(REVERSE_FACE_DETECT_CONFIDENCE, 0.14),
+            include_supplemental=True,
+            min_face_size=max(4, min_face_size),
+            min_sharpness=max(1.0, REVERSE_FACE_DETECT_MIN_SHARPNESS * 0.65),
+            upscale=2.4,
+        )
+    except Exception:
+        supplemental = []
+    for face in supplemental or []:
+        bbox = face.get("bbox") if isinstance(face, dict) else None
+        if not bbox:
+            continue
+        frame_bbox = normalize_export_face_lock_bbox(bbox, frame_w, frame_h)
+        if frame_bbox is None:
+            continue
+        expanded = expand_face_redaction_bbox(frame_bbox, frame_w, frame_h)
+        if any(bbox_iou(expanded, existing.get("bbox")) >= 0.42 for existing in tracks):
+            continue
+        tracks.append({
+            "kind": "face",
+            "bbox": expanded,
+            "confidence": round(float(face.get("confidence") or REVERSE_FACE_DETECT_CONFIDENCE), 4),
+            "source": "supplemental-high-recall",
             "fast_reverse": True,
             "disable_cv_tracker": True,
         })
@@ -1863,6 +2416,7 @@ def redact_video(
     face_lock_tracks = face_lock_tracks or {}
     face_lock_lanes_by_person = {}
     face_lock_bboxes_by_frame = {}
+    face_lock_export_stats = {}
     if face_lock_tracks:
         for pid, lane_doc in face_lock_tracks.items():
             if not lane_doc or not isinstance(lane_doc, dict):
@@ -1871,23 +2425,6 @@ def redact_video(
             if not lane_array:
                 continue
             face_lock_lanes_by_person[str(pid)] = lane_doc
-            for entry in lane_array:
-                try:
-                    f = int(entry.get("f"))
-                except (TypeError, ValueError):
-                    continue
-                bbox = (
-                    float(entry.get("x1", 0.0)),
-                    float(entry.get("y1", 0.0)),
-                    float(entry.get("x2", 0.0)),
-                    float(entry.get("y2", 0.0)),
-                )
-                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-                    continue
-                face_lock_bboxes_by_frame.setdefault(f, []).append({
-                    "person_id": str(pid),
-                    "bbox": bbox,
-                })
 
     if face_lock_lanes_by_person and face_targets:
         # Remove lane-backed people from the live relock list; otherwise the
@@ -1906,28 +2443,15 @@ def redact_video(
     prepared_custom_regions = []
 
     preserve_face_lock_tracks = preserve_face_lock_tracks or {}
+    preserve_face_lock_lanes_by_person = {}
     preserve_lock_bboxes_by_frame = {}
+    preserve_face_lock_export_stats = {}
     if preserve_face_lock_tracks:
         for pid, lane_doc in preserve_face_lock_tracks.items():
             if not lane_doc or not isinstance(lane_doc, dict):
                 continue
-            for entry in lane_doc.get("lane") or []:
-                try:
-                    f = int(entry.get("f"))
-                    bbox = (
-                        float(entry.get("x1", 0.0)),
-                        float(entry.get("y1", 0.0)),
-                        float(entry.get("x2", 0.0)),
-                        float(entry.get("y2", 0.0)),
-                    )
-                except (TypeError, ValueError):
-                    continue
-                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-                    continue
-                preserve_lock_bboxes_by_frame.setdefault(f, []).append({
-                    "person_id": str(pid),
-                    "bbox": bbox,
-                })
+            if lane_doc.get("lane"):
+                preserve_face_lock_lanes_by_person[str(pid)] = lane_doc
 
     for reg in custom_regions:
         if not isinstance(reg, dict):
@@ -1983,6 +2507,33 @@ def redact_video(
             for face in preserve_face_targets
         ]
         w, h = output_w, output_h
+
+    if face_lock_lanes_by_person:
+        face_lock_bboxes_by_frame, face_lock_export_stats = prepare_face_lock_export_bboxes(
+            face_lock_lanes_by_person,
+            w,
+            h,
+            fps,
+            total,
+        )
+        logger.info(
+            "Prepared dense face-lock export lanes: %d people, %d frames",
+            len(face_lock_export_stats),
+            len(face_lock_bboxes_by_frame),
+        )
+    if preserve_face_lock_lanes_by_person:
+        preserve_lock_bboxes_by_frame, preserve_face_lock_export_stats = prepare_face_lock_export_bboxes(
+            preserve_face_lock_lanes_by_person,
+            w,
+            h,
+            fps,
+            total,
+        )
+        logger.info(
+            "Prepared dense reverse-preserve export lanes: %d people, %d frames",
+            len(preserve_face_lock_export_stats),
+            len(preserve_lock_bboxes_by_frame),
+        )
 
     last_progress_stage = None
     last_progress_percent = -1
@@ -2062,6 +2613,10 @@ def redact_video(
     auto_prev_small_gray = None
     AUTO_TRACKER_REINIT_INTERVAL = 20
     AUTO_TRACKER_REINIT_AFTER_FAILS = 5
+    face_lock_runtime_state = {}
+    face_lock_render_stats = {}
+    preserve_face_lock_runtime_state = {}
+    preserve_face_lock_render_stats = {}
 
     custom_trackers = [None] * len(custom_regions)  # tracker or None
     custom_started = [False] * len(custom_regions)
@@ -2124,6 +2679,7 @@ def redact_video(
         kind_normalized = str(kind or "").lower()
         shape = "rect"
         redaction_bbox = bbox
+        render_style = redaction_style
         if kind_normalized == "face":
             if reverse_face_redaction and face_bbox_is_preserved(bbox, current_preserve_bboxes, w, h):
                 return target_frame
@@ -2138,10 +2694,22 @@ def redact_video(
                 )
                 if face_bbox_is_preserved(redaction_bbox, current_preserve_bboxes, w, h):
                     return target_frame
+                try:
+                    side = max(float(redaction_bbox[2]) - float(redaction_bbox[0]), float(redaction_bbox[3]) - float(redaction_bbox[1]))
+                except (TypeError, ValueError, IndexError):
+                    side = 0.0
+                if side and side <= REVERSE_TINY_FACE_SOLID_MAX_SIDE:
+                    x1, y1, x2, y2 = [int(round(v)) for v in redaction_bbox[:4]]
+                    x1 = max(0, min(x1, w - 1))
+                    y1 = max(0, min(y1, h - 1))
+                    x2 = max(x1 + 1, min(x2, w))
+                    y2 = max(y1 + 1, min(y2, h))
+                    target_frame[y1:y2, x1:x2] = 255
+                    return target_frame
         return apply_redaction(
             target_frame,
             redaction_bbox,
-            redaction_style,
+            render_style,
             blur_strength,
             shape=shape,
         )
@@ -2166,17 +2734,42 @@ def redact_video(
             if reverse_face_redaction and (active_preserve_face_targets or preserve_lock_bboxes_by_frame)
             else None
         )
+        frame_preserve_entries = tuple(preserve_lock_bboxes_by_frame.get(frame_idx, ()))
+        frame_face_lock_entries = tuple(face_lock_bboxes_by_frame.get(frame_idx, ()))
+        frame_mot_candidates = (
+            track_export_person_head_candidates(frame, w, h)
+            if not preview_only and (frame_preserve_entries or frame_face_lock_entries)
+            else []
+        )
 
         current_sec = frame_idx / fps
-        current_preserve_bboxes = [
-            entry["bbox"]
-            for entry in preserve_lock_bboxes_by_frame.get(frame_idx, ())
-            if entry.get("bbox")
-        ]
+        current_preserve_bboxes = []
+        for entry in frame_preserve_entries:
+            preserve_bbox = resolve_export_face_lock_bbox(
+                entry,
+                frame,
+                frame_idx,
+                w,
+                h,
+                preserve_face_lock_runtime_state,
+                preserve_face_lock_render_stats,
+                mot_candidates=frame_mot_candidates,
+            )
+            if preserve_bbox:
+                current_preserve_bboxes.append(preserve_bbox)
         had_lane_preserve_bbox = bool(current_preserve_bboxes)
         if face_lock_bboxes_by_frame and not preview_only:
-            for entry in face_lock_bboxes_by_frame.get(frame_idx, ()):  # iterates 0..N
-                lane_bbox = entry.get("bbox")
+            for entry in frame_face_lock_entries:  # iterates 0..N
+                lane_bbox = resolve_export_face_lock_bbox(
+                    entry,
+                    frame,
+                    frame_idx,
+                    w,
+                    h,
+                    face_lock_runtime_state,
+                    face_lock_render_stats,
+                    mot_candidates=frame_mot_candidates,
+                )
                 if lane_bbox:
                     apply_detection_redaction(frame, lane_bbox, "face")
         frame_custom_display_bboxes = [None] * len(custom_regions)
@@ -2605,7 +3198,11 @@ def redact_video(
                         h,
                     )
                     refreshed_trackers.append(reseeded)
-                    seed_bbox = reseeded.get("smoothed_bbox") or reseeded.get("last_bbox") or detection["bbox"]
+                    seed_bbox = (
+                        detection["bbox"]
+                        if reverse_face_redaction
+                        else reseeded.get("smoothed_bbox") or reseeded.get("last_bbox") or detection["bbox"]
+                    )
                     apply_detection_redaction(frame, seed_bbox, detection.get("kind"))
                     drawn_detection_indices.add(d_idx)
 
@@ -2679,6 +3276,15 @@ def redact_video(
                     if d_idx in drawn_detection_indices:
                         continue
                     apply_detection_redaction(frame, detected_track["bbox"], detected_track.get("kind"))
+
+                if reverse_face_redaction:
+                    # Reverse export is judged on the final encoded frame.
+                    # Motion bridges can overlap a current detector box and
+                    # soften/shift the exact face mask, so redraw the live
+                    # detections last. Focus detections have already been
+                    # filtered above.
+                    for detected_track in detected_tracks:
+                        apply_detection_redaction(frame, detected_track["bbox"], detected_track.get("kind"))
 
                 trackers = refreshed_trackers
             else:
@@ -2794,6 +3400,12 @@ def redact_video(
         result["reverse_preserve_localized_frames"] = reverse_preserve_localized_frames
         result["reverse_preserve_memory_frames"] = reverse_preserve_memory_frames
         result["reverse_preserve_target_count"] = len(preserve_face_targets)
+    if face_lock_export_stats:
+        result["face_lock_export_stats"] = face_lock_export_stats
+        result["face_lock_render_stats"] = face_lock_render_stats
+    if preserve_face_lock_export_stats:
+        result["preserve_face_lock_export_stats"] = preserve_face_lock_export_stats
+        result["preserve_face_lock_render_stats"] = preserve_face_lock_render_stats
     if output_metadata is not None:
         result["output_size_bytes"] = output_metadata["size_bytes"]
         result["h264_encoded"] = h264_encoded

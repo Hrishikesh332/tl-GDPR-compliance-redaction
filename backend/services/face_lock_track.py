@@ -36,7 +36,12 @@ from utils.video import small_frame_for_tracking
 
 logger = logging.getLogger("video_redaction.face_lock_track")
 
-LANE_BUILD_VERSION = 6
+# Bumped to 8: export lanes now treat semantic/person time ranges as coverage
+# hints again while deriving geometry from the visual/head tracker, and
+# body-like stored "face" anchors are normalized back to inferred head boxes
+# before tracking. Cached v7 lanes can contain large upper-body anchor boxes
+# that make the blur pulse or jump, so they must be rebuilt.
+LANE_BUILD_VERSION = 8
 FACE_LOCK_TRACKS_DIRNAME = "face_lock_tracks"
 DEFAULT_TRACKER_MAX_DIM = 960
 
@@ -45,6 +50,12 @@ DEFAULT_TRACKER_MAX_DIM = 960
 FACE_LOCK_SAFETY_PAD_RATIO = 0.035
 FACE_LOCK_FAR_HEAD_PAD_RATIO = 0.065
 FACE_LOCK_HEAD_FALLBACK_PAD_RATIO = 0.025
+# Frames driven purely by motion prediction (no InsightFace match, no YOLO
+# head match) are widened more aggressively than detection-anchored frames
+# because a few-pixel tracker drift is unrecoverable from there; we trade a
+# slightly larger blur footprint for the guarantee that the head stays
+# covered through back-of-head and far-head stretches.
+FACE_LOCK_MOTION_ONLY_PAD_RATIO = 0.085
 
 # Sparse appearance anchors are grouped into segments, then widened in time so
 # the lane covers the whole visible presence instead of only sampled frames.
@@ -54,7 +65,35 @@ SEGMENT_TIME_PADDING_SEC = 0.9
 # Identity verification corrects drift, but visual motion remains the main
 # position signal unless the tracker is weak or clearly lost.
 IDENTITY_VERIFY_INTERVAL_FRAMES = 2
-HEAD_FALLBACK_INTERVAL_FRAMES = 8
+# YOLO person+head fallback runs at the same cadence as InsightFace verify so
+# the lane is corrected to the actual head position every 2 frames even when
+# the face is turned away from the camera or so small that InsightFace cannot
+# resolve it. Previously this fallback only ran every 8 frames AND only when
+# InsightFace had no match at all, so long profile/back-of-head stretches drifted.
+HEAD_FALLBACK_INTERVAL_FRAMES = 2
+# When the YOLO head fallback walks the segment edges (presence extension)
+# its budget for consecutive "no head detected" frames before we declare the
+# subject off-screen. At 25 fps this is ~1.2 s of allowed brief occlusion
+# (something passing in front, a hard pan blur, etc.) before we cut the lane.
+PRESENCE_WALK_MAX_LOST_FRAMES = 30
+# Cap the presence walk so an unbounded segment cannot stall the build. At
+# 25fps this gives roughly 20s of extension beyond the first/last face anchor;
+# longer gaps are covered by the export renderer's dense lane bridge and live
+# person-head refinement.
+PRESENCE_WALK_MAX_FRAMES = 500
+# YOLO is the slowest per-frame measurement in the walk. Run it every K
+# frames during the walk and let motion tracking (CSRT + LK + global motion)
+# carry the in-between frames. At 25 fps and K=4 this is still 6.25 YOLO
+# checks per second — much faster than the head moves on screen.
+PRESENCE_WALK_YOLO_EVERY_N_FRAMES = 4
+# YOLO inference imgsz for the segment walk. 1080p video at imgsz=768 was
+# costing ~300-500ms per call on CPU; imgsz=384 keeps person/head recall
+# good while running ~4-6x faster — enough to make a multi-segment walk
+# complete in seconds instead of tens of minutes.
+PRESENCE_WALK_YOLO_IMGSZ = 384
+FACE_LOCK_BODY_LIKE_ANCHOR_ASPECT_RATIO = 1.75
+FACE_LOCK_BODY_LIKE_ANCHOR_AREA_RATIO = 0.010
+FACE_LOCK_BODY_LIKE_ANCHOR_TOP_TOUCH_RATIO = 0.010
 IDENTITY_VERIFY_SEARCH_EXPAND = 2.25
 IDENTITY_VERIFY_MIN_SIMILARITY = 0.34
 IDENTITY_VERIFY_HARD_LOCK_SIMILARITY = 0.45
@@ -160,7 +199,71 @@ def normalize_appearance_bbox(bbox):
     return (x1, y1, x2, y2)
 
 
-def collect_person_appearances(face):
+def clamp_frame_bbox(bbox, frame_w, frame_h):
+    bbox = normalize_appearance_bbox(bbox)
+    if bbox is None:
+        return None
+    try:
+        fw = float(frame_w)
+        fh = float(frame_h)
+    except (TypeError, ValueError):
+        return bbox
+    if fw <= 0 or fh <= 0:
+        return bbox
+    x1, y1, x2, y2 = bbox
+    out = (
+        max(0.0, min(x1, fw)),
+        max(0.0, min(y1, fh)),
+        max(0.0, min(x2, fw)),
+        max(0.0, min(y2, fh)),
+    )
+    if out[2] <= out[0] or out[3] <= out[1]:
+        return None
+    return out
+
+
+def normalize_lane_anchor_bbox(bbox, frame_w=None, frame_h=None):
+    """Return a face/head-sized anchor bbox for lane tracking.
+
+    Some upstream clustered appearances are not tight frontal-face boxes:
+    they can include most of the upper body when the person is far away,
+    turned sideways, or partially occluded. Using those as hard anchors makes
+    the exported blur box visibly vibrate and sometimes swell over the wrong
+    area. When an anchor is large and body-like, infer the head from the upper
+    portion of that box and track from there.
+    """
+    anchor = clamp_frame_bbox(bbox, frame_w, frame_h) if frame_w and frame_h else normalize_appearance_bbox(bbox)
+    if anchor is None or not frame_w or not frame_h:
+        return anchor
+    x1, y1, x2, y2 = anchor
+    bw = max(1.0, x2 - x1)
+    bh = max(1.0, y2 - y1)
+    aspect = bh / bw
+    frame_area = max(1.0, float(frame_w) * float(frame_h))
+    area_ratio = (bw * bh) / frame_area
+    touches_top = y1 <= max(1.0, float(frame_h) * FACE_LOCK_BODY_LIKE_ANCHOR_TOP_TOUCH_RATIO)
+    body_like = (
+        aspect >= FACE_LOCK_BODY_LIKE_ANCHOR_ASPECT_RATIO
+        and area_ratio >= FACE_LOCK_BODY_LIKE_ANCHOR_AREA_RATIO
+    ) or (
+        touches_top
+        and aspect >= 1.55
+        and area_ratio >= FACE_LOCK_BODY_LIKE_ANCHOR_AREA_RATIO * 0.65
+    )
+    if not body_like:
+        return anchor
+    try:
+        from services.detection import infer_head_bbox_from_person_bbox
+        head = infer_head_bbox_from_person_bbox(anchor, frame_w, frame_h)
+    except Exception:
+        head = None
+    if head is None:
+        return anchor
+    normalized = normalize_appearance_bbox(head)
+    return normalized or anchor
+
+
+def collect_person_appearances(face, frame_w=None, frame_h=None):
     out = []
     for app in face.get("appearances") or []:
         if not isinstance(app, dict):
@@ -169,7 +272,7 @@ def collect_person_appearances(face):
             timestamp = float(app.get("timestamp"))
         except (TypeError, ValueError):
             continue
-        bbox = normalize_appearance_bbox(app.get("bbox"))
+        bbox = normalize_lane_anchor_bbox(app.get("bbox"), frame_w, frame_h)
         if bbox is None:
             continue
         try:
@@ -181,7 +284,7 @@ def collect_person_appearances(face):
             "frame_idx": frame_idx,
             "bbox": bbox,
         })
-    base_bbox = normalize_appearance_bbox(face.get("bbox"))
+    base_bbox = normalize_lane_anchor_bbox(face.get("bbox"), frame_w, frame_h)
     if not out and base_bbox is not None:
         try:
             base_ts = float(face.get("timestamp"))
@@ -211,17 +314,107 @@ def get_entity_search_ranges(face, video_id):
     ]
 
 
-def build_face_lock_segments(appearances, entity_ranges, fps, total_frames, duration_sec):
-    """Group anchor appearances into contiguous segments and assign frame ranges.
+def normalize_semantic_text(value):
+    return " ".join(str(value or "").lower().split())
 
-    A segment starts at the earliest anchor (or TwelveLabs window start)
-    and runs through the latest contiguous anchor. Anchors more than
-    ``APPEARANCE_SEGMENT_MAX_GAP_SEC`` apart split into a fresh segment so
-    the visual tracker is restarted at a known good location after a cut.
+
+def semantic_token_overlap(text_a, text_b):
+    tokens_a = {t.strip(".,;:()[]{}") for t in normalize_semantic_text(text_a).split()}
+    tokens_b = {t.strip(".,;:()[]{}") for t in normalize_semantic_text(text_b).split()}
+    tokens_a = {t for t in tokens_a if len(t) > 3}
+    tokens_b = {t for t in tokens_b if len(t) > 3}
+    if not tokens_a or not tokens_b:
+        return 0.0
+    return len(tokens_a & tokens_b) / max(1, min(len(tokens_a), len(tokens_b)))
+
+
+def merge_time_ranges(ranges):
+    cleaned = []
+    for start, end in ranges or []:
+        try:
+            s = float(start)
+            e = float(end)
+        except (TypeError, ValueError):
+            continue
+        if e < s:
+            s, e = e, s
+        if e <= s:
+            continue
+        cleaned.append((s, e))
+    if not cleaned:
+        return []
+    cleaned.sort()
+    merged = [cleaned[0]]
+    for start, end in cleaned[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 0.25:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def get_semantic_person_ranges(face, job):
+    """Collect timeline/person ranges that may indicate continued presence.
+
+    These ranges are coverage hints only. They widen the frames the lane must
+    consider, while the actual export geometry still comes from anchors,
+    identity relock, motion tracking, and YOLO person-head localization.
+    """
+    ranges = []
+    video_id = str((job or {}).get("twelvelabs_video_id") or "").strip()
+    ranges.extend(get_entity_search_ranges(face, video_id))
+
+    face_desc = normalize_semantic_text(face.get("description"))
+    face_name = normalize_semantic_text(face.get("name"))
+    for person in (job or {}).get("twelvelabs_people") or []:
+        if not isinstance(person, dict):
+            continue
+        desc = normalize_semantic_text(person.get("description"))
+        name = normalize_semantic_text(person.get("name"))
+        matches = False
+        if face_desc and desc:
+            matches = (
+                face_desc == desc
+                or face_desc in desc
+                or desc in face_desc
+                or semantic_token_overlap(face_desc, desc) >= 0.68
+            )
+        if not matches and face_name and name:
+            matches = face_name == name
+        if not matches:
+            continue
+        for tr in person.get("time_ranges") or []:
+            if not isinstance(tr, dict):
+                continue
+            start = tr.get("start_sec", tr.get("start"))
+            end = tr.get("end_sec", tr.get("end"))
+            ranges.append((start, end))
+    return merge_time_ranges(ranges)
+
+
+def build_face_lock_segments(appearances, entity_ranges, fps, total_frames, duration_sec):
+    """Group anchor appearances into contiguous segments and assign initial
+    frame ranges. The returned ``start_frame``/``end_frame`` are only a
+    seed; the real presence range is then extended outward from each
+    anchor by a YOLO + visual-tracker walk in
+    ``extend_segments_via_head_tracking`` so the lane covers the whole
+    continuous on-screen presence of the subject, including stretches
+    where the face is turned away from camera or too small for the face
+    detector to resolve.
+
+    Anchors more than ``APPEARANCE_SEGMENT_MAX_GAP_SEC`` apart split into
+    a fresh segment so the visual tracker is restarted at a known good
+    location after a scene cut.
+
+    ``entity_ranges`` is used only as a coverage hint. It can widen or
+    merge the frame span for a selected person, but it never provides the
+    blur geometry; geometry still comes from the export-grade visual/head
+    tracking path.
     """
     if fps <= 0:
         fps = 25.0
-    if not appearances and not entity_ranges:
+    if not appearances:
         return []
 
     grouped = []
@@ -244,9 +437,6 @@ def build_face_lock_segments(appearances, entity_ranges, fps, total_frames, dura
             continue
         group_start = group[0]["timestamp"]
         group_end = group[-1]["timestamp"]
-        # Extend with any TwelveLabs range that overlaps this anchor group
-        # so coverage tracks the underlying scene rather than the sparse
-        # ~1 Hz appearance grid.
         ext_start = group_start
         ext_end = group_end
         for r_start, r_end in entity_ranges or []:
@@ -433,6 +623,154 @@ def expand_search_bbox(bbox, expand, frame_w, frame_h):
         min(float(frame_w), cx + half_w),
         min(float(frame_h), cy + half_h),
     )
+
+
+def find_head_at_frame(full_frame, tracked_bbox, frame_w, frame_h, *, expand=None, strict=True):
+    """Locate a head (YOLO person box -> inferred head region) near
+    ``tracked_bbox`` and return the bbox if found.
+
+    This is the back-of-head / far-head fallback signal. It does NOT
+    use face embeddings or any identity model, so it keeps working
+    when the subject is turned away from camera or so small that
+    InsightFace can't resolve a face. Returns ``(bbox, score)`` or
+    ``None``.
+    """
+    if full_frame is None or tracked_bbox is None:
+        return None
+    search_expand = float(expand if expand is not None else IDENTITY_VERIFY_SEARCH_EXPAND * 1.18)
+    search_bbox = expand_search_bbox(tracked_bbox, search_expand, frame_w, frame_h)
+    if search_bbox is None:
+        return None
+    try:
+        from services.detection import localize_head_in_search_region
+    except ImportError:
+        return None
+    try:
+        match = localize_head_in_search_region(
+            full_frame,
+            search_bbox=search_bbox,
+            preferred_bbox=tracked_bbox,
+            strict=strict,
+        )
+    except Exception:
+        return None
+    if match is None or match.get("bbox") is None:
+        return None
+    bbox = tuple(float(v) for v in match["bbox"])
+    if len(bbox) != 4 or bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return None
+    return bbox, float(match.get("geometry_score") or match.get("det_score") or 0.0)
+
+
+def find_head_fast(
+    full_frame,
+    tracked_bbox,
+    frame_w,
+    frame_h,
+    *,
+    expand=2.6,
+    imgsz=PRESENCE_WALK_YOLO_IMGSZ,
+    conf_threshold=0.18,
+):
+    """Fast head locator used by the segment-extension walk.
+
+    Crops the frame to a search region around ``tracked_bbox`` BEFORE
+    running YOLO inference, instead of running YOLO on the whole 1080p
+    (or larger) frame and filtering candidates after the fact. On CPU
+    this is the difference between a multi-minute walk and a few-second
+    walk, because:
+
+    - YOLO inference cost scales with the input image area. A typical
+      face/head search region is a few hundred pixels per side; running
+      YOLO on a 320x320 crop instead of a 1920x1080 frame is roughly
+      a 6-8x speed-up before counting the smaller ``imgsz``.
+    - We then run YOLO at a smaller ``imgsz`` (default 384) because the
+      crop is already small. This gives another ~2x speed-up.
+
+    Returns ``(head_bbox_in_full_frame_coords, det_score)`` or ``None``.
+    """
+    if full_frame is None or tracked_bbox is None:
+        return None
+    search_bbox = expand_search_bbox(tracked_bbox, expand, frame_w, frame_h)
+    if search_bbox is None:
+        return None
+    sx1, sy1, sx2, sy2 = [int(round(v)) for v in search_bbox]
+    sx1 = max(0, min(sx1, frame_w - 1))
+    sy1 = max(0, min(sy1, frame_h - 1))
+    sx2 = max(sx1 + 1, min(sx2, frame_w))
+    sy2 = max(sy1 + 1, min(sy2, frame_h))
+    crop = full_frame[sy1:sy2, sx1:sx2]
+    if crop is None or crop.size == 0:
+        return None
+
+    try:
+        from services.detection import get_obj_model, ObjectDetectionUnavailable
+    except ImportError:
+        return None
+    try:
+        model = get_obj_model()
+    except ObjectDetectionUnavailable:
+        return None
+
+    try:
+        results = model.predict(crop, conf=conf_threshold, verbose=False, imgsz=imgsz)
+    except Exception:
+        return None
+
+    pcx, pcy = bbox_center(tracked_bbox)
+    pref_diag = max(1.0, bbox_diagonal(tracked_bbox))
+    best = None
+    best_score = -1e9
+    for result in results:
+        if result.boxes is None:
+            continue
+        for box in result.boxes:
+            try:
+                cls_id = int(box.cls[0])
+            except (TypeError, IndexError, ValueError):
+                continue
+            if model.names.get(cls_id) != "person":
+                continue
+            try:
+                x1c, y1c, x2c, y2c = [float(v) for v in box.xyxy[0].tolist()]
+            except (TypeError, IndexError, ValueError):
+                continue
+            # Map the crop-relative person bbox back to full-frame coords.
+            px1 = sx1 + x1c
+            py1 = sy1 + y1c
+            px2 = sx1 + x2c
+            py2 = sy1 + y2c
+            person_w = max(1.0, px2 - px1)
+            person_h = max(1.0, py2 - py1)
+            # Infer a head bbox from the upper portion of the person box —
+            # same heuristic used by the slower path in detection.py, but
+            # inlined here so this hot path doesn't pay the import cost
+            # or the post-filtering checks tuned for the live redaction
+            # loop. The walk just needs a rough head presence check.
+            head_h_ratio = 0.30 if person_h < 96 else 0.26 if person_h < 180 else 0.22
+            head_h = max(8.0, person_h * head_h_ratio)
+            head_w = max(8.0, min(person_w * 0.62, max(person_w * 0.42, head_h * 0.82)))
+            hcx = (px1 + px2) / 2.0
+            hy1 = py1 - person_h * 0.01
+            head_bbox = (
+                max(0.0, hcx - head_w / 2.0),
+                max(0.0, hy1),
+                min(float(frame_w), hcx + head_w / 2.0),
+                min(float(frame_h), hy1 + head_h + person_h * 0.02),
+            )
+            if head_bbox[2] <= head_bbox[0] or head_bbox[3] <= head_bbox[1]:
+                continue
+            head_cx, head_cy = bbox_center(head_bbox)
+            center_dist = math.hypot(head_cx - pcx, head_cy - pcy) / pref_diag
+            try:
+                det_score = float(box.conf[0])
+            except (TypeError, IndexError, ValueError):
+                det_score = conf_threshold
+            score = det_score - center_dist * 0.8
+            if score > best_score:
+                best = (head_bbox, det_score)
+                best_score = score
+    return best
 
 
 def verify_face_at_frame(full_frame, tracked_bbox, known_face, frame_w, frame_h):
@@ -638,6 +976,409 @@ def choose_seed_anchor(anchors_by_frame, seed_frame, direction, reference_bbox=N
             best = candidate
             best_score = score
     return best or candidates[0]
+
+
+def walk_head_presence(
+    cap,
+    direction,
+    seed_bbox,
+    seed_frame,
+    frame_w,
+    frame_h,
+    *,
+    max_lost_frames=PRESENCE_WALK_MAX_LOST_FRAMES,
+    max_walk_frames=PRESENCE_WALK_MAX_FRAMES,
+    known_face=None,
+    boundary_frame=None,
+):
+    """Walk forward or backward from ``seed_frame`` finding the
+    continuous head presence around ``seed_bbox``, using subsampled
+    YOLO person -> head detection + CSRT/LK/global motion fusion.
+
+    Returns ``(last_confirmed_frame, confirmed_bboxes)`` where
+    ``last_confirmed_frame`` is the furthest frame index (inclusive)
+    where the head was still on-screen with a confident track and
+    ``confirmed_bboxes`` is a ``{frame_idx: bbox}`` map of every frame
+    on the walk that was confirmed by a YOLO head match (or by an
+    opportunistic InsightFace match if the face happened to be
+    visible). Frames where only motion tracking carried the bbox are
+    NOT included — the consumer should treat the map as
+    detector-confirmed presence anchors.
+
+    If the head is lost for ``max_lost_frames`` consecutive frames the
+    walk stops at the last confirmed frame.
+
+    This function intentionally does NOT use face embeddings as a
+    primary signal — the whole point is to extend the lane through
+    stretches where the face is turned away from the camera or too
+    small for the face detector to resolve. ``known_face`` is accepted
+    for API stability but not consulted; the walk relies entirely on
+    YOLO person detection plus visual tracker fusion.
+    """
+    del known_face  # See docstring above — kept for API stability only.
+    if seed_bbox is None or seed_frame is None:
+        return seed_frame, {}
+    step = 1 if direction == "forward" else -1
+    last_confirmed = int(seed_frame)
+    lost_streak = 0
+    walked = 0
+    confirmed_bboxes = {int(seed_frame): tuple(float(v) for v in seed_bbox)}
+
+    # Backward walks need every full-resolution frame for YOLO, but
+    # cv2.VideoCapture with H.264 has very slow backward seeks. The
+    # backward path therefore buffers the frames sequentially first
+    # (same trick used by track_segment_one_direction). For the
+    # forward walk we just read sequentially.
+    backward_buffer = None
+    if direction == "backward":
+        if boundary_frame is None:
+            start = max(0, last_confirmed - max_walk_frames)
+        else:
+            start = max(int(boundary_frame), max(0, last_confirmed - max_walk_frames))
+        end = last_confirmed
+        if start >= end:
+            return last_confirmed, confirmed_bboxes
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start)
+        backward_buffer = {}
+        for f_idx in range(start, end + 1):
+            ret, fr = cap.read()
+            if not ret or fr is None:
+                break
+            backward_buffer[f_idx] = fr
+        if not backward_buffer:
+            return last_confirmed, confirmed_bboxes
+        if last_confirmed not in backward_buffer:
+            return last_confirmed, confirmed_bboxes
+        cur_frame = backward_buffer[last_confirmed]
+    else:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, last_confirmed)
+        ret, cur_frame = cap.read()
+        if not ret or cur_frame is None:
+            return last_confirmed, confirmed_bboxes
+
+    small_frame, scale_back = small_frame_for_tracking(
+        cur_frame, max_dim=DEFAULT_TRACKER_MAX_DIM,
+    )
+    gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+    try:
+        tracker = create_initialized_tracker(
+            small_frame, seed_bbox, scale_back, scale_adaptive=True,
+        )
+    except Exception:
+        tracker = None
+    small_bbox = frame_bbox_to_small_bbox(
+        seed_bbox, scale_back, small_frame.shape[1], small_frame.shape[0],
+    )
+    prev_points = (
+        seed_track_points_for_kind("face", gray_small, small_bbox)
+        if small_bbox is not None else None
+    )
+    prev_gray_small = gray_small
+    prev_small_bbox = small_bbox
+    last_bbox = seed_bbox
+    velocity = (0.0, 0.0, 0.0, 0.0)
+
+    next_idx = last_confirmed + step
+    while walked < max_walk_frames:
+        walked += 1
+        if direction == "forward":
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+        else:
+            if backward_buffer is None or next_idx not in backward_buffer:
+                break
+            frame = backward_buffer[next_idx]
+        if boundary_frame is not None:
+            if direction == "forward" and next_idx > int(boundary_frame):
+                break
+            if direction == "backward" and next_idx < int(boundary_frame):
+                break
+
+        small_frame, scale_back = small_frame_for_tracking(
+            frame, max_dim=DEFAULT_TRACKER_MAX_DIM,
+        )
+        gray_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2GRAY)
+
+        tracker_bbox = None
+        tracker_ok = False
+        if tracker is not None:
+            try:
+                ok, roi = tracker.update(small_frame)
+                if ok and roi is not None:
+                    x, y, tw, th = (int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3]))
+                    if tw > 0 and th > 0:
+                        tracker_bbox = small_bbox_to_frame_bbox(
+                            (x, y, x + tw, y + th), scale_back, frame_w, frame_h,
+                        )
+                        tracker_ok = tracker_bbox is not None
+            except Exception:
+                tracker_ok = False
+
+        optical_bbox = None
+        optical_points = None
+        if prev_small_bbox is not None and prev_points is not None and prev_gray_small is not None:
+            optical_small_bbox, optical_points = optical_flow_bbox_update(
+                prev_gray_small,
+                gray_small,
+                prev_points,
+                prev_small_bbox,
+                small_frame.shape[1],
+                small_frame.shape[0],
+            )
+            if optical_small_bbox is not None:
+                optical_bbox = small_bbox_to_frame_bbox(
+                    optical_small_bbox, scale_back, frame_w, frame_h,
+                )
+
+        global_motion = (
+            estimate_global_frame_motion(prev_gray_small, gray_small)
+            if prev_gray_small is not None else None
+        )
+        global_bbox = None
+        if global_motion is not None and float((global_motion or {}).get("confidence", 0.0) or 0.0) >= 0.14:
+            global_bbox = apply_motion_to_bbox(last_bbox, global_motion, frame_w, frame_h)
+
+        # Predict with constant velocity as a soft anchor when measurement is weak.
+        predicted_bbox = None
+        last_state = bbox_to_state(last_bbox)
+        if last_state is not None:
+            cx, cy, w, h = last_state
+            vx, vy, vw, vh = velocity
+            new_w = max(8.0, w + vw)
+            new_h = max(8.0, h + vh)
+            x1 = max(0.0, (cx + vx) - new_w / 2.0)
+            y1 = max(0.0, (cy + vy) - new_h / 2.0)
+            x2 = min(float(frame_w), (cx + vx) + new_w / 2.0)
+            y2 = min(float(frame_h), (cy + vy) + new_h / 2.0)
+            if x2 > x1 and y2 > y1:
+                predicted_bbox = (x1, y1, x2, y2)
+
+        fused = weighted_fuse_bboxes(
+            [
+                (optical_bbox, 3.0 if optical_bbox is not None else 0.0, "optical"),
+                (tracker_bbox, 2.2 if tracker_ok else 0.0, "tracker"),
+                (global_bbox, 1.0, "global"),
+                (predicted_bbox, 0.7 if predicted_bbox is not None else 0.0, "velocity"),
+            ],
+            frame_w,
+            frame_h,
+        )
+        if fused is None:
+            fused = predicted_bbox or global_bbox or last_bbox
+        if fused is None:
+            break
+        if last_bbox is not None:
+            fused = clamp_bbox_scale_step(fused, last_bbox, frame_w, frame_h)
+
+        # YOLO head check confirms the subject is still on-screen, but
+        # YOLO is the slowest measurement in the walk, so we only run
+        # it every ``PRESENCE_WALK_YOLO_EVERY_N_FRAMES`` frames. Motion
+        # tracking (CSRT + LK + global motion) carries the in-between
+        # frames at near-zero cost. The crop-aware ``find_head_fast``
+        # gives another large speed-up because YOLO inferences run on
+        # a small search-region crop instead of the full 1080p frame.
+        #
+        # Identity verification is intentionally NOT run inside the
+        # walk. The whole purpose of this codepath is to extend the
+        # lane through stretches where the face detector cannot see
+        # the face — running it here would only slow the walk down
+        # without helping.
+        run_yolo_this_step = (walked % PRESENCE_WALK_YOLO_EVERY_N_FRAMES) == 0
+        head_match = None
+        if run_yolo_this_step:
+            head_match = find_head_fast(
+                frame, fused, frame_w, frame_h,
+            )
+
+        confirmed = False
+        if head_match is not None:
+            head_bbox, _ = head_match
+            blended = smooth_bbox(
+                head_bbox, fused, 0.55, frame_w, frame_h, size_alpha=0.5,
+            ) or head_bbox
+            fused = clamp_bbox_scale_step(blended, last_bbox, frame_w, frame_h)
+            confirmed = True
+
+        if confirmed:
+            last_confirmed = next_idx
+            confirmed_bboxes[int(next_idx)] = tuple(float(v) for v in fused)
+            lost_streak = 0
+            # Re-init the tracker on confirmed frames so it stays anchored
+            # to the head and doesn't drift to a passerby's torso.
+            try:
+                refreshed = create_initialized_tracker(
+                    small_frame, fused, scale_back, scale_adaptive=True,
+                )
+                if refreshed is not None:
+                    tracker = refreshed
+            except Exception:
+                pass
+        elif run_yolo_this_step:
+            # YOLO actually ran and didn't find a matching head — count
+            # this as a real miss. Allow motion-only continuation for a
+            # short streak so brief pan blurs / partial occlusions don't
+            # cut the lane prematurely.
+            lost_streak += PRESENCE_WALK_YOLO_EVERY_N_FRAMES
+            if lost_streak > max_lost_frames:
+                break
+
+        new_state = bbox_to_state(fused)
+        velocity = update_velocity(velocity, last_state, new_state)
+        last_bbox = fused
+
+        small_bbox = frame_bbox_to_small_bbox(
+            fused, scale_back, small_frame.shape[1], small_frame.shape[0],
+        )
+        prev_small_bbox = small_bbox
+        if optical_points is not None and small_bbox is not None:
+            x1s, y1s, x2s, y2s = small_bbox
+            kept = [
+                pt for pt in optical_points.reshape(-1, 2)
+                if x1s <= pt[0] <= x2s and y1s <= pt[1] <= y2s
+            ]
+            if len(kept) >= 6:
+                prev_points = np.array(kept, dtype=np.float32).reshape(-1, 1, 2)
+            else:
+                prev_points = seed_track_points_for_kind("face", gray_small, small_bbox)
+        else:
+            prev_points = (
+                seed_track_points_for_kind("face", gray_small, small_bbox)
+                if small_bbox is not None else None
+            )
+        prev_gray_small = gray_small
+
+        next_idx += step
+        if next_idx < 0:
+            break
+
+    return last_confirmed, confirmed_bboxes
+
+
+def extend_segments_via_head_tracking(cap, segments, fps, frame_w, frame_h, total_frames, *, known_face=None):
+    """For each segment, walk outward from the first/last InsightFace
+    anchor using YOLO + visual tracking until the head presence ends.
+
+    Replaces the prior reliance on TwelveLabs entity time ranges to
+    pad the segment. The walk uses head detection (not face detection)
+    so it stays attached to the subject through profile turns,
+    back-of-head stretches, and far-distance frames.
+    """
+    if not segments:
+        return segments
+    extend_t0 = time.monotonic()
+    logger.info(
+        "Head-tracking presence extension over %d segments (max walk = %d frames, "
+        "YOLO every %d frames at imgsz=%d)",
+        len(segments), PRESENCE_WALK_MAX_FRAMES,
+        PRESENCE_WALK_YOLO_EVERY_N_FRAMES, PRESENCE_WALK_YOLO_IMGSZ,
+    )
+    out = []
+    for seg_idx, seg in enumerate(segments):
+        anchors = seg.get("anchors") or []
+        if not anchors:
+            out.append(seg)
+            continue
+        anchor_frames = [appearance_frame_index(a, fps) for a in anchors]
+        first_anc = min(anchor_frames)
+        last_anc = max(anchor_frames)
+        # Identify the bbox at the first/last anchor frame.
+        anchors_by_frame = {}
+        for app in anchors:
+            f_idx = appearance_frame_index(app, fps)
+            anchors_by_frame.setdefault(f_idx, []).append(app)
+        first_seed = (anchors_by_frame.get(first_anc) or [None])[0]
+        last_seed = (anchors_by_frame.get(last_anc) or [None])[0]
+
+        new_start = int(seg["start_frame"])
+        new_end = int(seg["end_frame"])
+        head_walk_bboxes = {}
+        seg_t0 = time.monotonic()
+
+        # Backward walk: extend coverage BEFORE first_anc back to where
+        # the head first appears (or the previous segment boundary).
+        # Bound the walk by either the previous segment's end + 1 or 0.
+        prev_seg_end = out[-1]["end_frame"] if out else None
+        backward_boundary = max(0, (prev_seg_end + 1) if prev_seg_end is not None else 0)
+        if first_seed is not None and first_anc > backward_boundary:
+            walked_to, walked_bboxes = walk_head_presence(
+                cap,
+                direction="backward",
+                seed_bbox=tuple(first_seed["bbox"]),
+                seed_frame=first_anc,
+                frame_w=frame_w,
+                frame_h=frame_h,
+                known_face=known_face,
+                boundary_frame=backward_boundary,
+            )
+            if walked_to is not None:
+                new_start = min(new_start, int(walked_to))
+            head_walk_bboxes.update(walked_bboxes or {})
+
+        # Forward walk: extend coverage AFTER last_anc.
+        # Bound by total_frames - 1.
+        forward_boundary = total_frames - 1 if total_frames and total_frames > 0 else None
+        if last_seed is not None:
+            walked_to, walked_bboxes = walk_head_presence(
+                cap,
+                direction="forward",
+                seed_bbox=tuple(last_seed["bbox"]),
+                seed_frame=last_anc,
+                frame_w=frame_w,
+                frame_h=frame_h,
+                known_face=known_face,
+                boundary_frame=forward_boundary,
+            )
+            if walked_to is not None:
+                new_end = max(new_end, int(walked_to))
+            head_walk_bboxes.update(walked_bboxes or {})
+
+        seg_dt = time.monotonic() - seg_t0
+        logger.info(
+            "  segment %d/%d: anchors [%d, %d] -> extended [%d, %d] "
+            "(+%d head-walk bboxes in %.2fs)",
+            seg_idx + 1, len(segments),
+            first_anc, last_anc, new_start, new_end,
+            len(head_walk_bboxes), seg_dt,
+        )
+
+        new_start = max(0, new_start)
+        if total_frames and total_frames > 0:
+            new_end = min(new_end, total_frames - 1)
+        out.append({
+            **seg,
+            "start_frame": new_start,
+            "end_frame": new_end,
+            # Per-frame YOLO-confirmed head bboxes from the presence
+            # walk. ``build_segment_lane`` uses these as soft anchors so
+            # the backward-direction tracker (which doesn't have full
+            # frame access for live YOLO calls) still has detector-
+            # confirmed correction points in the extended-backward
+            # window where the face detector never fired.
+            "head_walk_bboxes": dict(head_walk_bboxes),
+        })
+
+    # If two segments were extended to overlap, merge them.
+    merged = []
+    for seg in sorted(out, key=lambda s: s["start_frame"]):
+        if merged and seg["start_frame"] <= merged[-1]["end_frame"] + 1:
+            merged[-1]["end_frame"] = max(merged[-1]["end_frame"], seg["end_frame"])
+            existing_anchors = merged[-1].get("anchors") or []
+            merged[-1]["anchors"] = list(existing_anchors) + list(seg.get("anchors") or [])
+            existing_walk = merged[-1].get("head_walk_bboxes") or {}
+            existing_walk.update(seg.get("head_walk_bboxes") or {})
+            merged[-1]["head_walk_bboxes"] = existing_walk
+        else:
+            merged.append(dict(seg))
+    for seg in merged:
+        seg["anchors"].sort(key=lambda a: a["timestamp"])
+
+    logger.info(
+        "Head-tracking presence extension done: %d segments after merge in %.2fs",
+        len(merged), time.monotonic() - extend_t0,
+    )
+
+    return merged
 
 
 def track_segment_one_direction(
@@ -1062,6 +1803,14 @@ def track_segment_one_direction(
                     except Exception:
                         pass
             else:
+                # InsightFace could not see the selected person at this
+                # frame. The subject may be turned away from the camera,
+                # too small, or the lighting may have killed embedding
+                # signal. Fall back to YOLO head detection at the same
+                # cadence as identity verification (HEAD_FALLBACK_INTERVAL_FRAMES
+                # is tuned to match) so the lane stays attached to the
+                # head through profile turns and far-distance frames
+                # without depending on the embedding model.
                 head_match = None
                 if abs(next_idx - cur) % HEAD_FALLBACK_INTERVAL_FRAMES == 0:
                     try:
@@ -1077,7 +1826,13 @@ def track_segment_one_direction(
                             frame,
                             search_bbox=head_search_bbox,
                             preferred_bbox=smoothed_bbox,
-                            strict=True,
+                            # ``strict=False`` lets a slightly-mismatched
+                            # geometry score still rescue the lane. The
+                            # downstream blend with the motion bbox keeps
+                            # the result close to the smooth motion track
+                            # so an occasional weaker YOLO box doesn't
+                            # teleport the lane.
+                            strict=False,
                         ) if head_search_bbox is not None else None
                     except Exception:
                         head_match = None
@@ -1110,6 +1865,20 @@ def track_segment_one_direction(
                     head_fallback = True
                     confidence = max(confidence, 0.74)
                     src = "head_fallback"
+                else:
+                    # Neither InsightFace nor YOLO confirmed the head
+                    # this cycle. The lane keeps tracking on motion
+                    # alone (CSRT + LK + global + velocity prediction).
+                    # Flag the source so serialize_lane applies the
+                    # wider motion-only safety pad — the user requirement
+                    # is to never reveal the face during back-of-head or
+                    # far-distance stretches, even when both detectors miss.
+                    if not src.endswith("|motion_only"):
+                        src = f"{src}|motion_only"
+                    # Don't raise confidence above the motion-track level,
+                    # but don't crash it to zero either: the motion
+                    # ensemble is the trusted signal here.
+                    confidence = max(confidence, 0.55)
 
         results[next_idx] = {"bbox": smoothed_bbox, "src": src, "conf": confidence}
 
@@ -1160,7 +1929,7 @@ def is_pinned_src(src):
 
 def is_scale_reference_src(src):
     """Sources trusted enough to stabilize bbox size between detections."""
-    return is_pinned_src(src) or src == "head_fallback"
+    return is_pinned_src(src) or src == "head_fallback" or src == "head_walk"
 
 
 def fuse_directions(forward, backward, frame_w, frame_h):
@@ -1308,6 +2077,21 @@ def bidirectional_smooth(lane_by_frame, frame_w, frame_h, alpha=0.6):
 
 
 def safety_pad_ratio_for_bbox(bbox, src=None):
+    """Choose a safety pad ratio for the final serialized lane bbox.
+
+    The pad has three regimes:
+    - Anchor / verified frames get the small baseline pad — we know exactly
+      where the face is and the lane bbox is already a tight detector box.
+    - Far heads (max side under 112 px) get extra pad because a 1-2 px
+      detector inaccuracy is a much larger fraction of the face and would
+      visibly expose the head.
+    - Frames where neither InsightFace nor YOLO confirmed the head this
+      cycle (``motion_only``, ``predicted``, ``global``, etc.) get the
+      most pad because they are the most prone to drift. The user
+      requirement is that the export NEVER reveals the face during
+      back-of-head or far-distance stretches, so we err strongly on the
+      side of "blur too much" for these frames.
+    """
     w, h = bbox_size(bbox)
     max_side = max(w, h)
     pad = FACE_LOCK_SAFETY_PAD_RATIO
@@ -1315,9 +2099,26 @@ def safety_pad_ratio_for_bbox(bbox, src=None):
         pad += FACE_LOCK_FAR_HEAD_PAD_RATIO
     elif max_side < 112:
         pad += FACE_LOCK_FAR_HEAD_PAD_RATIO * 0.55
-    if src == "head_fallback":
+    if src == "head_fallback" or src == "head_walk":
         pad += FACE_LOCK_HEAD_FALLBACK_PAD_RATIO
-    return min(0.14, max(0.0, pad))
+    if isinstance(src, str) and "motion_only" in src:
+        pad += FACE_LOCK_MOTION_ONLY_PAD_RATIO
+    elif src in ("predicted", "global"):
+        pad += FACE_LOCK_MOTION_ONLY_PAD_RATIO
+    elif isinstance(src, str):
+        # Any frame whose source is purely motion-based (no detector
+        # confirmation this cycle: not anchor, not verified, not
+        # head_fallback, not head_walk) gets a smaller-but-still-real
+        # safety boost.
+        no_detector_signal = (
+            "verified" not in src
+            and "anchor" not in src
+            and "head_fallback" not in src
+            and "head_walk" not in src
+        )
+        if no_detector_signal:
+            pad += FACE_LOCK_MOTION_ONLY_PAD_RATIO * 0.6
+    return min(0.22, max(0.0, pad))
 
 
 def apply_safety_pad(bbox, frame_w, frame_h, pad_ratio=None, src=None):
@@ -1457,6 +2258,62 @@ def build_segment_lane(
     scale_stable = stabilize_scale_between_pins(fused, frame_w, frame_h)
     smoothed = bidirectional_smooth(scale_stable, frame_w, frame_h, alpha=0.5)
 
+    # Detector-confirmed head presence from the YOLO walk runs at the
+    # segment boundaries (before the first InsightFace anchor and after
+    # the last one). Use it to fill any frame that:
+    #   - the build's forward+backward fusion missed entirely, OR
+    #   - the build covered with motion only (no detector signal this cycle)
+    # so the extended-coverage portion of the lane has YOLO-confirmed
+    # head bboxes wherever they were available. This matters most for
+    # the backward direction's pre-anchor window, where the buffered-
+    # small-frame tracker cannot call YOLO at runtime.
+    head_walk_bboxes = segment.get("head_walk_bboxes") or {}
+    if head_walk_bboxes:
+        filled_new = 0
+        replaced_motion_only = 0
+        for f_idx, head_bbox in head_walk_bboxes.items():
+            f_idx_int = int(f_idx)
+            existing = smoothed.get(f_idx_int)
+            if existing is None:
+                smoothed[f_idx_int] = {
+                    "bbox": tuple(float(v) for v in head_bbox),
+                    "src": "head_walk",
+                    "conf": 0.78,
+                }
+                filled_new += 1
+                continue
+            existing_src = existing.get("src") or ""
+            # Keep the higher-quality lane entry whenever a detector
+            # actually confirmed the face/head at that frame; otherwise
+            # snap to the YOLO-confirmed bbox.
+            already_detector_confirmed = (
+                "anchor" in existing_src
+                or "verified" in existing_src
+                or "head_fallback" in existing_src
+                or "head_walk" in existing_src
+            )
+            if already_detector_confirmed:
+                continue
+            blended = smooth_bbox(
+                tuple(float(v) for v in head_bbox),
+                existing.get("bbox"),
+                0.6,
+                frame_w,
+                frame_h,
+                size_alpha=0.55,
+            ) or tuple(float(v) for v in head_bbox)
+            smoothed[f_idx_int] = {
+                **existing,
+                "bbox": blended,
+                "src": "head_walk",
+                "conf": max(float(existing.get("conf") or 0.0), 0.78),
+            }
+            replaced_motion_only += 1
+        logger.info(
+            "  head-walk fill: +%d new frames, %d motion-only frames replaced",
+            filled_new, replaced_motion_only,
+        )
+
     logger.info(
         "  fused & smoothed: %d frames, total segment time %.2fs",
         len(smoothed), time.monotonic() - seg_t0,
@@ -1550,21 +2407,40 @@ def build_face_lock_lane(
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         duration_sec = total_frames / fps if fps > 0 else 0.0
 
-        appearances = collect_person_appearances(selected_face)
+        appearances = collect_person_appearances(selected_face, frame_w, frame_h)
         if not appearances:
             raise ValueError(
                 f"person_id {person_id} has no stored InsightFace appearances; "
                 "cannot build a face-lock lane without anchors"
             )
 
-        video_id = str(job.get("twelvelabs_video_id") or "").strip()
-        entity_ranges = get_entity_search_ranges(selected_face, video_id)
+        semantic_ranges = get_semantic_person_ranges(selected_face, job)
+        # Timeline/person ranges are only coverage hints. They can tell us
+        # which frames deserve a lane, but they are never trusted for bbox
+        # geometry; geometry still comes from the fused tracker below.
         segments = build_face_lock_segments(
-            appearances, entity_ranges, fps, total_frames, duration_sec,
+            appearances, semantic_ranges, fps, total_frames, duration_sec,
         )
         if not segments:
             raise ValueError(
                 f"could not build any face-lock segments for person {person_id}"
+            )
+
+        set_build_state(
+            job_id, person_id,
+            status="running", progress=0.04, percent=4,
+            message="Extending segment range with head tracking",
+        )
+        try:
+            segments = extend_segments_via_head_tracking(
+                cap, segments, fps, frame_w, frame_h, total_frames,
+                known_face=selected_face,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Head-tracking presence extension failed for person %s "
+                "(falling back to anchor-padded segment range): %s",
+                person_id, exc,
             )
 
         # Count the real forward/backward emits so progress reaches 90%
@@ -1697,7 +2573,7 @@ def build_face_lock_lane(
             "twelvelabs": {
                 "entity_id": str(selected_face.get("entity_id") or "") or None,
                 "ranges": [
-                    {"start": r[0], "end": r[1]} for r in entity_ranges
+                    {"start": r[0], "end": r[1]} for r in semantic_ranges
                 ],
             },
             "segments": all_segment_ranges,

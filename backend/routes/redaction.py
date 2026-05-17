@@ -469,6 +469,7 @@ def serialize_redaction_response(prepared, result):
         "detection_frames_skipped": result.get("detection_frames_skipped", 0),
         "entity_ids_used": result.get("entity_ids_used", []),
         "temporal_ranges_from_entity_search": result.get("temporal_ranges_from_entity_search", 0),
+        "temporal_ranges_used_for_render": result.get("temporal_ranges_used_for_render", 0),
         "person_ids_used": prepared.get("person_ids", []),
         "requested_person_ids": prepared.get("requested_person_ids", []),
         "redaction_mode": prepared.get("redaction_mode", "standard"),
@@ -478,6 +479,14 @@ def serialize_redaction_response(prepared, result):
         "unresolved_person_ids": prepared.get("unresolved_person_ids", []),
         "face_blur_failures": prepared.get("face_blur_failures", []),
         "face_lock_failures": [] if prepared.get("reverse_face_redaction", False) else result.get("face_lock_failures", []),
+        "face_lock_export_stats": result.get("face_lock_export_stats", {}),
+        "face_lock_render_stats": result.get("face_lock_render_stats", {}),
+        "preserve_face_lock_export_stats": result.get("preserve_face_lock_export_stats", {}),
+        "preserve_face_lock_render_stats": result.get("preserve_face_lock_render_stats", {}),
+        "normal_face_redaction_engine": result.get("normal_face_redaction_engine"),
+        "reverse_face_redaction_engine": result.get("reverse_face_redaction_engine"),
+        "yolov8_face_target_export_stats": result.get("yolov8_face_target_export_stats", {}),
+        "yolov8_face_export_stats": result.get("yolov8_face_export_stats", {}),
     }
 
 

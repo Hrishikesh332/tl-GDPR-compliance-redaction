@@ -1323,25 +1323,114 @@ def run_redaction(
                     person_id, exc,
                 )
 
-    result = redact_video(
-        input_path=video_path,
-        output_path=output_path,
-        face_encodings=enc_arrays,
-        face_targets=face_targets or [],
-        object_classes=obj_set,
-        blur_strength=blur_strength,
-        redaction_style=redaction_style,
-        detect_every_n=detect_every_n,
-        detect_every_seconds=detect_every_seconds,
-        temporal_ranges=temporal_ranges if temporal_ranges else None,
-        custom_regions=custom_regions or [],
-        output_height=normalized_output_height,
-        progress_callback=progress_callback,
-        face_lock_tracks=face_lock_tracks,
-        reverse_face_redaction=reverse_face_redaction,
-        preserve_face_targets=focus_face_targets,
-        preserve_face_lock_tracks=preserve_face_lock_tracks,
+    result = None
+    normal_engine = os.environ.get(
+        "NORMAL_FACE_EXPORT_ENGINE",
+        os.environ.get("FACE_REDACTION_EXPORT_ENGINE", "yolov8_face"),
+    ).strip().lower()
+    normal_yolo_disabled = normal_engine in {"legacy", "opencv", "res10", "false", "0", "off", "disabled"}
+    lane_eligible_face_targets = [
+        face for face in (face_targets or [])
+        if not face.get("is_snapped_entity") and get_face_identity(face)
+    ]
+    lane_eligible_person_ids = {
+        str(get_face_identity(face))
+        for face in lane_eligible_face_targets
+        if get_face_identity(face)
+    }
+    all_selected_faces_have_lanes = (
+        bool(lane_eligible_person_ids)
+        and len(lane_eligible_face_targets) == len(face_targets or [])
+        and lane_eligible_person_ids.issubset(set(face_lock_tracks.keys()))
     )
+    if (
+        not reverse_face_redaction
+        and not normal_yolo_disabled
+        and all_selected_faces_have_lanes
+        and not (custom_regions or [])
+        and not (obj_set or set())
+        and not (entity_ids or [])
+    ):
+        try:
+            from services.yolov8_face_target import (
+                has_yolov8_face_model as has_yolov8_target_model,
+                redact_video_yolov8_face_targets,
+            )
+
+            if has_yolov8_target_model():
+                selected_tracks = {
+                    pid: lane_doc
+                    for pid, lane_doc in face_lock_tracks.items()
+                    if str(pid) in lane_eligible_person_ids
+                }
+                result = redact_video_yolov8_face_targets(
+                    input_path=video_path,
+                    output_path=output_path,
+                    face_lock_tracks=selected_tracks,
+                    output_height=normalized_output_height,
+                    blur_strength=blur_strength,
+                    redaction_style=redaction_style,
+                    progress_callback=progress_callback,
+                )
+            else:
+                logger.warning("YOLOv8-Face target export requested, but model weights are missing; using legacy renderer")
+        except Exception as exc:
+            if os.environ.get("NORMAL_FACE_EXPORT_REQUIRE_YOLO", "").strip().lower() in {"1", "true", "yes", "on"}:
+                raise
+            logger.exception("YOLOv8-Face target export failed; using legacy renderer: %s", exc)
+
+    reverse_engine = os.environ.get("REVERSE_FACE_EXPORT_ENGINE", "yolov8_face").strip().lower()
+    yolo_disabled = reverse_engine in {"legacy", "opencv", "res10", "false", "0", "off", "disabled"}
+    if (
+        result is None
+        and reverse_face_redaction
+        and preserve_face_lock_tracks
+        and not (custom_regions or [])
+        and not yolo_disabled
+    ):
+        try:
+            from services.yolov8_face_reverse import (
+                has_yolov8_face_model,
+                redact_video_yolov8_face_reverse_focus,
+            )
+
+            if has_yolov8_face_model():
+                result = redact_video_yolov8_face_reverse_focus(
+                    input_path=video_path,
+                    output_path=output_path,
+                    preserve_face_lock_tracks=preserve_face_lock_tracks,
+                    output_height=normalized_output_height,
+                    blur_strength=blur_strength,
+                    redaction_style=redaction_style,
+                    progress_callback=progress_callback,
+                )
+            else:
+                logger.warning("YOLOv8-Face reverse export requested, but model weights are missing; using legacy renderer")
+        except Exception as exc:
+            if os.environ.get("REVERSE_FACE_EXPORT_REQUIRE_YOLO", "").strip().lower() in {"1", "true", "yes", "on"}:
+                raise
+            logger.exception("YOLOv8-Face reverse export failed; using legacy renderer: %s", exc)
+
+    if result is None:
+        result = redact_video(
+            input_path=video_path,
+            output_path=output_path,
+            face_encodings=enc_arrays,
+            face_targets=face_targets or [],
+            object_classes=obj_set,
+            blur_strength=blur_strength,
+            redaction_style=redaction_style,
+            detect_every_n=detect_every_n,
+            detect_every_seconds=detect_every_seconds,
+            temporal_ranges=temporal_ranges if temporal_ranges else None,
+            custom_regions=custom_regions or [],
+            output_height=normalized_output_height,
+            progress_callback=progress_callback,
+            face_lock_tracks=face_lock_tracks,
+            reverse_face_redaction=reverse_face_redaction,
+            preserve_face_targets=focus_face_targets,
+            preserve_face_lock_tracks=preserve_face_lock_tracks,
+        )
 
     download_filename = safe_redacted_mp4_filename(os.path.basename(output_path))
     result["download_url"] = f"/api/download/{download_filename}"
@@ -1349,7 +1438,9 @@ def run_redaction(
     result["mime_type"] = "video/mp4"
     result["export_quality"] = f"{normalized_output_height}p"
     result["entity_ids_used"] = entity_ids or []
-    result["temporal_ranges_from_entity_search"] = len(temporal_ranges)
+    temporal_ranges_used_for_render = 0 if result.get("normal_face_redaction_engine") == "yolov8_face" else len(temporal_ranges)
+    result["temporal_ranges_from_entity_search"] = temporal_ranges_used_for_render
+    result["temporal_ranges_used_for_render"] = temporal_ranges_used_for_render
     result["face_lock_failures"] = face_lock_failures
     return result
 

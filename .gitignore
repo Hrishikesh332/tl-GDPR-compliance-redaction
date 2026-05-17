@@ -25,6 +25,7 @@ htmlcov/
 backend/logs/
 backend/uploads/
 backend/test.png
+diff_artifacts/
 *.mp4
 *.avi
 *.mov
