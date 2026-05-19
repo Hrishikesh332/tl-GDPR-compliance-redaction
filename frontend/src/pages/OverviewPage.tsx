@@ -9,7 +9,7 @@ import rateLimitIconSvg from '../../strand/icons/rate-limit.svg?raw'
 import visionDisabledIconSvg from '../../strand/icons/vision-disabled.svg?raw'
 import documentListIconSvg from '../../strand/icons/document-list.svg?raw'
 
-const DEMO_VIDEO_EMBED_URL = 'https://www.youtube.com/embed/Uz-WQcANyDg'
+const DEMO_VIDEO_EMBED_URL = 'https://www.youtube.com/embed/HHkP8wEEcKI'
 
 function ThemedSvgIcon({
   icon,

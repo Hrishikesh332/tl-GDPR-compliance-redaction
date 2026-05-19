@@ -82,3 +82,6 @@ pyrightconfig.json
 logs/
 tmp/
 temp/
+
+
+docs/iteraction-diagrams/
