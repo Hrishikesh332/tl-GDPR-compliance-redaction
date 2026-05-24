@@ -484,7 +484,7 @@ export default function Dashboard({ onOpenUpload }: DashboardProps) {
 
   const allVideos = useMemo(() => [...apiVideos], [apiVideos])
 
-  const PINNED_VIDEO_IDS = ['699fa0975ce336753bf904c2', '69b677662fc4a03916fba00e']
+  const PINNED_VIDEO_IDS = ['6a137d2e2909d930b06afd63', '6a137c8be4705a5dc61a23ea']
   const filteredVideos = useMemo(() => {
     if (searchResults) return searchResults.results
     let list = allVideos

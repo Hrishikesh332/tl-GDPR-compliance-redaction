@@ -1,4 +1,4 @@
-export const DEMO_EDITOR_VIDEO_ID = '69b677662fc4a03916fba00e'
+export const DEMO_EDITOR_VIDEO_ID = '6a137c8be4705a5dc61a23ea'
 export const LAST_EDITOR_VIDEO_STORAGE_KEY = 'video_redaction_last_editor_video_id'
 
 type VideoLike = {

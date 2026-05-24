@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "artifact_id": "pegasus_e206f4013a238834",
-    "job_id": "pegasus_e206f4013a238834",
-    "video_id": "699fa0975ce336753bf904c2",
+    "artifact_id": "pegasus_885d07b25dbb00c0",
+    "job_id": "pegasus_885d07b25dbb00c0",
+    "video_id": "6a137d2e2909d930b06afd63",
     "local_job_id": "e4497c33-7a4",
     "source_fingerprint": "file:upload_mykn1ood.mp4:194618389:1777228009",
-    "cache_key": "699fa0975ce336753bf904c2|file:upload_mykn1ood.mp4:194618389:1777228009|1.2|privacy-assist-v4",
+    "cache_key": "6a137d2e2909d930b06afd63|file:upload_mykn1ood.mp4:194618389:1777228009|1.2|privacy-assist-v4",
     "model": "pegasus1.5",
     "prompt_version": "privacy-assist-v4",
     "schema_version": "1.2",

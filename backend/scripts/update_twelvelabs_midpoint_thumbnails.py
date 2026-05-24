@@ -28,9 +28,9 @@ from services.twelvelabs_service_helpers import PREFERRED_THUMBNAIL_URL_KEY
 from utils.video import extract_frame_at_time, get_video_metadata
 
 DEFAULT_VIDEO_IDS = [
-    "69b67a2968f910812bf38503",
-    "69b67a433571b38304a513f1",
-    "69b67a843571b38304a513f9",
+    "6a137d2215649e226a038da2",
+    "6a137cea2909d930b06afd20",
+    "6a137ccd15649e226a038d69",
 ]
 DEFAULT_OUTPUT_DIR = repo_dir / "frontend" / "public" / "generated-thumbnails"
 DEFAULT_URL_PREFIX = "/generated-thumbnails"
