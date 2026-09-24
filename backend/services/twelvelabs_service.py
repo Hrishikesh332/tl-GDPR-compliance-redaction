@@ -895,24 +895,25 @@ def get_index_info(index_id=None):
     logger.info("Retrieving index info")
     index = client.indexes.retrieve(index_id=idx)
 
-    models = []
-    if index.models:
-        for model in index.models:
-            models.append(
-                {
-                    "name": getattr(model, "name", None),
-                    "options": getattr(model, "options", None),
-                }
-            )
-
+    # SDK 1.x exposes index_name/model_name/model_options. Keep the API's
+    # existing response keys and support older SDK response shapes as well.
+    models = [
+        {
+            "name": get_value(model, "model_name", "name"),
+            "options": get_value(model, "model_options", "options"),
+        }
+        for model in (get_value(index, "models") or [])
+    ]
+    created_at = get_value(index, "created_at")
+    updated_at = get_value(index, "updated_at")
     return {
-        "index_id": index.id,
-        "name": index.name,
+        "index_id": get_value(index, "id", "_id") or idx,
+        "name": get_value(index, "index_name", "name"),
         "models": models,
-        "video_count": index.video_count,
-        "total_duration": index.total_duration,
-        "created_at": str(index.created_at) if index.created_at else None,
-        "updated_at": str(index.updated_at) if index.updated_at else None,
+        "video_count": get_value(index, "video_count"),
+        "total_duration": get_value(index, "total_duration"),
+        "created_at": str(created_at) if created_at else None,
+        "updated_at": str(updated_at) if updated_at else None,
     }
 
 
