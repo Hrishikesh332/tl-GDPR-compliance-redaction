@@ -8,7 +8,8 @@ export default defineRailway(() => {
     healthcheck: "/",
     healthcheckTimeout: 300,
     replicas: { "europe-west4-drams3a": 1 },
-    deploy: { restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 3, sleepApplication: false },
+    // Railway omits the default ON_FAILURE policy and disabled sleeping.
+    deploy: { restartPolicyMaxRetries: 3 },
     networking: { privateNetworkEndpoint: "tl-gdpr-compliance-redaction" },
     volumeMounts: { "/data": tlGdprComplianceRedactionVolume },
     env: { DATA_DIR: "/data", TWELVELABS_API_KEY: preserve(), TWELVELABS_ENTITY_COLLECTION_ID: preserve(), TWELVELABS_INDEX_ID: preserve() },
