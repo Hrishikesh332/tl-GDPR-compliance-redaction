@@ -116,7 +116,8 @@ The frontend runs at `http://localhost:5173`.
 ## Railway backend deployment
 
 Railway builds the repository-root `Dockerfile`. Keep the service connected to
-`master` and use `/` as the root directory. The image includes Python 3.11,
+`master` and use `/` as the root directory. The saved production infrastructure
+is in `.railway/railway.ts`; see `.railway/README.md` for the plan/apply workflow. The image includes Python 3.11,
 FFmpeg, CPU PyTorch, the repository's face models, and preloaded object and
 InsightFace models. Model inference is checked during the image build.
 
