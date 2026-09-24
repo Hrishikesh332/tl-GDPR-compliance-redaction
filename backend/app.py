@@ -34,6 +34,9 @@ root_logger.setLevel(logging.INFO)
 for h in root_logger.handlers[:]:
     root_logger.removeHandler(h)
 root_logger.addHandler(file_handler)
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
+root_logger.addHandler(stream_handler)
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)

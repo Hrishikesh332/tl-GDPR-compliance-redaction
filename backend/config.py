@@ -31,8 +31,10 @@ SELF_APP_PING_INTERVAL_MINUTES = env_cast("SELF_APP_PING_INTERVAL_MINUTES", 9, i
 SELF_APP_PING_TIMEOUT_SEC = env_cast("SELF_APP_PING_TIMEOUT_SEC", 15.0, float)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-SNAPS_DIR = os.path.join(BASE_DIR, "snaps")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+# Set DATA_DIR to a mounted Railway volume to preserve uploads and job metadata.
+DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR") or BASE_DIR)
+SNAPS_DIR = os.path.join(DATA_DIR, "snaps")
+OUTPUT_DIR = os.path.join(DATA_DIR, "output")
 
 FACE_COSINE_SIM_THRESHOLD = 0.42
 OBJECT_CONF_THRESHOLD = 0.25

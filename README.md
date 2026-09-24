@@ -113,6 +113,32 @@ The frontend runs at `http://localhost:5173`.
 
 ---
 
+## Railway backend deployment
+
+Railway builds the repository-root `Dockerfile`. Keep the service connected to
+`master` and use `/` as the root directory. The image includes Python 3.11,
+FFmpeg, CPU PyTorch, the repository's face models, and preloaded object and
+InsightFace models. Model inference is checked during the image build.
+
+Set `TWELVELABS_API_KEY`, `TWELVELABS_INDEX_ID`, and, if already available,
+`TWELVELABS_ENTITY_COLLECTION_ID` in Railway variables. Never put secrets in
+the image or repository. Attach a Railway volume at `/data` and set
+`DATA_DIR=/data` so source uploads, snapshots, and persisted job manifests
+survive replacement containers. Existing local runtime artifacts are excluded
+from the image.
+
+Gunicorn binds to Railway's `PORT`. Keep one replica and one worker because
+running jobs are held in process memory; eight request threads keep polling
+available during processing. Completed manifests persist on the volume, but
+in-flight work is not resumed after a restart. Sleeping is disabled, application
+logs go to Railway's log stream, and `GET /` is the deployment health check.
+
+Generate an HTTPS Railway domain and set the separately hosted frontend's
+`VITE_API_URL` to that origin, then rebuild the frontend. Verify `GET /`,
+`GET /api/indexing/info`, and `GET /api/videos` after deployment. The existing
+API has no user authentication; access control must be added before exposing
+sensitive footage to untrusted users.
+
 ## Workflow
 
 1. **Index and analyze a video** — Upload footage and let TwelveLabs generate searchable video context.
