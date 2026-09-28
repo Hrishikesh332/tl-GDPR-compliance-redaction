@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "repository": "Hrishikesh332/tl-GDPR-compliance-redaction",
+  "source_revision": "38f6a4cddcb52b1692df7775d7a91a2a975985c4",
+  "videos": [
+    {
+      "video_id": "6a137d2215649e226a038da2",
+      "job_id": "09d32fbb-b8a",
+      "source_file": "index_5gs6v6oe.mp4",
+      "source_sha256": "73a8f69b4eef508c075632e7278dd21150dbdc2b8da43394d5d786cf9e1f5034",
+      "source_size": 208221495
+    },
+    {
+      "video_id": "6a137c8be4705a5dc61a23ea",
+      "job_id": "37896aa0-e99",
+      "source_file": "index_fai5_hgh.mp4",
+      "source_sha256": "9b16ae393cd92c840d8528c3f2210b51bd809110bc0f1491850932c845044842",
+      "source_size": 228059834
+    },
+    {
+      "video_id": "6a137ccd15649e226a038d69",
+      "job_id": "39744da4-ed1",
+      "source_file": "index_sb96j2m4.mp4",
+      "source_sha256": "c443b9d6b82afd029627660bcc55b8ce42f7dc93a4e0e5fada45c3986967f583",
+      "source_size": 329960732
+    },
+    {
+      "video_id": "6a137cea2909d930b06afd20",
+      "job_id": "42eab7da-2e1",
+      "source_file": "index_071ejd4v.mp4",
+      "source_sha256": "cb9fe03d3989475115e9d9a1455040e918605b6651f664f9157bf47d40bc86a4",
+      "source_size": 106593916
+    },
+    {
+      "video_id": "6a137d2e2909d930b06afd63",
+      "job_id": "e4497c33-7a4",
+      "source_file": "upload_mykn1ood.mp4",
+      "source_sha256": "e8184a376bf11529fa2c854428f31cb020f6c7f8ce6e6228c5828ecf27fe4e87",
+      "source_size": 194618389
+    }
+  ]
+}

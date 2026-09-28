@@ -24,6 +24,7 @@ from utils.video import (
 from utils.downloads import safe_redacted_mp4_filename
 from utils.storage import (
     get_run_dir,
+    safe_filename,
     save_unique_face_snaps,
     save_detection_metadata,
     load_faces_objects_from_disk,
@@ -107,7 +108,8 @@ def cleanup_duplicate_video_id_mappings():
 def download_video_from_hls(hls_url, video_id, filename=None):
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    safe_name = filename or f"input_{video_id}.mp4"
+    # Different indexed videos can share a display filename. Cache by ID.
+    safe_name = f"input_{safe_filename(str(video_id))}.mp4"
     dest = os.path.join(OUTPUT_DIR, safe_name)
     if os.path.isfile(dest) and os.path.getsize(dest) > 0:
         logger.info("Video already downloaded: %s", dest)
@@ -214,67 +216,44 @@ def infer_video_path_for_job(job_id, target_meta=None):
 
 
 def infer_video_path_for_video(video_id, info=None):
+    """Use only an explicit video binding or its exact source filename."""
     if not video_id:
         return None
+
+    # In particular, seeded demo sources live in the image, outside OUTPUT_DIR.
+    job_id = get_exact_job_id_by_video_id(video_id)
+    if job_id:
+        with jobs_lock:
+            source = dict(jobs.get(job_id) or {})
+        manifest = load_job_manifest(job_id) or {}
+        for value in (source.get("video_path"), manifest.get("video_path")):
+            if value and os.path.isfile(value):
+                return value
 
     if info is None:
         try:
             info = twelvelabs_service.get_video_info(video_id)
         except Exception as e:
-            logger.warning("Could not retrieve video info for %s while inferring local path: %s", video_id, e)
-            info = {}
+            logger.warning("Could not retrieve video info for %s while finding its source: %s", video_id, e)
+            return None
 
-    target_meta = info.get("system_metadata") or {}
-    target_filename = str(target_meta.get("filename") or "").strip().lower()
-    target_time = parse_iso_timestamp(info.get("indexed_at")) or parse_iso_timestamp(info.get("created_at"))
-
-    candidates = candidate_source_videos()
-    if not candidates:
+    target_meta = (info or {}).get("system_metadata") or {}
+    target_filename = str(target_meta.get("filename") or "").strip()
+    if not target_filename or os.path.basename(target_filename) != target_filename:
         return None
-
-    target_width = target_meta.get("width")
-    target_height = target_meta.get("height")
-    target_duration = target_meta.get("duration") or target_meta.get("duration_sec")
-
-    best_path = None
-    best_score = float("inf")
-
-    for path in candidates:
-        try:
-            stat = os.stat(path)
-        except OSError:
-            continue
-
-        basename = os.path.basename(path).lower()
-        score = abs(stat.st_mtime - target_time) if target_time is not None else 0.0
-
-        if basename.startswith("index_"):
-            score -= 60.0
-        elif basename.startswith("upload_"):
-            score -= 45.0
-        elif basename.startswith("input_"):
-            score -= 30.0
-
-        if target_filename and basename == target_filename:
-            score -= 240.0
-
-        if target_width or target_height or target_duration:
-            try:
-                meta = get_video_metadata(path)
-                if target_width and meta.get("width"):
-                    score += abs(meta["width"] - target_width) * 1.5
-                if target_height and meta.get("height"):
-                    score += abs(meta["height"] - target_height) * 1.5
-                if target_duration and meta.get("duration_sec"):
-                    score += abs(meta["duration_sec"] - target_duration) * 30.0
-            except Exception:
-                score += 1e6
-
-        if score < best_score:
-            best_score = score
-            best_path = path
-
-    return best_path
+    candidate = os.path.join(OUTPUT_DIR, target_filename)
+    if not os.path.isfile(candidate):
+        return None
+    # Similar dimensions/duration are not enough to identify a different video.
+    # Returning None lets ensure_job_for_video download this video's own HLS.
+    metadata = get_video_metadata(candidate)
+    for field in ("width", "height"):
+        if target_meta.get(field) and metadata.get(field) != target_meta[field]:
+            return None
+    duration = target_meta.get("duration") or target_meta.get("duration_sec")
+    if duration and abs(metadata.get("duration_sec", 0) - duration) > 1.0:
+        return None
+    return candidate
 
 
 def build_manifest(job_id, job=None, overrides=None):
@@ -320,7 +299,11 @@ def load_job_from_disk(job_id):
     if video_path and not os.path.isfile(video_path):
         video_path = None
     if not video_path:
-        video_path = infer_video_path_for_job(job_id, target_meta=target_meta)
+        video_id = (manifest or {}).get("twelvelabs_video_id")
+        video_path = (
+            infer_video_path_for_video(video_id) if video_id
+            else infer_video_path_for_job(job_id, target_meta=target_meta)
+        )
         if video_path:
             manifest = manifest or {"job_id": job_id}
             manifest["video_path"] = video_path

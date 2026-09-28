@@ -11,6 +11,8 @@ from flask_cors import CORS
 
 from config import (
     BASE_DIR,
+    DATA_DIR,
+    DEMO_PRELOAD_ENABLED,
     SNAPS_DIR,
     OUTPUT_DIR,
     SELF_APP_PING_INTERVAL_MINUTES,
@@ -18,6 +20,7 @@ from config import (
     SELF_APP_PING_URL,
 )
 from routes import register_blueprints
+from services.demo_data import seed_demo_data
 
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "pipeline.log")
@@ -106,6 +109,9 @@ def create_app():
 
     os.makedirs(SNAPS_DIR, exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    if DEMO_PRELOAD_ENABLED:
+        seed_demo_data(BASE_DIR, DATA_DIR)
 
     register_blueprints(app)
     start_self_ping_scheduler()

@@ -7,8 +7,8 @@
 **/__pycache__
 **/.cache
 **/logs
-backend/output
-backend/snaps
+backend/output/*
+backend/snaps/*
 backend/uploads
 backend/Ultralytics
 backend/yolov8x.pt
@@ -19,3 +19,20 @@ backend/yolov8x.pt
 frontend/src
 frontend/strand
 frontend/dist
+
+# Only these five catalogued demos ship with the application.
+!backend/snaps/09d32fbb-b8a/
+!backend/snaps/09d32fbb-b8a/**
+!backend/output/index_5gs6v6oe.mp4
+!backend/snaps/37896aa0-e99/
+!backend/snaps/37896aa0-e99/**
+!backend/output/index_fai5_hgh.mp4
+!backend/snaps/39744da4-ed1/
+!backend/snaps/39744da4-ed1/**
+!backend/output/index_sb96j2m4.mp4
+!backend/snaps/42eab7da-2e1/
+!backend/snaps/42eab7da-2e1/**
+!backend/output/index_071ejd4v.mp4
+!backend/snaps/e4497c33-7a4/
+!backend/snaps/e4497c33-7a4/**
+!backend/output/upload_mykn1ood.mp4

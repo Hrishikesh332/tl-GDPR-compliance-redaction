@@ -2,6 +2,7 @@ FROM python:3.11-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    DEMO_PRELOAD_ENABLED=1 \
     PIP_NO_CACHE_DIR=1 \
     INSIGHTFACE_PROVIDERS=CPUExecutionProvider \
     OMP_NUM_THREADS=2 \
@@ -21,6 +22,9 @@ RUN pip install --upgrade pip setuptools wheel \
 
 COPY backend/ ./
 COPY frontend/public/generated-thumbnails/ /app/frontend/public/generated-thumbnails/
+
+# Package the five demo videos and saved detections from their pinned repo revision.
+RUN python scripts/prepare_demo_assets.py
 
 # Resolve LFS pointers and validate model inference before deployment.
 RUN python scripts/prepare_models.py \

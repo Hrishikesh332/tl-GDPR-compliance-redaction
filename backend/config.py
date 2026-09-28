@@ -33,6 +33,7 @@ SELF_APP_PING_TIMEOUT_SEC = env_cast("SELF_APP_PING_TIMEOUT_SEC", 15.0, float)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # Set DATA_DIR to a mounted Railway volume to preserve uploads and job metadata.
 DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR") or BASE_DIR)
+DEMO_PRELOAD_ENABLED = os.environ.get("DEMO_PRELOAD_ENABLED", "").lower() in {"1", "true", "yes"}
 SNAPS_DIR = os.path.join(DATA_DIR, "snaps")
 OUTPUT_DIR = os.path.join(DATA_DIR, "output")
 

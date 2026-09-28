@@ -125,8 +125,9 @@ Set `TWELVELABS_API_KEY`, `TWELVELABS_INDEX_ID`, and, if already available,
 `TWELVELABS_ENTITY_COLLECTION_ID` in Railway variables. Never put secrets in
 the image or repository. Attach a Railway volume at `/data` and set
 `DATA_DIR=/data` so source uploads, snapshots, and persisted job manifests
-survive replacement containers. Existing local runtime artifacts are excluded
-from the image.
+survive replacement containers. The five preloaded demo jobs in `backend/demo/catalog.json` are included in
+the image with their original source videos, saved detections, face thumbnails,
+and tracking data. Other runtime artifacts are excluded.
 
 Gunicorn binds to Railway's `PORT`. Keep one replica and one worker because
 running jobs are held in process memory; eight request threads keep polling
@@ -139,6 +140,21 @@ Generate an HTTPS Railway domain and set the separately hosted frontend's
 `GET /api/indexing/info`, and `GET /api/videos` after deployment. The existing
 API has no user authentication; access control must be added before exposing
 sensitive footage to untrusted users.
+
+## Preloaded demo detections
+
+The production image enables `DEMO_PRELOAD_ENABLED=1`. On startup it copies
+missing, explicitly catalogued demo jobs to `DATA_DIR/snaps`, rebasing source
+video paths for the container. Existing jobs are never overwritten, and a new
+detection run already associated with a demo video takes precedence over a
+seed. The editor loads saved detections immediately; its Detect workflow still
+processes videos without a saved job. The linked courtroom demo has 64 saved
+faces. Each demo is matched by its exact TwelveLabs video ID.
+
+Demo source videos are Git LFS assets. The build resolves them from the pinned
+repository revision and verifies their SHA-256 and size. Updating demo content
+requires updating the catalogue deliberately. Set `DEMO_PRELOAD_ENABLED=0` to
+disable seeding for deployments that should not preload these demos.
 
 ## Workflow
 
