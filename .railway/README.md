@@ -7,7 +7,7 @@ With Node 22 or newer, run from the repository root:
 
 ```sh
 npm ci --prefix .railway
-npx @railway/cli link --project e5a85239-5bdb-48e7-a717-9129c0106340 --environment production --service tl-GDPR-compliance-redaction
+npx @railway/cli link
 npx @railway/cli config plan
 npx @railway/cli config apply
 ```
