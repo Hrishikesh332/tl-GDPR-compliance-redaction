@@ -19,6 +19,15 @@ const ANALYZE_SUGGESTIONS: string[] = [
   'Which faces should be anonymized?',
 ]
 
+function LoadingIndicator({ label, showLabel = true }: { label: string; showLabel?: boolean }) {
+  return (
+    <span role="status" aria-label={label} className="inline-flex items-center gap-2 text-xs text-text-tertiary">
+      <span aria-hidden className="h-4 w-4 shrink-0 rounded-full border-2 border-current/20 border-t-current motion-safe:animate-spin" />
+      {showLabel && <span aria-hidden>{label}</span>}
+    </span>
+  )
+}
+
 const HIGH_PRIVACY_BLUR_INTENSITY = 220
 
 function delay(ms: number): Promise<void> {
@@ -2222,6 +2231,9 @@ export default function VideoEditorPage() {
   const detectionLoadRequestIdRef = useRef(0)
   const readyRedactionJobIdsRef = useRef<Record<string, true>>({})
 
+  const [videoInfoLoading, setVideoInfoLoading] = useState(Boolean(videoId))
+  const [videoBuffering, setVideoBuffering] = useState(false)
+  const [videoPlaybackError, setVideoPlaybackError] = useState<string | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -2239,7 +2251,7 @@ export default function VideoEditorPage() {
   const [apiDetections, setApiDetections] = useState<DetectionItem[]>([])
   const [personLaneIds, setPersonLaneIds] = useState<string[]>([])
   const [faceLaneEntityRangesByPersonId, setFaceLaneEntityRangesByPersonId] = useState<Record<string, DetectionTimeRange[]>>({})
-  const [detectionLoading, setDetectionLoading] = useState(false)
+  const [detectionLoading, setDetectionLoading] = useState(Boolean(videoId))
   const [detectionError, setDetectionError] = useState<string | null>(null)
   const [detectionJobId, setDetectionJobId] = useState<string | null>(null)
   const liveRedactionEnabled = false
@@ -2458,6 +2470,9 @@ export default function VideoEditorPage() {
     detectionLoadRequestIdRef.current += 1
     readyRedactionJobIdsRef.current = {}
     setVideoInfo(null)
+    setVideoInfoLoading(Boolean(videoId))
+    setVideoBuffering(false)
+    setVideoPlaybackError(null)
     setDetectionJobId(null)
     setHasRunDetection(false)
     setApiDetections([])
@@ -2466,7 +2481,7 @@ export default function VideoEditorPage() {
     setPersonLaneIds([])
     setFaceLaneEntityRangesByPersonId({})
     setExcludedFromRedactionIds([])
-    setDetectionLoading(false)
+    setDetectionLoading(Boolean(videoId))
     setDetectionError(null)
     setLiveRedactionDetections([])
     setLiveRedactionLoading(false)
@@ -2535,8 +2550,12 @@ export default function VideoEditorPage() {
   useEffect(() => {
     if (!videoId) return
     let cancelled = false
+    setVideoInfoLoading(true)
     fetch(`${API_BASE}/api/videos/${encodeURIComponent(videoId)}`)
-      .then((res) => (res.ok ? res.json() : null))
+      .then((res) => {
+        if (!res.ok) throw new Error('Could not load video.')
+        return res.json()
+      })
       .then((info: {
         system_metadata?: { filename?: string }
         hls?: { video_url?: string | null; thumbnail_urls?: string[] | string | null; status?: string | null } | null
@@ -2553,9 +2572,17 @@ export default function VideoEditorPage() {
         })
         if (o.about) setSummaryText(o.about)
       })
-      .catch(() => { /* ignore */ })
+      .catch(() => {
+        if (!cancelled) setVideoPlaybackError('Could not load video. Refresh to try again.')
+      })
+      .finally(() => { if (!cancelled) setVideoInfoLoading(false) })
     return () => { cancelled = true }
   }, [videoId])
+
+  useEffect(() => {
+    setVideoBuffering(Boolean(effectiveStreamUrl))
+    setVideoPlaybackError(null)
+  }, [effectiveStreamUrl])
 
   useEffect(() => {
     if (!effectiveStreamUrl || !videoRef.current) return
@@ -2580,6 +2607,8 @@ export default function VideoEditorPage() {
     hls.on(Hls.Events.ERROR, (_, data) => {
       if (data.fatal) {
         console.error('[HLS] Fatal error', data.type, data.details, data.reason ?? '')
+        setVideoBuffering(false)
+        setVideoPlaybackError('Video could not load. Refresh to try again.')
         hls.destroy()
         hlsRef.current = null
         hlsLoadedUrlRef.current = null
@@ -3061,6 +3090,7 @@ export default function VideoEditorPage() {
   }, [isFullscreen, updateVideoViewport])
 
   const runAnalyze = useCallback(async () => {
+    if (analyzeLoading) return
     const prompt = analyzeQuery.trim()
     if (!videoId || !prompt) {
       setAnalyzeError(prompt ? 'Video not loaded.' : 'Enter a question to analyze.')
@@ -3094,7 +3124,7 @@ export default function VideoEditorPage() {
     } finally {
       setAnalyzeLoading(false)
     }
-  }, [videoId, analyzeQuery])
+  }, [videoId, analyzeQuery, analyzeLoading])
 
   const runGenerateSummary = useCallback(async () => {
     if (!videoId) return
@@ -3247,10 +3277,8 @@ export default function VideoEditorPage() {
     const requestId = detectionLoadRequestIdRef.current + 1
     detectionLoadRequestIdRef.current = requestId
 
-    if (interactive) {
-      setDetectionError(null)
-      setDetectionLoading(true)
-    }
+    setDetectionLoading(true)
+    if (interactive) setDetectionError(null)
 
     try {
       const params = new URLSearchParams()
@@ -3300,14 +3328,14 @@ export default function VideoEditorPage() {
         return false
       }
 
-      return loadDetectionItemsForJob(jobId, requestId, interactive)
+      return await loadDetectionItemsForJob(jobId, requestId, interactive)
     } catch (e) {
       if (interactive) {
         clearDetectionResults(e instanceof Error ? e.message : 'Detection request failed', requestId)
       }
       return false
     } finally {
-      if (interactive && detectionLoadRequestIdRef.current === requestId) {
+      if (detectionLoadRequestIdRef.current === requestId) {
         setDetectionLoading(false)
       }
     }
@@ -6174,6 +6202,16 @@ export default function VideoEditorPage() {
                       muted={isMuted}
                       loop={false}
                     onLoadedMetadata={onLoadedMetadata}
+                    onLoadStart={() => { setVideoBuffering(true); setVideoPlaybackError(null) }}
+                    onWaiting={() => setVideoBuffering(true)}
+                    onSeeking={(event) => { if (event.currentTarget.readyState < 3) setVideoBuffering(true) }}
+                    onLoadedData={() => setVideoBuffering(false)}
+                    onCanPlay={() => setVideoBuffering(false)}
+                    onPlaying={() => setVideoBuffering(false)}
+                    onError={() => {
+                      setVideoBuffering(false)
+                      setVideoPlaybackError('Video could not load. Refresh to try again.')
+                    }}
                     onTimeUpdate={onTimeUpdate}
                     onPlay={() => {
                       setIsPlaying(true)
@@ -6186,6 +6224,7 @@ export default function VideoEditorPage() {
                     onSeeked={() => {
                       const video = videoRef.current
                       if (!video) return
+                      if (video.readyState >= 2) setVideoBuffering(false)
                       setCurrentTime(video.currentTime)
                       syncLiveRedactionFrame({ force: true, clearDetections: true, resetTracking: true, time: video.currentTime })
                     }}
@@ -6202,7 +6241,7 @@ export default function VideoEditorPage() {
                       onLoadedMetadata={() => setPreviewVideoReady(true)}
                     />
                   </>
-                ) : (
+                ) : !videoInfoLoading && !videoPlaybackError ? (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 select-none bg-card/60 rounded-xl">
                     <svg className="w-14 h-14 text-text-tertiary" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" aria-hidden>
                       <rect x="2" y="4" width="20" height="16" rx="2" />
@@ -6210,6 +6249,19 @@ export default function VideoEditorPage() {
                     </svg>
                     <p className="text-sm font-medium text-text-primary">No video source</p>
                     <p className="text-xs text-text-secondary">Upload a video from the dashboard</p>
+                  </div>
+                ) : null}
+
+                {((videoInfoLoading && !effectiveStreamUrl) || videoBuffering) && !videoPlaybackError && (
+                  <div className="absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+                    <span className="inline-flex rounded-full bg-brand-charcoal/80 p-3">
+                      <LoadingIndicator label="Loading video" showLabel={false} />
+                    </span>
+                  </div>
+                )}
+                {videoPlaybackError && (
+                  <div role="alert" className="absolute inset-0 z-20 flex items-center justify-center bg-brand-charcoal/80 p-4 text-center text-xs text-text-secondary">
+                    {videoPlaybackError}
                   </div>
                 )}
 
@@ -7024,7 +7076,10 @@ export default function VideoEditorPage() {
                 /* Analyze sidebar — TwelveLabs UI */
                 <>
                   <div className="px-3 h-10 flex items-center justify-between border-b border-border shrink-0">
-                    <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Analyze</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium text-text-tertiary uppercase tracking-wider">Analyze</span>
+                      <span className="text-[10px] text-text-tertiary">Pegasus 1.5</span>
+                    </div>
                     <button type="button" onClick={() => setRightSidebarOpen(false)} className={`h-7 w-7 rounded-md ${btnBase}`} aria-label="Collapse sidebar" title="Collapse sidebar">
                       <IconChevronRight className="w-4 h-4" />
                     </button>
@@ -7095,7 +7150,7 @@ export default function VideoEditorPage() {
                       <div className="rounded-lg border border-border bg-card overflow-hidden">
                         {summaryLoading ? (
                           <div className="px-3 py-2.5">
-                            <p className="text-sm text-text-tertiary">Generating overview…</p>
+                            <LoadingIndicator label="Generating overview…" />
                           </div>
                         ) : (
                           <div className="px-3 py-2.5 space-y-2">
@@ -7118,7 +7173,7 @@ export default function VideoEditorPage() {
                   <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
                     <div className="flex-1 overflow-y-auto p-3 space-y-3">
                       {analyzeMessages.length === 0 && !analyzeLoading && (
-                        <p className="text-sm text-text-tertiary">Ask a question about this video below.</p>
+                        <p className="text-sm text-text-tertiary">Ask anything about this video, or describe what you want to analyze.</p>
                       )}
                       {analyzeMessages.map((msg) => (
                         <div key={msg.id} className={msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'}>
@@ -7142,7 +7197,7 @@ export default function VideoEditorPage() {
                       {analyzeLoading && (
                         <div className="flex justify-start">
                           <div className="rounded-lg px-3 py-2 bg-card border border-border text-text-tertiary text-sm">
-                            Analyzing…
+                            <LoadingIndicator label="Analyzing…" />
                           </div>
                         </div>
                       )}
@@ -7437,7 +7492,7 @@ export default function VideoEditorPage() {
                           disabled={!videoId || pegasusLoading}
                           className="h-9 flex-1 rounded-md border border-accent bg-accent px-3 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
                         >
-                          {pegasusLoading ? 'Analyzing...' : pegasusResult ? 'Re-run Meta Insights' : 'Run Meta Insights'}
+                          {pegasusLoading ? <LoadingIndicator label="Analyzing…" /> : pegasusResult ? 'Re-run Meta Insights' : 'Run Meta Insights'}
                         </button>
                       </div>
 
@@ -7818,17 +7873,22 @@ export default function VideoEditorPage() {
                   {detectionError && (
                     <p className="text-xs text-error text-center">{detectionError}</p>
                   )}
-                  <button
-                    type="button"
-                    onClick={runDetect}
-                    disabled={detectionLoading}
-                    className="px-6 py-3 rounded-lg text-sm font-medium bg-accent text-white border border-accent hover:opacity-90 transition-opacity focus:outline-none focus:ring-2 focus:ring-accent/30 focus:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed"
-                  >
-                    {detectionLoading ? 'Loading…' : 'Detect'}
-                  </button>
-                  <p className="text-[10px] text-text-tertiary text-center max-w-[180px]">
-                    Loads the saved faces for this video. Selection preview can still run from saved detection data.
-                  </p>
+                  {detectionLoading ? (
+                    <LoadingIndicator label="Loading detections…" />
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={runDetect}
+                        className="px-3 py-2 rounded-md text-xs font-medium bg-card text-text-secondary border border-border hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/30"
+                      >
+                        Run detection
+                      </button>
+                      <p className="text-[10px] text-text-tertiary text-center max-w-[180px]">
+                        No saved detections yet. Run detection to find faces in this video.
+                      </p>
+                    </>
+                  )}
                 </div>
                 </div>
               )}

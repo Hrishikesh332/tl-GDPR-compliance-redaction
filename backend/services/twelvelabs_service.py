@@ -664,16 +664,27 @@ def find_person_time_ranges(video_id, person_description):
 
 
 def analyze_video_custom(video_id, prompt):
-    client = get_client()
-    logger.info("Custom analysis on video %s", video_id)
-    enhanced_prompt = f"{ANALYZE_FORMAT_INSTRUCTION}\n\n{prompt}"
-    result = client.analyze(
-        video_id=video_id,
-        prompt=enhanced_prompt,
-        temperature=0.2,
-        request_options={"timeout_in_seconds": TWELVELABS_ANALYZE_TIMEOUT_SEC},
+    logger.info("Pegasus 1.5 custom analysis on video %s", video_id)
+    # Indexed video IDs are not asset IDs. Use this video's original HLS source.
+    info = get_video_info(video_id)
+    source_url = (info.get("hls") or {}).get("video_url")
+    if not source_url:
+        raise ValueError("This video's stream is not ready for analysis. Try again when playback is available.")
+    result = twelvelabs_api_request(
+        "POST",
+        "analyze",
+        json_body={
+            "model_name": "pegasus1.5",
+            "video": {"type": "url", "url": source_url},
+            "prompt": f"{ANALYZE_FORMAT_INSTRUCTION}\n\n{prompt}",
+            "temperature": 0.2,
+            "stream": False,
+        },
+        timeout=TWELVELABS_ANALYZE_TIMEOUT_SEC,
     )
-    return {"data": result.data, "id": result.id}
+    if not isinstance(result, dict) or not isinstance(result.get("data"), str) or not result["data"].strip():
+        raise RuntimeError("Pegasus 1.5 returned no analysis. Please try again.")
+    return {"data": result["data"], "id": result.get("id"), "model_name": "pegasus1.5"}
 
 
 def index_video_from_file(video_path, index_id=None, enable_stream=True):
