@@ -20,9 +20,28 @@ class CustomAnalysisTests(unittest.TestCase):
         self.assertEqual(result['data'], '**00:12** The scene changes.')
         self.assertEqual(result['model_name'], 'pegasus1.5')
 
+    def test_source_asset_is_preferred_over_hls_and_indexed_video_id(self):
+        info = {'asset_id': 'source-asset-456', 'hls': {'video_url': 'https://example.test/stream.m3u8'}}
+        with patch.object(service, 'get_video_info', return_value=info), patch.object(service, 'twelvelabs_api_request', return_value={'data': 'A video answer.'}) as api:
+            service.analyze_video_custom('indexed-video-123', 'What happens?')
+        self.assertEqual(api.call_args.kwargs['json_body']['video'], {'type': 'asset_id', 'asset_id': 'source-asset-456'})
+
+    def test_video_info_preserves_source_asset_from_sdk(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        client = Mock()
+        client.indexes.videos.retrieve.return_value = SimpleNamespace(
+            id='indexed-video-123', asset_id='source-asset-456', system_metadata=None,
+            user_metadata={}, hls=None, created_at=None, updated_at=None, indexed_at=None,
+        )
+        with patch.object(service, 'get_client', return_value=client):
+            info = service.get_video_info('indexed-video-123', index_id='index-123')
+        self.assertEqual(info['asset_id'], 'source-asset-456')
+        self.assertEqual(info['video_id'], 'indexed-video-123')
+
     def test_missing_stream_does_not_submit_an_unrelated_asset(self):
         with patch.object(service, 'get_video_info', return_value={'hls': None}), patch.object(service, 'twelvelabs_api_request') as api:
-            with self.assertRaisesRegex(ValueError, 'stream is not ready'):
+            with self.assertRaisesRegex(ValueError, 'source is not ready'):
                 service.analyze_video_custom('indexed-video-123', 'Describe this video')
         api.assert_not_called()
 

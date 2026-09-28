@@ -665,17 +665,22 @@ def find_person_time_ranges(video_id, person_description):
 
 def analyze_video_custom(video_id, prompt):
     logger.info("Pegasus 1.5 custom analysis on video %s", video_id)
-    # Indexed video IDs are not asset IDs. Use this video's original HLS source.
+    # Resolve the underlying asset; an indexed video ID is a different identifier.
     info = get_video_info(video_id)
+    asset_id = info.get("asset_id")
     source_url = (info.get("hls") or {}).get("video_url")
-    if not source_url:
-        raise ValueError("This video's stream is not ready for analysis. Try again when playback is available.")
+    if asset_id:
+        video_source = {"type": "asset_id", "asset_id": asset_id}
+    elif source_url:
+        video_source = {"type": "url", "url": source_url}
+    else:
+        raise ValueError("This video's source is not ready for analysis. Try again when playback is available.")
     result = twelvelabs_api_request(
         "POST",
         "analyze",
         json_body={
             "model_name": "pegasus1.5",
-            "video": {"type": "url", "url": source_url},
+            "video": video_source,
             "prompt": f"{ANALYZE_FORMAT_INSTRUCTION}\n\n{prompt}",
             "temperature": 0.2,
             "stream": False,
@@ -884,6 +889,7 @@ def get_video_info(video_id, index_id=None):
     video = client.indexes.videos.retrieve(index_id=idx, video_id=video_id)
     return {
         "video_id": video.id,
+        "asset_id": get_value(video, "asset_id"),
         "system_metadata": serialize_video_system_metadata(video.system_metadata),
         "user_metadata": video.user_metadata,
         "hls": serialize_hls_info(video.hls),
